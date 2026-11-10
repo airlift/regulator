@@ -464,8 +464,11 @@ public final class RegexpMatcher
                     regionStart,
                     regionEnd,
                     regionStart + nextFindStart);
+            while (Dfa.isQuitCandidate(candidateBoundary)) {
+                candidateBoundary = settleQuitCandidate(Dfa.quitCandidateStart(candidateBoundary));
+            }
             if (candidateBoundary >= 0) {
-                // A completed DFA search ends the streak, as in CompiledPattern.
+                // A completed cursor search, or a match settled at a quit candidate, ends the streak.
                 dfaQuitStreak = 0;
                 groups[0] = (int) (candidateBoundary >>> 32);
                 groups[1] = (int) candidateBoundary;
@@ -567,6 +570,28 @@ public final class RegexpMatcher
 
         setMatchAndAdvance(groups[0], groups[1]);
         return true;
+    }
+
+    /// Settles `candidate`, the region-relative start of the candidate whose check quit in the
+    /// candidate cursor's last search, and returns the cursor's result from there: the match
+    /// starting at the candidate, or the cursor's search from the byte after it. Every start
+    /// before the candidate holds no match, so this find's other routes search from the candidate
+    /// on, and from the byte after it once it is settled. The match is found on the engines that
+    /// decode the text, over at most the bytes the longest match spans, which the cursor charges
+    /// to its work budget; where the budget cannot cover them, the cursor falls back. A settled
+    /// quit does not count toward the quit streak, and a settled match ends it.
+    private long settleQuitCandidate(int candidate)
+    {
+        nextFindStart = candidate;
+        int windowEnd = (int) Math.min(regionLength(), (long) candidate + pattern.maximumMatchLength());
+        if (!candidateStartCursor.chargeQuitCandidate(windowEnd - candidate)) {
+            return Dfa.CANDIDATE_SEARCH_FALLBACK;
+        }
+        if (pattern.matchQuitCandidateInto(input, regionStart, regionEnd, regionStart + candidate, regionStart + windowEnd, groups, this)) {
+            return ((long) groups[0] << 32) | groups[1];
+        }
+        nextFindStart = candidate + 1;
+        return Dfa.searchCandidateBoundary(candidateStartCursor, input, regionStart, regionEnd, regionStart + nextFindStart);
     }
 
     /// Whether the rest of the region, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
@@ -937,6 +962,11 @@ public final class RegexpMatcher
     boolean candidateStartCursorSearchesFoldedStartRunForDiagnostics()
     {
         return candidateStartCursor != null && candidateStartCursor.searchesFoldedStartRun();
+    }
+
+    boolean candidateStartCursorReportsQuitCandidatesForDiagnostics()
+    {
+        return candidateStartCursor != null && candidateStartCursor.reportsQuitCandidates();
     }
 
     boolean groupZeroForwardCursorEnabledForDiagnostics()

@@ -4798,15 +4798,44 @@ start, so a leading line or word assertion is judged as a search that read
 every byte would judge it.
 This route skips the start-scan productivity check, leaves windows shorter than
 64 bytes to the matcher's other routes, and shares the general route's limits
-and fallbacks. It follows the matcher's DFA quit streak for
-word assertions that quit outside ASCII: a quit counts once and falls back
-without starting the DFA again, a verified match or a proven no-match ends the
-streak, and a matcher at the limit skips the cursor too. Assertions the DFA does
-not run, such as Java's multiline `^` outside `UNIX_LINES` mode and Trino's
-final-line `$`, use the same literal in the group-zero NFA's skip when no
-thread is live. Compilation reserves the literal's retained memory from the
-forward DFA budget and drops the literal if the reservation would prevent DFA
-initialization.
+and fallbacks. Assertions the DFA does not run, such as Java's multiline `^`
+outside `UNIX_LINES` mode and Trino's final-line `$`, use the same literal in
+the group-zero NFA's skip when no thread is live. Compilation reserves the
+literal's retained memory from the forward DFA budget and drops the literal if
+the reservation would prevent DFA initialization.
+
+A word assertion that decodes characters quits the DFA next to a byte outside
+ASCII, so a check of an occurrence there quits. Where the pattern's matches have
+a longest length, the matcher settles that one occurrence without the DFA and
+the cursor resumes at the byte after it when it holds no match. Every earlier
+occurrence this find checked holds no match, and occurrences are checked in
+order, so a match at it is the leftmost-first match. The matcher runs the
+program anchored at the occurrence on OnePass, BitState, or the NFA, over the
+longest match's bytes, with the whole region as assertion context. It charges
+those bytes to the cursor's work budget, and a budget that cannot cover them
+falls back for the rest of the reset as an exhausted budget does. A word
+assertion in a settle also reads the context beside its position: one code point
+a side, except that Java's `\b` walks back over a run of nonspacing marks to
+their base. That walk runs only at a run's last mark, so a settle inside a run
+walks nothing, and only a settle whose window reaches a run's end walks it.
+Several overlapping settles can walk the same run, but the longest match bounds
+how many, so a reset's work stays linear. A settled quit does not count toward
+the quit streak. The cursor's ordinary literal loop cannot report which
+occurrence quit, so the first quit after a reset repeats that search, with its
+work refunded to the budget, in a sibling loop that reports it, and the cursor
+keeps that loop until the next reset; a matcher whose text never quits never
+runs it. A cursor that scans for a folded start run keeps the quit streak, since
+the run's search is a separate candidate loop and settling there is unmeasured.
+Without the settling, one byte outside ASCII next to an occurrence sent the rest
+of the find to the NFA: a count of `\bgot(?i)syou` over 899 KB of English with
+one `É` before an early occurrence took 364 to 628 times as long as its ASCII
+twin in Rust, Java, and Trino on Graviton and Intel.
+
+Where matches have no longest length, as in `\bfoo\w*`, no window bounds a
+settle, so a quit there still sends the rest of the find to the other routes,
+and the cursor follows the matcher's DFA quit streak instead: a quit counts once
+and falls back without starting the DFA again, a verified match or a proven
+no-match ends the streak, and a matcher at the limit skips the cursor too.
 
 The implementation uses the existing DFA reader and exclusive-cache mutation
 protocol. Cached object transitions still require recovering the authoritative

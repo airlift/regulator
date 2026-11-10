@@ -1172,20 +1172,28 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   described by Hyperscan for lowering a final-line `$`
   ([ComponentBoundary.cpp][hs-boundary], [buildstate.cpp][hs-buildstate]).
   Regulator: quitting only from states that need an assertion, Java and Trino
-  word characters on the DFA, the four-quit streak, and the separate lowered
-  program with its group-zero conditions ([#64], [#76],
-  [design][d-trino-assertions]).
+  word characters on the DFA, the four-quit streak, settling the one literal
+  occurrence whose check quit and resuming the cursor after it, and the
+  separate lowered program with its group-zero conditions ([#64], [#76],
+  [#242], [design][d-trino-assertions]).
 - **Where:** `Dfa.DfaInstance.computeTransition`, `Dfa.DfaInstance.quits`,
   `Dfa.dfaEmptyFlags`, `Dfa.DfaInstance.startFlags`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
+  `RegexpMatcher.settleQuitCandidate`,
+  `CompiledPattern.matchQuitCandidateInto`,
+  `Dfa.searchLiteralCandidateBoundaryReportingQuits`,
   `BooleanRegexpLowering.lowerTerminalFinalLineEnds`,
   `CompiledPattern.compileLoweredBooleanProgram`
 - **Applies when:** Rust Unicode `\b` and `\B`; Java and Trino `\b` and `\B`;
   Trino final-line `$`, and Java `$` under `UNIX_LINES` (`(?d)`), with
   group-zero bounds only when the expression is nonempty and cannot consume
   LF. After 4 DFA quits in a row, a matcher skips the DFA for the rest of its
-  input. A transition that must quit throws before taking the lock and is
-  never stored, so other readers never see a quit state
+  input. A quit is settled only in a pattern whose matches have a longest
+  length, by a cursor that searches the literal itself, and a settle the
+  cursor's work budget cannot cover falls back; a pattern with no longest
+  match, such as `\bfoo\w*`, and a cursor that scans for a folded start run
+  keep the streak. A transition that must quit throws before taking the lock and is never
+  stored, so other readers never see a quit state
 - **What it does:** In a program whose word boundaries decode characters, the
   DFA quits only when a state that needs any assertion meets a non-ASCII byte
   before or after it. Elsewhere ASCII decides the boundary through RE2's state
@@ -1196,7 +1204,12 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   the program with the text-dependent assertion. Rust rows with Unicode `\b`
   or CRLF anchors, once they run on the DFA and OnePass, are 4.7 to 125 times
   faster ([#64]), and Java and Trino Sherlock `word-ending-n` run in 0.044 to
-  0.056 of their earlier time ([#76]).
+  0.056 of their earlier time ([#76]). Where a candidate cursor's check of a
+  literal occurrence quits, the matcher settles that occurrence alone on the
+  decoding engines and the cursor resumes after it, so one `É` beside an
+  early occurrence no longer sends a count of `\bgot(?i)syou` over 899 KB of
+  English to the NFA: it now runs at 0.0016 to 0.0027 of its earlier time on
+  Graviton and Intel, in Rust, Java, and Trino ([#242]).
 
 ### Thrashing DFA skipped across calls
 
@@ -2399,6 +2412,7 @@ change is described.
 [#232]: https://github.com/airlift/regulator/pull/232
 [#235]: https://github.com/airlift/regulator/pull/235
 [#241]: https://github.com/airlift/regulator/pull/241
+[#242]: https://github.com/airlift/regulator/pull/242
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor

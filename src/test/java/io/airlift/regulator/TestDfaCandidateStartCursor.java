@@ -21,7 +21,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,6 +38,9 @@ public class TestDfaCandidateStartCursor
     // Longer than the literal cursor's minimum window, with words, spaces, and punctuation.
     private static final String FILLER_UNIT = "filler text, ";
     private static final String FILLER = FILLER_UNIT.repeat(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES / FILLER_UNIT.length() + 1);
+    // Languages whose word boundaries decode characters, so their DFA quits next to a byte outside
+    // ASCII. Java runs with Unicode case and character classes.
+    private static final List<String> QUITTING_LANGUAGES = List.of("Java", "Trino", "Rust");
 
     @Test
     public void testCandidateCursorReturnsBoundariesWithoutReverseProgram()
@@ -519,6 +524,175 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
+    public void testLiteralCandidateCursorSettlesQuitCandidates()
+    {
+        // A word boundary that decodes characters quits the DFA next to a byte outside ASCII: here
+        // at the literal's first occurrence, after a letter, a curly quote, and malformed UTF-8.
+        // The matcher settles that one candidate without the DFA, matched or not, and the cursor
+        // resumes after it, so the cursor's DFA finds every later match, nothing falls back, and
+        // no quit counts toward the streak. The count, a region, find(int), and a Slice past its
+        // array's first byte agree with a matcher without the cursor.
+        String expression = "\\bgot(?i)syou";
+        String rest = "gotsyou, gotSYOU and gotsyou " + FILLER;
+        List<byte[]> neighbors = List.of("É".getBytes(UTF_8), "“".getBytes(UTF_8), new byte[] {(byte) 0xC3}, new byte[] {(byte) 0x89}, new byte[] {(byte) 0xFF});
+        for (String language : QUITTING_LANGUAGES) {
+            CompiledPattern pattern = compile(language, expression);
+            CompiledPattern controlPattern = compile(language, "(" + expression + ")");
+            for (byte[] neighbor : neighbors) {
+                Slice input = concatenate("fo".getBytes(UTF_8), neighbor, rest.getBytes(UTF_8));
+                String description = language + " after " + HexFormat.of().formatHex(neighbor);
+                RegexpMatcher control = controlPattern.matcher(input);
+                assertThat(control.candidateStartCursorEnabledForDiagnostics()).as(description).isFalse();
+                List<Boundary> expected = boundaries(control);
+                RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+
+                assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).as(description).isTrue();
+                assertThat(boundaries(matcher)).as(description).isEqualTo(expected);
+                // A match settled at a quit candidate is not a cursor route.
+                assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(2);
+                assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isZero();
+                assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isTrue();
+                assertThat(matcher.dfaQuitStreak()).as(description).isZero();
+                assertThat(pattern.count(input)).as(description).isEqualTo(expected.size());
+
+                assertThat(matcher.find(1)).as(description).isEqualTo(control.find(1));
+                assertThat(matcher.start()).as(description).isEqualTo(control.start());
+                assertThat(matcher.end()).as(description).isEqualTo(control.end());
+
+                // The region keeps more than the cursor's minimum window past the first candidate.
+                // Rust searches a partial region with the text around it as context, without the
+                // cursor, so its region checks only the matches.
+                int regionStart = 1;
+                int regionEnd = input.length() - 1;
+                matcher.reset(input, regionStart, regionEnd);
+                assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isFalse();
+                control.reset(input, regionStart, regionEnd);
+                long routesBeforeRegion = matcher.candidateStartRouteCountForDiagnostics();
+                assertThat(boundaries(matcher)).as(description).isEqualTo(boundaries(control));
+                if (!language.equals("Rust")) {
+                    assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isTrue();
+                    assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isGreaterThan(routesBeforeRegion);
+                }
+
+                byte[] padded = concatenate("xyz".getBytes(UTF_8), input.getBytes()).getBytes();
+                Slice offsetInput = Slices.wrappedBuffer(padded, 3, input.length());
+                assertThat(boundaries(pattern.groupZeroMatcher(offsetInput, null))).as(description).isEqualTo(expected);
+            }
+        }
+    }
+
+    @Test
+    public void testLiteralCandidateCursorSettlesQuitCandidateExactly()
+    {
+        // Each input's first find meets a candidate whose check quits next to a byte outside
+        // ASCII, which the matcher settles. Each find agrees with a matcher without the cursor,
+        // the cursor's fallback count stays zero, and no quit counts toward the streak.
+        String sherlock = "zqx cat, Ézqx Sherlock, “";
+        int quotedCandidateStart = sherlock.getBytes(UTF_8).length;
+        List<QuitCandidateCase> cases = List.of(
+                // The first occurrence fails its suffix. The second quits and fails its word
+                // boundary. The quoted occurrence quits and matches the shorter `Sherlock`
+                // alternative.
+                new QuitCandidateCase(
+                        "\\bzqx (?i)(?:Sherlock|Sherlock Holmes)",
+                        sherlock + "zqx SHERLOCK Holmes, zqx sherlock holmes " + FILLER,
+                        Optional.of(new Boundary(quotedCandidateStart, quotedCandidateStart + "zqx SHERLOCK".length()))),
+                // Matches that span the most bytes a match can, so the settle reads every one. The
+                // long s and the Kelvin sign are the longest folds of s and k.
+                new QuitCandidateCase("\\bab[a-z]{0,3}", "“abxyz " + FILLER, Optional.of(new Boundary(3, 8))),
+                new QuitCandidateCase("\\bgot(?i)syou", "“gotſyou " + FILLER, Optional.of(new Boundary(3, 11))),
+                new QuitCandidateCase("\\bab(?i)sk", "“abſ\u212A " + FILLER, Optional.of(new Boundary(3, 10))),
+                // The text ends inside the longest match's bytes after the candidate, so the
+                // settle reads only to its end.
+                new QuitCandidateCase("\\bgot(?i)syou", FILLER + "“gotsyo", Optional.empty()),
+                // The byte after the settled bytes rules out a match at the first candidate.
+                new QuitCandidateCase("\\bab\\b", "“abc ab " + FILLER, Optional.of(new Boundary(7, 9))),
+                // The literal occurs again at the byte after the settled candidate.
+                new QuitCandidateCase("\\Baa[bc]", "éaaab " + FILLER, Optional.of(new Boundary(3, 6))),
+                // Five candidates settle without a match, and the window after the last is too
+                // short for the cursor, so no completed cursor search resets the streak afterward;
+                // a settle that counted toward the streak would leave it nonzero.
+                new QuitCandidateCase("\\bab(?i)k\\b", "“abc ".repeat(4) + FILLER_UNIT.repeat(4) + "“abc " + FILLER_UNIT + "filler", Optional.empty()));
+        for (QuitCandidateCase quitCase : cases) {
+            Slice input = utf8(quitCase.input());
+            for (String language : QUITTING_LANGUAGES) {
+                String description = language + " " + quitCase.expression() + " on " + quitCase.input();
+                RegexpMatcher matcher = compile(language, quitCase.expression()).groupZeroMatcher(input, null);
+                List<Boundary> expected = ordinaryBoundaries(language, quitCase.expression(), input);
+
+                assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).as(description).isTrue();
+                assertThat(expected.stream().findFirst()).as(description).isEqualTo(quitCase.firstMatch());
+                assertThat(boundaries(matcher)).as(description).isEqualTo(expected);
+                assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isZero();
+                assertThat(matcher.dfaQuitStreak()).as(description).isZero();
+                assertThat(matcher.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isFalse();
+                assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isTrue();
+            }
+        }
+
+        // A cursor that scans for a folded start run settles no quit: each start after `é` that
+        // holds the literal quits and falls back, and counts toward the streak.
+        String runExpression = "\\bthe (?i)Sherlock Holmes";
+        Slice runInput = utf8("éthe Sherlock Holmes, the Sherlock Holmes. ".repeat(3) + FILLER);
+        for (String language : QUITTING_LANGUAGES) {
+            String description = language + " " + runExpression;
+            CompiledPattern pattern = compile(language, runExpression);
+            RegexpMatcher matcher = pattern.groupZeroMatcher(runInput, null);
+            List<Boundary> expected = ordinaryBoundaries(language, runExpression, runInput);
+
+            assertThat(matcher.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isTrue();
+            assertThat(boundaries(matcher)).as(description).hasSize(3).isEqualTo(expected);
+            assertThat(pattern.count(runInput)).as(description).isEqualTo(expected.size());
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(3);
+            assertThat(matcher.dfaQuitStreak()).as(description).isEqualTo(3);
+            assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isFalse();
+        }
+    }
+
+    @Test
+    public void testLiteralCandidateCursorBoundsQuitCandidateWork()
+    {
+        // Each quit candidate is settled over at most the bytes the longest match spans, which the
+        // cursor charges to its work budget. Here every candidate follows a curly quote, so each
+        // find settles one and matches there; each match consumes three bytes, but each settle is
+        // charged the much longer maximum match length. The budget runs out before the candidates
+        // do, and the cursor falls back for the rest of the input, whose matches are the same.
+        String expression = "\\bab[^\\n]{0,300}?X";
+        Slice input = utf8("“abX ".repeat(1_000) + FILLER);
+        for (String language : QUITTING_LANGUAGES) {
+            CompiledPattern pattern = compile(language, expression);
+            RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+            int window = pattern.maximumMatchLength();
+            List<Boundary> found = new ArrayList<>();
+            int settledFinds = -1;
+            while (matcher.find()) {
+                if (settledFinds < 0 && !matcher.candidateStartCursorEnabledForDiagnostics()) {
+                    settledFinds = found.size();
+                }
+                found.add(new Boundary(matcher.start(), matcher.end()));
+            }
+
+            assertThat(window).as(language).isGreaterThan(300);
+            assertThat(found).as(language).isEqualTo(ordinaryBoundaries(language, expression, input));
+            assertThat(settledFinds).as(language).isPositive().isLessThan(found.size());
+            assertThat((long) settledFinds * window).as(language).isLessThanOrEqualTo(3L * input.length());
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(language).isEqualTo(1);
+        }
+
+        // The first quit after a reset repeats its search in the loop that reports quits, and the
+        // work of the search that quit is refunded. Here that search checks every candidate before
+        // the quoted one, each over the longest match's bytes, so it spends most of the budget:
+        // charged twice, it would exhaust the budget and the cursor would fall back.
+        Slice costlyInput = utf8(("ab" + "y".repeat(120) + "\n").repeat(400) + "“abX " + FILLER);
+        for (String language : QUITTING_LANGUAGES) {
+            RegexpMatcher matcher = compile(language, expression).groupZeroMatcher(costlyInput, null);
+
+            assertThat(boundaries(matcher)).as(language).isEqualTo(ordinaryBoundaries(language, expression, costlyInput));
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(language).isZero();
+        }
+    }
+
+    @Test
     public void testIneligiblePatternsUseExistingMatcher()
     {
         assertThat(compile("a*").groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).isFalse();
@@ -712,6 +886,34 @@ public class TestDfaCandidateStartCursor
         return boundaries(control);
     }
 
+    // A capturing matcher of the language takes the ordinary path rather than the candidate cursor.
+    private static List<Boundary> ordinaryBoundaries(String language, String expression, Slice input)
+    {
+        RegexpMatcher control = compile(language, "(" + expression + ")").matcher(input);
+        assertThat(control.candidateStartCursorEnabledForDiagnostics()).isFalse();
+        return boundaries(control);
+    }
+
+    private static CompiledPattern compile(String language, String expression)
+    {
+        Slice pattern = utf8(expression);
+        return switch (language) {
+            case "Java" -> JavaRegexp.compile(pattern, JavaRegexp.Options.defaults().setUnicodeCase(true).setUnicodeCharacterClasses(true));
+            case "Trino" -> TrinoRegexp.compile(pattern).re2();
+            case "Rust" -> RustRegexp.compile(pattern);
+            default -> throw new IllegalArgumentException(language);
+        };
+    }
+
+    private static Slice concatenate(byte[]... parts)
+    {
+        DynamicSliceOutput output = new DynamicSliceOutput(64);
+        for (byte[] part : parts) {
+            output.appendBytes(part);
+        }
+        return output.slice();
+    }
+
     private static List<Boundary> shifted(List<Boundary> boundaries, int offset)
     {
         return boundaries.stream().map(boundary -> new Boundary(boundary.start() + offset, boundary.end() + offset)).toList();
@@ -771,4 +973,6 @@ public class TestDfaCandidateStartCursor
     private record RunCursorCase(String text, int routes, int fallbacks) {}
 
     private record RunFindCase(String language, String expression, String text, int from, Boundary expected, int routes, int fallbacks) {}
+
+    private record QuitCandidateCase(String expression, String input, Optional<Boundary> firstMatch) {}
 }

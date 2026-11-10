@@ -183,8 +183,13 @@ final class Dfa
     static final long CANDIDATE_SEARCH_FALLBACK = Long.MIN_VALUE + 1;
     // A candidate search the text stopped: the DFA quit on a byte outside ASCII. The search falls
     // back as for CANDIDATE_SEARCH_FALLBACK, but the cursor always stays enabled, and the quit
-    // counts toward the matcher's quit streak.
+    // counts toward the matcher's quit streak. A cursor whose caller settles quit candidates
+    // reports the candidate instead; see isQuitCandidate.
     static final long CANDIDATE_SEARCH_QUIT = Long.MIN_VALUE + 2;
+    // A candidate search in reporting mode that stops where a candidate's check quit returns -2
+    // minus the candidate's context-relative start, below SEARCH_NO_MATCH and above the
+    // sentinels; see isQuitCandidate.
+    private static final long QUIT_CANDIDATE_RESULT_BASE = -2;
     private static final long COUNT_SCAN_REJECTED_MATCH_FLAG = 1L << Integer.SIZE;
     private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
@@ -1238,7 +1243,11 @@ final class Dfa
     /// `foldedStartRun` behind the literal, which the pattern keeps, the cursor scans for the run
     /// instead, and its candidates are the starts each occurrence of the run allows that hold the
     /// literal.
-    static CandidateStartCursor createLiteralCandidateStartCursor(Prog prog, Prog.FoldedStartRun foldedStartRun)
+    ///
+    /// @param settlesQuitCandidates whether the caller settles a candidate whose check quits,
+    ///         so that a search reports that candidate; see [#isQuitCandidate(long)]. A cursor
+    ///         with a folded start run never reports one and keeps the quit streak.
+    static CandidateStartCursor createLiteralCandidateStartCursor(Prog prog, Prog.FoldedStartRun foldedStartRun, boolean settlesQuitCandidates)
     {
         requireNonNull(prog, "prog is null");
         byte[] literal = prog.transparentStartLiteral();
@@ -1249,7 +1258,22 @@ final class Dfa
         if (dfa == null || !dfa.ok()) {
             return null;
         }
-        return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch(), foldedStartRun);
+        return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch(), foldedStartRun, dfa.quitsOnNonAscii && settlesQuitCandidates && foldedStartRun == null);
+    }
+
+    /// Whether a candidate search's result reports a quit candidate: the search stopped where the
+    /// check of one candidate quit, and every candidate this search checked before it holds no
+    /// match. The caller settles that one without the DFA and, when it holds no match, searches
+    /// again from the byte after it.
+    static boolean isQuitCandidate(long result)
+    {
+        return result <= QUIT_CANDIDATE_RESULT_BASE && result >= QUIT_CANDIDATE_RESULT_BASE - Integer.MAX_VALUE;
+    }
+
+    /// The context-relative start of the quit candidate a candidate search's result reports.
+    static int quitCandidateStart(long result)
+    {
+        return (int) (QUIT_CANDIDATE_RESULT_BASE - result);
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: this cursor amortizes per-search setup and
@@ -1288,6 +1312,7 @@ final class Dfa
             return CANDIDATE_SEARCH_FALLBACK;
         }
 
+        long workBeforeSearch = cursor.remainingWork;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -1302,15 +1327,20 @@ final class Dfa
                 continue;
             }
             try {
+                // Each search runs one loop; a cursor with a folded start run never settles quits,
+                // so it never reports them and the folded-run check comes first.
                 long result;
                 if (!searchesLiteral) {
                     result = searchCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
                 }
-                else if (cursor.foldedStartRun == null) {
-                    result = searchLiteralCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                else if (cursor.foldedStartRun != null) {
+                    result = searchFoldedRunCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                }
+                else if (cursor.reportsQuitCandidates) {
+                    result = searchLiteralCandidateBoundaryReportingQuits(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
                 }
                 else {
-                    result = searchFoldedRunCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                    result = searchLiteralCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
                 }
                 if (result == CANDIDATE_SEARCH_FALLBACK) {
                     cursor.disabled = true;
@@ -1327,7 +1357,16 @@ final class Dfa
                 return CANDIDATE_SEARCH_FALLBACK;
             }
             catch (QuitSearchException ignored) {
-                // The text, not the cache, stopped the DFA, so the cursor stays enabled.
+                // The text, not the cache, stopped the DFA, so the cursor stays enabled. A cursor
+                // that can report the candidate whose check quit searches again from the same
+                // start in the loop that reports it, and keeps that loop until the next reset,
+                // since text that quits one check usually quits a later one. The work of the
+                // search that quit is refunded to the work budget, as the second search repeats it.
+                if (cursor.settlesQuitCandidates && !cursor.reportsQuitCandidates) {
+                    cursor.reportsQuitCandidates = true;
+                    cursor.remainingWork = workBeforeSearch;
+                    continue;
+                }
                 cursor.fallbackCount++;
                 return CANDIDATE_SEARCH_QUIT;
             }
@@ -1497,6 +1536,58 @@ final class Dfa
             }
             nextStart = Math.max(nextStart, lastStart + 1);
             scanBegin = found + 1;
+        }
+        return SEARCH_NO_MATCH;
+    }
+
+    // The sibling of the literal loop above for a cursor whose check of a candidate has quit since
+    // the last reset. A check that quits reports its candidate instead of ending the search, so
+    // the caller can settle that one candidate without the DFA and search again after it. Kept
+    // apart so that the loop above gains no exception handler, and a cursor whose checks never
+    // quit never runs this one.
+    private static long searchLiteralCandidateBoundaryReportingQuits(
+            CandidateStartCursor cursor,
+            CacheTables tables,
+            byte[] bytes,
+            int contextBegin,
+            int contextEnd,
+            int searchBegin)
+    {
+        int scanBegin = searchBegin;
+        while (scanBegin < contextEnd) {
+            int scanLength = cursor.workBoundedScanLength(contextEnd - scanBegin);
+            if (scanLength == 0) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            int candidate = Prog.findLiteral(bytes, scanBegin, scanLength, cursor.literal, cursor.literalSearch);
+            int scanEnd = candidate < 0 ? scanBegin + scanLength : candidate + 1;
+            if (!cursor.consumeWork(scanEnd - scanBegin)) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (candidate < 0) {
+                return scanEnd == contextEnd ? SEARCH_NO_MATCH : CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (!cursor.consumeWork()) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+
+            int matchEnd;
+            try {
+                matchEnd = searchAnchoredCandidate(cursor, tables, bytes, contextBegin, contextEnd, candidate);
+            }
+            catch (QuitSearchException ignored) {
+                return QUIT_CANDIDATE_RESULT_BASE - (candidate - contextBegin);
+            }
+            tables = cursor.dfa.tablesAfterWrite(tables);
+            if (matchEnd == CANDIDATE_FALLBACK) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (matchEnd >= 0) {
+                int relativeStart = candidate - contextBegin;
+                int relativeEnd = matchEnd - contextBegin;
+                return ((long) relativeStart << 32) | (relativeEnd & 0xFFFF_FFFFL);
+            }
+            scanBegin = candidate + 1;
         }
         return SEARCH_NO_MATCH;
     }
@@ -6222,6 +6313,14 @@ final class Dfa
         private long remainingWork;
         private boolean disabled;
         private boolean productivityChecked;
+        // Whether the caller settles a candidate whose check quits. Otherwise a check that quits
+        // ends its search. These two booleans fit in padding the other fields leave, so the other
+        // fields keep their offsets.
+        private final boolean settlesQuitCandidates;
+        // Set by the first check since the last reset that quits, in a cursor whose caller settles
+        // such candidates: the search that quit is repeated in reporting mode, and every later one
+        // until the reset reports the candidate whose check quits.
+        private boolean reportsQuitCandidates;
         private long routeCount;
         private long fallbackCount;
         private long productivityRejectionCount;
@@ -6233,14 +6332,16 @@ final class Dfa
             this.literal = null;
             this.literalSearch = null;
             this.foldedStartRun = null;
+            this.settlesQuitCandidates = false;
         }
 
-        private CandidateStartCursor(DfaInstance dfa, byte[] literal, LiteralSearchKernel literalSearch, Prog.FoldedStartRun foldedStartRun)
+        private CandidateStartCursor(DfaInstance dfa, byte[] literal, LiteralSearchKernel literalSearch, Prog.FoldedStartRun foldedStartRun, boolean settlesQuitCandidates)
         {
             this.dfa = requireNonNull(dfa, "dfa is null");
             this.literal = requireNonNull(literal, "literal is null");
             this.literalSearch = requireNonNull(literalSearch, "literalSearch is null");
             this.foldedStartRun = foldedStartRun;
+            this.settlesQuitCandidates = settlesQuitCandidates;
         }
 
         void reset(int inputLength)
@@ -6248,6 +6349,7 @@ final class Dfa
             remainingWork = 3L * inputLength;
             disabled = false;
             productivityChecked = false;
+            reportsQuitCandidates = false;
         }
 
         boolean enabled()
@@ -6267,8 +6369,8 @@ final class Dfa
             return foldedStartRun != null;
         }
 
-        /// Whether the cursor's DFA can quit on a byte outside ASCII, so its quits count toward a
-        /// matcher's quit streak.
+        /// Whether the cursor's DFA can quit on a byte outside ASCII, so a matcher whose quit streak
+        /// reached its limit skips the cursor.
         boolean quitsOnNonAscii()
         {
             return dfa.quitsOnNonAscii;
@@ -6295,6 +6397,11 @@ final class Dfa
             return foldedRunSearchCount;
         }
 
+        boolean reportsQuitCandidates()
+        {
+            return reportsQuitCandidates;
+        }
+
         private boolean isProductive(byte[] bytes, int position, int textEnd)
         {
             if (productivityChecked) {
@@ -6311,6 +6418,18 @@ final class Dfa
         int workBoundedScanLength(int requestedLength)
         {
             return (int) Math.min(remainingWork, requestedLength);
+        }
+
+        /// Charges the `length` bytes on which the caller settles a quit candidate. Returns
+        /// `false`, and falls back until the next reset, when the work budget cannot cover them.
+        boolean chargeQuitCandidate(int length)
+        {
+            if (!consumeWork(length)) {
+                disabled = true;
+                fallbackCount++;
+                return false;
+            }
+            return true;
         }
 
         private boolean consumeWork()
