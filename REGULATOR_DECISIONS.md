@@ -710,11 +710,6 @@ text, so the pair scan rejects little that a first-byte scan would not.
   need more to keep their speed. Benchmarks run them at a budget of their own,
   for every engine with a memory limit, as
   [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
-  - `unicode/overlapping-words` english and russian run at full speed from
-    72 MiB, the lowest budget measured; their reverse longest-match DFA
-    initializes from about 65 MiB, as the setup gate below describes. Below
-    66.73 MiB their captures run on the NFA, 130 to 1,700 times slower, and
-    below 26.92 MiB they do not compile.
   - `curated/10-bounded-repeat/context` fills about 30 MB of DFA states. It
     slows at 72 MiB and below, 15 to 21 times at 32 MiB.
   - RE2, Java, and Rust `dictionary/search/english-10`: its program needs
@@ -723,6 +718,11 @@ text, so the pair scan rejects little that a first-byte scan would not.
     is 4% to 6% slower on r9g and per-line find 4% slower on r8i, while count
     takes 0.40x to 0.60x the time.
 
+  `unicode/overlapping-words` english and russian run at each engine's
+  default, comparators included: the class-run counter decides their captures,
+  as [Class-run alternation
+  captures](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures)
+  describes, so the pattern compiles no program and retains about 34 KB.
   Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
   `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
 - BitState's anchored text limit falls with the forward share: from 105–210 KB
@@ -730,10 +730,11 @@ text, so the pair scan rejects little that a first-byte scan would not.
   and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB. A capture
   over a match between the two limits that used BitState now runs on the
   capture NFA; the 32 KiB unanchored bitmap cap is unchanged.
-- A lower default was rejected: at 24 MiB `overlapping-words` no longer
-  compiles and Trino `url/search` slows 5% in safe mode, and at 16 MiB
-  `url/search` slows 1.3 to 7 times in every language and `english-15` 1.2 to
-  1.5 times.
+- A lower default was rejected: at 24 MiB Trino `url/search` slows 5% in safe
+  mode, and at 16 MiB `url/search` slows 1.3 to 7 times in every language and
+  `english-15` 1.2 to 1.5 times. When this was decided, `overlapping-words`
+  also did not compile at 24 MiB; on the class-run counter it now compiles
+  far below either budget.
 - Lowering the default in a 2.x release breaks compatibility for a pattern
   that needed 32 to 96 MiB: it now throws `RegexpCompileMemoryLimitException`
   at the default, and where a bound is proven the message says the pattern
@@ -821,10 +822,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
   each FAIL and two for each ALT: Regulator's queue walk also pushes for a
   FAIL that is not last in its list, and twice for an ALT. Flattened programs
   hold no ALT, but counting both keeps the bound independent of the program's
-  form. The reverse longest-match DFA of the rebar `unicode/overlapping-words`
-  rows then initializes from a pattern budget (`maxMemory`) of about 65 MiB
-  instead of 92 MiB, so under a 72 MiB pattern budget their captures stay on
-  the DFAs.
+  form. The reverse longest-match DFA of the program the rebar
+  `unicode/overlapping-words` rows compiled, before the class-run counter
+  took their captures, then initialized from a pattern budget (`maxMemory`) of
+  about 65 MiB instead of 92 MiB.
 - A many-match state that matched also holds a separator and the ID of each
   MATCH instruction in the queue it left, so its true bound is the lists, plus
   one, plus the program's MATCH instructions. Its gate deliberately counts

@@ -257,10 +257,10 @@ class TestRebarRunner
         // budget, and any other keeps no budget of its own, which is Regulator's default.
         Function<String, RebarRunner.Benchmark> rebar = name -> RebarRunner.Benchmark.readRebar(
                 input(name, "count", bytes("a"), true, bytes("a"), 2, 1_000_000_000, 1, 1_000_000_000));
-        long budget = RebarRunner.memoryBudget("unicode/overlapping-words/english", "re2");
+        long budget = RebarRunner.memoryBudget("curated/10-bounded-repeat/context", "re2");
         assertThat(budget).isPositive();
-        assertThat(rebar.apply("unicode/overlapping-words/english").maxMemory()).isEqualTo(budget);
-        assertThat(rebar.apply("unicode/overlapping-words/ascii").maxMemory()).isZero();
+        assertThat(rebar.apply("curated/10-bounded-repeat/context").maxMemory()).isEqualTo(budget);
+        assertThat(rebar.apply("unicode/overlapping-words/english").maxMemory()).isZero();
         // A budget applies only in its languages: Trino compiles english-10 as a literal set. The
         // compile sibling takes its row's budget.
         assertThat(RebarRunner.memoryBudget("dictionary/search/english-10", "re2")).isPositive();

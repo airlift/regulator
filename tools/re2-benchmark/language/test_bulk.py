@@ -204,6 +204,20 @@ class TestBulkEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "names its own memory budget"):
             bulk.validate_manifest(self.manifest, self.directory)
 
+    def test_recorded_budget_the_list_no_longer_names_holds_only_for_saved_evidence(self):
+        # A manifest prepared while a row was on the list recorded its budget. Saved evidence keeps that budget, and a
+        # live campaign, which runs the row at the default once it leaves the list, rejects it.
+        identity = "example/recorded-budget"
+        directory = self.root / "recorded-budget"
+        with patch.dict(mappings.MEMORY_BUDGETS_MIB, {identity: (96, ("re2", "java", "trino", "rust"))}):
+            manifest = prepare_manifest(identity, rb"(\p{L}{3})|(\p{L}{2})", directory)
+        recorded = {language: mapping.get("max_memory_bytes")
+                    for language, mapping in manifest["cases"][0]["mappings"].items()}
+        self.assertEqual(recorded, dict.fromkeys(("re2", "java", "trino", "rust"), 96 << 20))
+        bulk.validate_manifest(manifest, directory, recorded_budgets=True)
+        with self.assertRaisesRegex(ValueError, "declared translation"):
+            bulk.validate_manifest(manifest, directory)
+
     def test_only_rust_marks_a_malformed_haystack_compatible(self):
         manifest = prepare_manifest("example", b"a", self.root / "malformed", haystack=b"a\xffa")
         self.assertEqual({language: mapping["status"] for language, mapping in manifest["cases"][0]["mappings"].items()},

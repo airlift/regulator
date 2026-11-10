@@ -155,8 +155,8 @@ sibling rule as its header comment. The [language
 collector](../../tools/re2-benchmark/language/README.md) and the Regulator
 Rebar runner both read it.
 
-In Rebar's own runs, Rebar's `engines/regulator` runner, from runner version
-`budgets-1`, bundles a copy of the budget list and gives Regulator's two
+In Rebar's own runs, Rebar's `engines/regulator` runner, now at runner version
+`budgets-2`, bundles a copy of the budget list and gives Regulator's two
 engines the same budgets, keyed by the Rebar benchmark name: `regulator/re2` a
 row's RE2 budget and `regulator/rust` its Rust budget. A pattern the list does
 not name that Regulator's default rejects compiles at that runner's 384 MiB
@@ -170,8 +170,12 @@ most 30 states.
 Reports from campaigns before row budgets ran native RE2 at its 8 MiB `max_mem`
 default and the crate at its 10 MiB `size_limit` and 2 MiB `dfa_size_limit`
 on every row. On a budgeted row the comparator's time can therefore differ
-from an earlier report because of the budget, not an engine change: native
-RE2 runs `unicode/overlapping-words` on its DFAs instead of its NFA.
+from an earlier report because of the budget, not an engine change. Manifests
+that recorded a 96 MiB budget for `unicode/overlapping-words` english and
+russian ran those rows at 96 MiB in every engine with a memory limit, where
+native RE2 ran them on its DFAs instead of its NFA. They now run at each
+engine's default, so native RE2's and the Rust crate's times differ from those
+reports for the same reason.
 
 ## Java benchmarks
 
