@@ -156,6 +156,14 @@ public sealed class TrinoLikePattern
     private final int shortLiteralLastOffset;
     private final long shortLiteralFirst;
     private final long shortLiteralLast;
+    // The option values of the compile, which with the source decide equality, including those
+    // that change only the generated class, so that a cache keyed on patterns never returns one
+    // compiled differently. The hash covers the source and these values, and is computed when the
+    // pattern compiles, from the source bytes even where the pattern keeps only its literal.
+    private final OptionalInt escape;
+    private final boolean generateBytecode;
+    private final boolean aarch64;
+    private final int hash;
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a nested non-sealed class, which only its generated hidden class extends")
     private TrinoLikePattern(
@@ -165,7 +173,11 @@ public sealed class TrinoLikePattern
             Slice prefix,
             Slice suffix,
             Matcher matcher,
-            byte strategy)
+            byte strategy,
+            int sourceHash,
+            OptionalInt escape,
+            boolean generateBytecode,
+            boolean aarch64)
     {
         this.pattern = pattern;
         this.minimumSize = minimumSize;
@@ -194,12 +206,19 @@ public sealed class TrinoLikePattern
             shortLiteralLast = 0;
             this.strategy = strategy;
         }
+        this.escape = requireNonNull(escape, "escape is null");
+        this.generateBytecode = generateBytecode;
+        this.aarch64 = aarch64;
+        int hash = sourceHash;
+        hash = 31 * hash + escape.hashCode();
+        hash = 31 * hash + Boolean.hashCode(generateBytecode);
+        this.hash = 31 * hash + Boolean.hashCode(aarch64);
     }
 
     /// Compiles a copied snapshot of `pattern` with [Options#defaults()].
     public static TrinoLikePattern compile(Slice pattern)
     {
-        return compile(pattern, OptionalInt.empty());
+        return compile(pattern, OptionalInt.empty(), false, AARCH64);
     }
 
     /// Compiles a copied snapshot of `pattern` and the current option values.
@@ -208,11 +227,11 @@ public sealed class TrinoLikePattern
         return compileWithOptions(pattern, options);
     }
 
-    private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
+    private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint, boolean generateBytecode, boolean aarch64)
     {
         requireNonNull(pattern, "pattern is null");
         if (escapeCodePoint.isEmpty()) {
-            TrinoLikePattern simplePattern = tryCompileSimpleAscii(pattern);
+            TrinoLikePattern simplePattern = tryCompileSimpleAscii(pattern, generateBytecode, aarch64);
             if (simplePattern != null) {
                 return simplePattern;
             }
@@ -295,11 +314,15 @@ public sealed class TrinoLikePattern
                 prefix,
                 suffix,
                 matcher,
-                encode(plan));
+                encode(plan),
+                patternCopy.hashCode(),
+                escapeCodePoint,
+                generateBytecode,
+                aarch64);
     }
 
     // A compiled result retains a copy of the literal alone, as pattern() rebuilds the rest.
-    private static TrinoLikePattern tryCompileSimpleAscii(Slice pattern)
+    private static TrinoLikePattern tryCompileSimpleAscii(Slice pattern, boolean generateBytecode, boolean aarch64)
     {
         int patternLength = pattern.length();
         if (patternLength == 0) {
@@ -340,7 +363,10 @@ public sealed class TrinoLikePattern
             matcher = new ContainsMatcher(literal, false);
             strategy = CONTAINS;
         }
-        return new TrinoLikePattern(null, literal.length(), strategy == EQUALS ? literal.length() : -1, prefix, suffix, matcher, strategy);
+        // Hashes the caller's bytes without caching the hash in its slice; the result keeps only
+        // the literal.
+        int sourceHash = pattern.hashCode(0, patternLength);
+        return new TrinoLikePattern(null, literal.length(), strategy == EQUALS ? literal.length() : -1, prefix, suffix, matcher, strategy, sourceHash, OptionalInt.empty(), generateBytecode, aarch64);
     }
 
     // TrinoLikeKernelGenerator emits a copy of this method, with matchesComplex, as the entry of a
@@ -389,9 +415,9 @@ public sealed class TrinoLikePattern
     private static TrinoLikePattern compileWithOptions(Slice pattern, Options options)
     {
         requireNonNull(options, "options is null");
-        TrinoLikePattern compiled = compile(pattern, options.escape());
-        if (options.generateBytecode()) {
-            TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled, options.aarch64());
+        TrinoLikePattern compiled = compile(pattern, options.escape(), options.generateBytecode(), options.aarch64());
+        if (compiled.generateBytecode) {
+            TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled, compiled.aarch64);
             if (generated != null) {
                 return generated;
             }
@@ -413,6 +439,10 @@ public sealed class TrinoLikePattern
         this.shortLiteralLastOffset = pattern.shortLiteralLastOffset;
         this.shortLiteralFirst = pattern.shortLiteralFirst;
         this.shortLiteralLast = pattern.shortLiteralLast;
+        this.escape = pattern.escape;
+        this.generateBytecode = pattern.generateBytecode;
+        this.aarch64 = pattern.aarch64;
+        this.hash = pattern.hash;
     }
 
     /// Returns a copy of the compiled pattern bytes.
@@ -451,6 +481,32 @@ public sealed class TrinoLikePattern
         return false;
     }
 
+    /// Returns whether `other` is a LIKE pattern compiled from equal pattern bytes with equal
+    /// option values, including whether to generate bytecode. Two such compiles are equal whether
+    /// or not each compile generated a class.
+    @Override
+    public final boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof TrinoLikePattern that)) {
+            return false;
+        }
+        return hash == that.hash &&
+                generateBytecode == that.generateBytecode &&
+                aarch64 == that.aarch64 &&
+                escape.equals(that.escape) &&
+                // Compare the retained sources directly; only a simple ASCII pattern rebuilds its own.
+                ((pattern != null && that.pattern != null) ? pattern.equals(that.pattern) : pattern().equals(that.pattern()));
+    }
+
+    @Override
+    public final int hashCode()
+    {
+        return hash;
+    }
+
     TrinoLikeKernelGenerator.Kernel kernelForDiagnostics()
     {
         return CompiledTrinoLikePattern.kernel(this);
@@ -484,7 +540,7 @@ public sealed class TrinoLikePattern
     static boolean usesSimpleAsciiConstructionForDiagnostics(Slice pattern)
     {
         requireNonNull(pattern, "pattern is null");
-        return tryCompileSimpleAscii(pattern) != null;
+        return tryCompileSimpleAscii(pattern, false, AARCH64) != null;
     }
 
     private static Plan simplePlan(List<Element> elements, Slice prefix, Slice suffix)

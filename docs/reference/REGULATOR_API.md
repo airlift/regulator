@@ -154,8 +154,13 @@ about 2.8 MB. RE2's longest-match mode and most case-insensitive literals
 always need the program.
 
 Compiled patterns are immutable and safe to share across threads. They do not
-need to be closed. Lazily built DFA caches belong to the compiled pattern and
-are reclaimed when it is no longer reachable. Their integer and object
+need to be closed. A compiled pattern of any language, `Re2Set`, or
+`FilteredRe2` equals another of the same public type compiled from equal pattern
+bytes and equal option values, counting options that change only performance,
+such as the memory budget, so compiled patterns can serve as cache keys. An
+`Re2Set` or `FilteredRe2` compares its patterns in pattern ID order. Lazily
+built DFA caches belong to the compiled pattern and are reclaimed when it is no
+longer reachable. Their integer and object
 transition tables stay on the Java heap; only an eligible DFA's optional pointer
 table moves to native memory when native access is enabled. Native access is
 optional; when it is unavailable, the DFA keeps the same pointer table on the

@@ -327,6 +327,20 @@ public class TestFilteredRe2
     }
 
     @Test
+    public void testEqualsComparesPatternsAndOptions()
+    {
+        FilteredRe2 filtered = buildFiltered(3, Re2.Options.defaults(), "foo\\d+", "bar");
+        FilteredRe2 rebuilt = buildFiltered(3, Re2.Options.defaults(), "foo\\d+", "bar");
+        assertThat(rebuilt).isEqualTo(filtered).hasSameHashCodeAs(filtered);
+
+        // The patterns compare in ID order, each with its options, including the memory budget,
+        // and the minimum atom length takes part.
+        assertThat(buildFiltered(3, Re2.Options.defaults(), "bar", "foo\\d+")).isNotEqualTo(filtered);
+        assertThat(buildFiltered(2, Re2.Options.defaults(), "foo\\d+", "bar")).isNotEqualTo(filtered);
+        assertThat(buildFiltered(3, Re2.Options.defaults().setMaxMemory(16 << 20), "foo\\d+", "bar")).isNotEqualTo(filtered);
+    }
+
+    @Test
     public void testComplexPattern()
     {
         FilterTestState state = new FilterTestState(100);  // High minimumAtomLength = no atoms
@@ -661,6 +675,15 @@ public class TestFilteredRe2
         assertThat(Prefilter.exactCrossProductFits(46_341, 46_341)).isFalse();
         assertThat(Prefilter.exactCrossProductFits(4, 4)).isTrue();
         assertThat(Prefilter.exactCrossProductFits(17, 1)).isFalse();
+    }
+
+    private static FilteredRe2 buildFiltered(int minimumAtomLength, Re2.Options options, String... patterns)
+    {
+        FilteredRe2.Builder builder = FilteredRe2.builder(minimumAtomLength);
+        for (String pattern : patterns) {
+            builder.add(utf8(pattern), options);
+        }
+        return builder.build();
     }
 
     private static Slice textBytes(String value)

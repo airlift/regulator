@@ -113,4 +113,24 @@ public class TestRustRegexpOptions
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("byteFrequencies is null");
     }
+
+    @Test
+    public void testEqualsComparesPatternAndOptions()
+    {
+        // Each compile that generates bytecode defines its own class, and two compiles of one
+        // pattern and options compare equal whichever class each built.
+        RustRegexp.Options generate = RustRegexp.Options.defaults().setGenerateBytecode(true);
+        RustRegexp compiled = RustRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        RustRegexp recompiled = RustRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
+        assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
+
+        // A different pattern, or any option that changes the compile, including options that
+        // change only performance, makes the patterns unequal.
+        assertThat(RustRegexp.compile(utf8Slice("x([^/]+)/"), generate)).isNotEqualTo(compiled);
+        assertThat(RustRegexp.compile(utf8Slice("x([^/]+)"))).isNotEqualTo(compiled);
+        assertThat(RustRegexp.compile(utf8Slice("x([^/]+)"), RustRegexp.Options.defaults().setGenerateBytecode(true).setCaseInsensitive(true))).isNotEqualTo(compiled);
+        assertThat(RustRegexp.compile(utf8Slice("x([^/]+)"), RustRegexp.Options.defaults().setGenerateBytecode(true).setMaxMemory(16 << 20))).isNotEqualTo(compiled);
+        assertThat(RustRegexp.compile(utf8Slice("x([^/]+)"), RustRegexp.Options.defaults().setGenerateBytecode(true).setByteFrequencies(ByteFrequencies.englishText()))).isNotEqualTo(compiled);
+    }
 }

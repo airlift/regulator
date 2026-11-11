@@ -374,7 +374,7 @@ final class FixedWidthByteSpanMatcher
         return ranges;
     }
 
-    static TrinoRegexp createTrinoRegexp(TrinoCompiledPattern pattern, Regexp regexp)
+    static TrinoRegexp createTrinoRegexp(TrinoCompiledPattern pattern, TrinoRegexp.CompileInputs compileInputs, Regexp regexp)
     {
         FixedWidthByteSpanMatcher spanMatcher = pattern.createFixedWidthByteSpanMatcher(regexp);
         // The fixed-width subtype never bails. A matcher that can bail leaves every operation to
@@ -386,7 +386,7 @@ final class FixedWidthByteSpanMatcher
                 (spanMatcher.yieldsToEngineScans() && !pattern.hasRetainedFixedWidthByteSpanMatcher())) {
             return null;
         }
-        return new TrinoRegexp.FixedWidthByteTrinoRegexp(pattern, spanMatcher);
+        return new TrinoRegexp.FixedWidthByteTrinoRegexp(pattern, compileInputs, spanMatcher);
     }
 
     long estimatedRetainedSize()

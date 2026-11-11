@@ -52,11 +52,12 @@ public class TestRe2BooleanPlans
     public void testInstanceLayout()
     {
         // The shape class fixes the full-Slice routes, while the base pattern keeps a few
-        // per-pattern ordinary-engine flags and its required bytes. The class-run shape adds its
-        // retained count DFA flag, and the scan-plan shape its count, short-match, and literal
+        // per-pattern ordinary-engine flags and its required bytes, and the RE2 pattern the
+        // inputs of its compile and their hash, which decide equality. The class-run shape adds
+        // its retained count DFA flag, and the scan-plan shape its count, short-match, and literal
         // find facts, which fit in the padding the base pattern's flags leave.
-        assertThat(instanceSize(Re2.class)).isEqualTo(120);
-        assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(120);
+        assertThat(instanceSize(Re2.class)).isEqualTo(128);
+        assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(128);
     }
 
     @Test

@@ -532,6 +532,29 @@ public class TestTrinoLikeCorpus
     }
 
     @Test
+    public void testEqualsComparesPatternAndOptions()
+    {
+        // Each compile that generates bytecode defines its own class, and two compiles of one
+        // pattern and options compare equal whichever class each built, both for a simple
+        // pattern, which keeps only its literal, and for one that keeps its source.
+        TrinoLikePattern.Options generate = TrinoLikePattern.Options.defaults().setGenerateBytecode(true);
+        for (String source : List.of("%needle%", "a_c%")) {
+            TrinoLikePattern compiled = TrinoLikePattern.compile(Slices.utf8Slice(source), generate);
+            TrinoLikePattern recompiled = TrinoLikePattern.compile(Slices.utf8Slice(source), generate);
+            assertThat(recompiled.getClass()).as(source).isNotEqualTo(compiled.getClass());
+            assertThat(recompiled).as(source).isEqualTo(compiled).hasSameHashCodeAs(compiled);
+            assertThat(TrinoLikePattern.compile(Slices.utf8Slice(source))).as(source).isNotEqualTo(compiled);
+        }
+
+        // Compiling without options uses the default options. A different pattern or escape
+        // makes the patterns unequal.
+        TrinoLikePattern simple = TrinoLikePattern.compile(Slices.utf8Slice("%needle%"));
+        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("%needle%"), TrinoLikePattern.Options.defaults())).isEqualTo(simple).hasSameHashCodeAs(simple);
+        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("%needles%"))).isNotEqualTo(simple);
+        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("%needle%"), TrinoLikePattern.Options.defaults().setEscape('#'))).isNotEqualTo(simple);
+    }
+
+    @Test
     public void testLiteralGapCountsFillTheGapArray()
     {
         // Elements: %, literal, then (any, literal) pairs; a gap is recorded for every pair, so the

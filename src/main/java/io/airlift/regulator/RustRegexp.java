@@ -190,7 +190,8 @@ public sealed class RustRegexp
         }
 
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// scan probes. Matching reads only the chosen offsets; the compiled pattern keeps the
+        /// distribution only to compare it with other compiles. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
         /// folded byte pairs and folded runs that case-insensitive prefix scans probe, decides
         /// whether a find scans for a folded run behind a leading assertion's literal in place of
@@ -267,30 +268,45 @@ public sealed class RustRegexp
     // The crate's bytes API, where an empty match may split a UTF-8 character.
     private final boolean bytes;
 
-    private RustRegexp(Analysis analysis)
+    /// The inputs of a compile, which decide equality: the pattern bytes and every option that
+    /// can change what the compile builds, including those that change only performance, such as
+    /// the memory budget, so that a cache keyed on patterns never returns one compiled differently.
+    /// The syntax flags carry every syntax option, byte mode among them. Each shape class and
+    /// generated class keeps the inputs of the compile that built it.
+    private record CompileInputs(Slice pattern, int syntaxFlags, int nestLimit, long maxMemory, ByteFrequencies byteFrequencies, boolean generateBytecode, ScanPlanMode scanPlanMode) {}
+
+    private final CompileInputs compileInputs;
+    // The hash of compileInputs, computed when the pattern compiles.
+    private final int hash;
+
+    private RustRegexp(Analysis analysis, CompileInputs compileInputs)
     {
         super(analysis);
         this.bytes = (flags() & Regexp.LATIN1) != 0;
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
     }
 
     private RustRegexp(RustRegexp pattern)
     {
         super(pattern);
         this.bytes = pattern.bytes;
+        this.compileInputs = pattern.compileInputs;
+        this.hash = pattern.hash;
     }
 
     /// Constructs an instance of the analyzed pattern's shape class.
-    private static RustRegexp create(Analysis analysis)
+    private static RustRegexp create(Analysis analysis, CompileInputs compileInputs)
     {
         return switch (analysis.shape()) {
-            case ENGINE -> new RustRegexp(analysis);
-            case EXACT_LITERAL -> new ExactLiteralRustRegexp(analysis);
-            case LITERAL_KERNEL -> new LiteralKernelRustRegexp(analysis);
-            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationRustRegexp(analysis) : new LiteralSetRustRegexp(analysis);
-            case FIXED_WIDTH -> new FixedWidthRustRegexp(analysis);
-            case CLASS_RUN -> new ClassRunRustRegexp(analysis);
-            case BYTE_TABLE -> new ByteTableRustRegexp(analysis);
-            case SCAN_PLAN -> new ScanPlanRustRegexp(analysis);
+            case ENGINE -> new RustRegexp(analysis, compileInputs);
+            case EXACT_LITERAL -> new ExactLiteralRustRegexp(analysis, compileInputs);
+            case LITERAL_KERNEL -> new LiteralKernelRustRegexp(analysis, compileInputs);
+            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationRustRegexp(analysis, compileInputs) : new LiteralSetRustRegexp(analysis, compileInputs);
+            case FIXED_WIDTH -> new FixedWidthRustRegexp(analysis, compileInputs);
+            case CLASS_RUN -> new ClassRunRustRegexp(analysis, compileInputs);
+            case BYTE_TABLE -> new ByteTableRustRegexp(analysis, compileInputs);
+            case SCAN_PLAN -> new ScanPlanRustRegexp(analysis, compileInputs);
         };
     }
 
@@ -342,14 +358,15 @@ public sealed class RustRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
-        ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
+        CompileInputs inputs = new CompileInputs(patternCopy, options.syntaxFlags(), options.nestLimit(), options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
+        ParseResult parsed = RustRegexpParser.parse(patternCopy, inputs.syntaxFlags(), inputs.nestLimit());
         int compileFlags = options.compileFlags();
         // Byte mode keeps its scan plan. A plan never matches empty, so byte mode's one-byte advance
         // past an empty match never applies, and the analysis declines every byte construct that
         // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
         // the any-byte dot, which has no such flag, by its kind.
-        RustRegexp compiled = create(analyzeParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode));
-        if (options.generateBytecode()) {
+        RustRegexp compiled = create(analyzeParsed(patternCopy, parsed, compileFlags, inputs.maxMemory(), inputs.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode), inputs);
+        if (inputs.generateBytecode()) {
             RustRegexp generated = CompiledScanRustRegexp.create(compiled);
             if (generated != null) {
                 return generated;
@@ -365,6 +382,27 @@ public sealed class RustRegexp
     public boolean usesGeneratedBytecode()
     {
         return false;
+    }
+
+    /// Returns whether `other` is a Rust pattern compiled from equal pattern bytes with equal
+    /// effective option values, including those that change only performance, such as the memory
+    /// budget. Two such compiles are equal whichever class each compile built, generated or not.
+    @Override
+    public final boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof RustRegexp that)) {
+            return false;
+        }
+        return hash == that.hash && compileInputs.equals(that.compileInputs);
+    }
+
+    @Override
+    public final int hashCode()
+    {
+        return hash;
     }
 
     /// Returns whether the pattern has a match anywhere in `input` without allocating capture
@@ -521,9 +559,9 @@ public sealed class RustRegexp
     static final class ExactLiteralRustRegexp
             extends RustRegexp
     {
-        private ExactLiteralRustRegexp(Analysis analysis)
+        private ExactLiteralRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -555,9 +593,9 @@ public sealed class RustRegexp
     static final class LiteralKernelRustRegexp
             extends RustRegexp
     {
-        private LiteralKernelRustRegexp(Analysis analysis)
+        private LiteralKernelRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -608,9 +646,9 @@ public sealed class RustRegexp
     {
         private final boolean literalSetCount;
 
-        private LiteralAlternationRustRegexp(Analysis analysis)
+        private LiteralAlternationRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.literalSetCount = analysis.literalSetCount();
         }
 
@@ -641,9 +679,9 @@ public sealed class RustRegexp
         // The literals that a full match reads beside the literal set.
         private final LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals;
 
-        private LiteralSetRustRegexp(Analysis analysis)
+        private LiteralSetRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
         }
 
@@ -676,9 +714,9 @@ public sealed class RustRegexp
     static final class FixedWidthRustRegexp
             extends RustRegexp
     {
-        private FixedWidthRustRegexp(Analysis analysis)
+        private FixedWidthRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -700,9 +738,9 @@ public sealed class RustRegexp
     {
         private final boolean retainedClassCountDfa;
 
-        private ClassRunRustRegexp(Analysis analysis)
+        private ClassRunRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
@@ -735,9 +773,9 @@ public sealed class RustRegexp
     static final class ByteTableRustRegexp
             extends RustRegexp
     {
-        private ByteTableRustRegexp(Analysis analysis)
+        private ByteTableRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -763,9 +801,9 @@ public sealed class RustRegexp
         private final boolean singleAttemptCount;
         private final boolean literalKernelFind;
 
-        private ScanPlanRustRegexp(Analysis analysis)
+        private ScanPlanRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
             this.singleAttemptCount = analysis.singleAttemptCount();
             this.literalKernelFind = analysis.literalKernelFind();

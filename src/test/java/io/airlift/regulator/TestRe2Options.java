@@ -52,6 +52,26 @@ public class TestRe2Options
     }
 
     @Test
+    public void testEqualsComparesPatternAndOptions()
+    {
+        // Each compile that generates bytecode defines its own class, and two compiles of one
+        // pattern and options compare equal whichever class each built.
+        Re2.Options generate = Re2.Options.defaults().setGenerateBytecode(true);
+        Re2 compiled = Re2.compile(utf8("x([^/]+)"), generate);
+        Re2 recompiled = Re2.compile(utf8("x([^/]+)"), generate);
+        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
+        assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
+
+        // A different pattern, or any option that changes the compile, including options that
+        // change only performance, makes the patterns unequal.
+        assertThat(Re2.compile(utf8("x([^/]+)/"), generate)).isNotEqualTo(compiled);
+        assertThat(Re2.compile(utf8("x([^/]+)"))).isNotEqualTo(compiled);
+        assertThat(Re2.compile(utf8("x([^/]+)"), Re2.Options.defaults().setGenerateBytecode(true).setCaseSensitive(false))).isNotEqualTo(compiled);
+        assertThat(Re2.compile(utf8("x([^/]+)"), Re2.Options.defaults().setGenerateBytecode(true).setMaxMemory(16 << 20))).isNotEqualTo(compiled);
+        assertThat(Re2.compile(utf8("x([^/]+)"), Re2.Options.defaults().setGenerateBytecode(true).setByteFrequencies(ByteFrequencies.englishText()))).isNotEqualTo(compiled);
+    }
+
+    @Test
     public void testSmallMemoryBudgetDoesNotBecomeUnlimited()
     {
         assertThatThrownBy(() -> Re2.compile(utf8("abc"), Re2.Options.defaults().setMaxMemory(1)))

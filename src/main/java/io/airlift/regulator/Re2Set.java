@@ -34,15 +34,22 @@ public final class Re2Set
         FULL,
     }
 
+    /// The inputs of a set's compile, which decide equality: the patterns in ID order and every
+    /// option the set compiles with. A set reads no other option.
+    private record CompileInputs(List<Slice> patterns, int parseFlags, long maxMemory, MatchMode matchMode) {}
+
     private final int size;
     private final Prog program;
-    private final long maxMemoryBytes;
+    private final CompileInputs compileInputs;
+    // The hash of compileInputs, computed when the set compiles.
+    private final int hash;
 
-    private Re2Set(int size, Prog program, long maxMemoryBytes)
+    private Re2Set(int size, Prog program, CompileInputs compileInputs)
     {
         this.size = size;
         this.program = program;
-        this.maxMemoryBytes = maxMemoryBytes;
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
     }
 
     /// Creates a single-use builder. The supplied options are copied immediately. A set has no
@@ -76,7 +83,7 @@ public final class Re2Set
 
         Dfa.ManyMatchResult result = Dfa.searchMany(program, text, null);
         if (result == Dfa.ManyMatchResult.RESOURCE_EXHAUSTED) {
-            throw new RegexpMatchMemoryLimitException(maxMemoryBytes);
+            throw new RegexpMatchMemoryLimitException(compileInputs.maxMemory());
         }
         return result == Dfa.ManyMatchResult.MATCH;
     }
@@ -95,7 +102,7 @@ public final class Re2Set
         SparseSet matches = new SparseSet(size);
         Dfa.ManyMatchResult result = Dfa.searchMany(program, text, matches);
         if (result == Dfa.ManyMatchResult.RESOURCE_EXHAUSTED) {
-            throw new RegexpMatchMemoryLimitException(maxMemoryBytes);
+            throw new RegexpMatchMemoryLimitException(compileInputs.maxMemory());
         }
         if (result == Dfa.ManyMatchResult.NO_MATCH || matches.isEmpty()) {
             return new int[0];
@@ -108,11 +115,32 @@ public final class Re2Set
         return patternIds;
     }
 
+    /// Returns whether `other` is a set compiled from equal patterns, added in the same order,
+    /// with the same match mode and equal option values the set compiles with.
+    @Override
+    public boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof Re2Set that)) {
+            return false;
+        }
+        return hash == that.hash && compileInputs.equals(that.compileInputs);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return hash;
+    }
+
     public static final class Builder
     {
         private final Re2.Options options;
         private final MatchMode matchMode;
         private final List<Regexp> patterns = new ArrayList<>();
+        private final List<Slice> sources = new ArrayList<>();
         private boolean built;
 
         private Builder(Re2.Options options, MatchMode matchMode)
@@ -131,7 +159,8 @@ public final class Re2Set
             requireNonNull(pattern, "pattern is null");
 
             int parseFlags = options.parseFlags();
-            ParseResult result = RegexpParser.parse(pattern.copy(), parseFlags);
+            Slice patternCopy = pattern.copy();
+            ParseResult result = RegexpParser.parse(patternCopy, parseFlags);
             int patternId = patterns.size();
             Regexp matchMarker = Regexp.haveMatch(parseFlags, patternId);
             Regexp regexp = result.regexp();
@@ -147,6 +176,7 @@ public final class Re2Set
             else {
                 patterns.add(Regexp.concat(parseFlags, List.of(regexp, matchMarker)));
             }
+            sources.add(patternCopy);
             return patternId;
         }
 
@@ -163,12 +193,14 @@ public final class Re2Set
             requireNotBuilt();
             built = true;
 
+            int parseFlags = options.parseFlags();
+            CompileInputs compileInputs = new CompileInputs(List.copyOf(sources), parseFlags, options.maxMemory(), matchMode);
+            sources.clear();
             int patternCount = patterns.size();
             if (patternCount == 0) {
-                return new Re2Set(0, null, options.maxMemory());
+                return new Re2Set(0, null, compileInputs);
             }
 
-            int parseFlags = options.parseFlags();
             Regexp regexp = patternCount == 1
                     ? patterns.getFirst()
                     : Regexp.alternate(parseFlags, patterns);
@@ -190,7 +222,7 @@ public final class Re2Set
                 long requiredMaxMemory = Compiler.estimatedProgramMemory(program) + Dfa.DfaInstance.initializationMemory(program, Dfa.DfaInstance.Kind.MANY_MATCH);
                 throw new RegexpCompileMemoryLimitException(options.maxMemory(), requiredMaxMemory);
             }
-            return new Re2Set(patternCount, program, options.maxMemory());
+            return new Re2Set(patternCount, program, compileInputs);
         }
 
         private void requireNotBuilt()

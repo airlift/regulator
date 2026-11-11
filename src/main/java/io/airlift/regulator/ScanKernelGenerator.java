@@ -102,8 +102,8 @@ final class ScanKernelGenerator
 
     private static final String DUMP_DIRECTORY = System.getProperty(DUMP_DIRECTORY_PROPERTY);
     // The type of the constructor of TrinoRegexp.CompiledScanTrinoRegexp and of its generated
-    // subclass, which takes the compiled engine.
-    private static final MethodType TRINO_CONSTRUCTOR_TYPE = MethodType.methodType(void.class, TrinoCompiledPattern.class);
+    // subclass, which takes the compiled engine and the inputs of the compile that built it.
+    private static final MethodType TRINO_CONSTRUCTOR_TYPE = MethodType.methodType(void.class, TrinoCompiledPattern.class, TrinoRegexp.CompileInputs.class);
     // Step.matches compares literals of up to this many bytes with two overlapping reads.
     private static final int INLINE_LITERAL_BYTES = 2 * Long.BYTES;
 
@@ -267,27 +267,28 @@ final class ScanKernelGenerator
     }
 
     /// Generates and defines the class of a Trino pattern with `routes`, and returns the pattern
-    /// that is an instance of it, over the routes' compiled engine. The class extends
-    /// [TrinoRegexp.CompiledScanTrinoRegexp], whose constructor takes the compiled engine; the
-    /// generated constructor has the same type and passes its argument to it. Failures propagate.
-    static TrinoRegexp.CompiledScanTrinoRegexp generateCompiledTrinoPattern(TrinoRoutes routes)
+    /// that is an instance of it, over the routes' compiled engine, compiled from
+    /// `compileInputs`. The class extends [TrinoRegexp.CompiledScanTrinoRegexp], whose
+    /// constructor takes the compiled engine and the compile inputs; the generated constructor has
+    /// the same type and passes its arguments to it. Failures propagate.
+    static TrinoRegexp.CompiledScanTrinoRegexp generateCompiledTrinoPattern(TrinoRoutes routes, TrinoRegexp.CompileInputs compileInputs)
     {
-        return generate(routes).pattern();
+        return generate(routes, compileInputs).pattern();
     }
 
     /// Generates and defines the class of a Trino pattern with `routes` as
     /// [#generateCompiledTrinoPattern] does, also returning the compilation report.
-    static ReportedTrinoPattern generateCompiledTrinoPatternForDiagnostics(TrinoRoutes routes)
+    static ReportedTrinoPattern generateCompiledTrinoPatternForDiagnostics(TrinoRoutes routes, TrinoRegexp.CompileInputs compileInputs)
     {
-        return generate(routes);
+        return generate(routes, compileInputs);
     }
 
-    private static ReportedTrinoPattern generate(TrinoRoutes routes)
+    private static ReportedTrinoPattern generate(TrinoRoutes routes, TrinoRegexp.CompileInputs compileInputs)
     {
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
         CompiledUnit unit = compile(definer, ScanEmitter.forTrino(routes));
         Class<? extends TrinoRegexp.CompiledScanTrinoRegexp> patternClass = define(definer, unit, TrinoRegexp.CompiledScanTrinoRegexp.class);
-        TrinoRegexp.CompiledScanTrinoRegexp pattern = newInstance(patternClass, TRINO_CONSTRUCTOR_TYPE, routes.pattern());
+        TrinoRegexp.CompiledScanTrinoRegexp pattern = newInstance(patternClass, TRINO_CONSTRUCTOR_TYPE, routes.pattern(), compileInputs);
         return new ReportedTrinoPattern(pattern, unit.report());
     }
 
@@ -992,7 +993,8 @@ final class ScanKernelGenerator
             defineClass(attempt.patternClassName(TrinoRegexp.CompiledScanTrinoRegexp.class));
             definition.superClass(TrinoRegexp.CompiledScanTrinoRegexp.class);
             Parameter pattern = arg("pattern", TRINO_CONSTRUCTOR_TYPE.parameterType(0));
-            definition.constructor(pattern).access(PUBLIC).body().invokeSuperConstructor(pattern).ret();
+            Parameter compileInputs = arg("compileInputs", TRINO_CONSTRUCTOR_TYPE.parameterType(1));
+            definition.constructor(pattern, compileInputs).access(PUBLIC).body().invokeSuperConstructor(pattern, compileInputs).ret();
             attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition, routes.pattern().maximumSpanLength());
             if (!anchored) {
                 search = defineSearch();

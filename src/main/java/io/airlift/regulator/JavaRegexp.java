@@ -128,7 +128,8 @@ public sealed class JavaRegexp
         }
 
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// scan probes. Matching reads only the chosen offsets; the compiled pattern keeps the
+        /// distribution only to compare it with other compiles. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
         /// folded byte pairs and folded runs that case-insensitive prefix scans probe, decides
         /// whether a find scans for a folded run behind a leading assertion's literal in place of
@@ -188,28 +189,43 @@ public sealed class JavaRegexp
         }
     }
 
-    private JavaRegexp(Analysis analysis)
+    /// The inputs of a compile, which decide equality: the pattern bytes and every option that
+    /// can change what the compile builds, including those that change only performance, such as
+    /// the memory budget, so that a cache keyed on patterns never returns one compiled differently.
+    /// The parse flags carry every syntax option. Each shape class and generated class keeps the
+    /// inputs of the compile that built it.
+    private record CompileInputs(Slice pattern, int parseFlags, long maxMemory, ByteFrequencies byteFrequencies, boolean generateBytecode, ScanPlanMode scanPlanMode) {}
+
+    private final CompileInputs compileInputs;
+    // The hash of compileInputs, computed when the pattern compiles.
+    private final int hash;
+
+    private JavaRegexp(Analysis analysis, CompileInputs compileInputs)
     {
         super(analysis);
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
     }
 
     private JavaRegexp(JavaRegexp pattern)
     {
         super(pattern);
+        this.compileInputs = pattern.compileInputs;
+        this.hash = pattern.hash;
     }
 
     /// Constructs an instance of the analyzed pattern's shape class.
-    private static JavaRegexp create(Analysis analysis)
+    private static JavaRegexp create(Analysis analysis, CompileInputs compileInputs)
     {
         return switch (analysis.shape()) {
-            case ENGINE -> new JavaRegexp(analysis);
-            case EXACT_LITERAL -> new ExactLiteralJavaRegexp(analysis);
-            case LITERAL_KERNEL -> new LiteralKernelJavaRegexp(analysis);
-            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationJavaRegexp(analysis) : new LiteralSetJavaRegexp(analysis);
-            case FIXED_WIDTH -> new FixedWidthJavaRegexp(analysis);
-            case CLASS_RUN -> new ClassRunJavaRegexp(analysis);
-            case BYTE_TABLE -> new ByteTableJavaRegexp(analysis);
-            case SCAN_PLAN -> new ScanPlanJavaRegexp(analysis);
+            case ENGINE -> new JavaRegexp(analysis, compileInputs);
+            case EXACT_LITERAL -> new ExactLiteralJavaRegexp(analysis, compileInputs);
+            case LITERAL_KERNEL -> new LiteralKernelJavaRegexp(analysis, compileInputs);
+            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationJavaRegexp(analysis, compileInputs) : new LiteralSetJavaRegexp(analysis, compileInputs);
+            case FIXED_WIDTH -> new FixedWidthJavaRegexp(analysis, compileInputs);
+            case CLASS_RUN -> new ClassRunJavaRegexp(analysis, compileInputs);
+            case BYTE_TABLE -> new ByteTableJavaRegexp(analysis, compileInputs);
+            case SCAN_PLAN -> new ScanPlanJavaRegexp(analysis, compileInputs);
         };
     }
 
@@ -261,10 +277,10 @@ public sealed class JavaRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
-        int parseFlags = options.parseFlags();
-        ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        JavaRegexp compiled = create(analyzeParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.JAVA, scanPlanMode));
-        if (options.generateBytecode()) {
+        CompileInputs inputs = new CompileInputs(patternCopy, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
+        ParseResult parsed = JavaRegexpParser.parse(patternCopy, inputs.parseFlags());
+        JavaRegexp compiled = create(analyzeParsed(patternCopy, parsed, inputs.parseFlags(), inputs.maxMemory(), inputs.byteFrequencies(), ScanPlan.Language.JAVA, scanPlanMode), inputs);
+        if (inputs.generateBytecode()) {
             JavaRegexp generated = CompiledScanJavaRegexp.create(compiled);
             if (generated != null) {
                 return generated;
@@ -282,6 +298,27 @@ public sealed class JavaRegexp
         return false;
     }
 
+    /// Returns whether `other` is a Java pattern compiled from equal pattern bytes with equal
+    /// effective option values, including those that change only performance, such as the memory
+    /// budget. Two such compiles are equal whichever class each compile built, generated or not.
+    @Override
+    public final boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof JavaRegexp that)) {
+            return false;
+        }
+        return hash == that.hash && compileInputs.equals(that.compileInputs);
+    }
+
+    @Override
+    public final int hashCode()
+    {
+        return hash;
+    }
+
     /// Returns the number of non-overlapping matches, including empty matches.
     /// Empty matches advance by one UTF-8 code point as in [RegexpMatcher#find()].
     /// No capture values are returned.
@@ -295,9 +332,9 @@ public sealed class JavaRegexp
     static final class ExactLiteralJavaRegexp
             extends JavaRegexp
     {
-        private ExactLiteralJavaRegexp(Analysis analysis)
+        private ExactLiteralJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -329,9 +366,9 @@ public sealed class JavaRegexp
     static final class LiteralKernelJavaRegexp
             extends JavaRegexp
     {
-        private LiteralKernelJavaRegexp(Analysis analysis)
+        private LiteralKernelJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -382,9 +419,9 @@ public sealed class JavaRegexp
     {
         private final boolean literalSetCount;
 
-        private LiteralAlternationJavaRegexp(Analysis analysis)
+        private LiteralAlternationJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.literalSetCount = analysis.literalSetCount();
         }
 
@@ -415,9 +452,9 @@ public sealed class JavaRegexp
         // The literals that a full match reads beside the literal set.
         private final LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals;
 
-        private LiteralSetJavaRegexp(Analysis analysis)
+        private LiteralSetJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
         }
 
@@ -450,9 +487,9 @@ public sealed class JavaRegexp
     static final class FixedWidthJavaRegexp
             extends JavaRegexp
     {
-        private FixedWidthJavaRegexp(Analysis analysis)
+        private FixedWidthJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -474,9 +511,9 @@ public sealed class JavaRegexp
     {
         private final boolean retainedClassCountDfa;
 
-        private ClassRunJavaRegexp(Analysis analysis)
+        private ClassRunJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
@@ -509,9 +546,9 @@ public sealed class JavaRegexp
     static final class ByteTableJavaRegexp
             extends JavaRegexp
     {
-        private ByteTableJavaRegexp(Analysis analysis)
+        private ByteTableJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -537,9 +574,9 @@ public sealed class JavaRegexp
         private final boolean singleAttemptCount;
         private final boolean literalKernelFind;
 
-        private ScanPlanJavaRegexp(Analysis analysis)
+        private ScanPlanJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
             this.singleAttemptCount = analysis.singleAttemptCount();
             this.literalKernelFind = analysis.literalKernelFind();

@@ -4157,7 +4157,7 @@ first byte by default. Probing a rarer byte is an opt-in deviation. The `Re2`,
 it gives every byte the same probability and so keeps first-byte scanning. A
 caller can instead choose the `englishText()` or `json()` preset, a
 distribution built from byte counts with `fromCounts`, or one learned from
-sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
+sample data with `builder()`. Matching reads only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,

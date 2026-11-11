@@ -56,4 +56,23 @@ public final class PatternInfo
     {
         return capturingGroupNames;
     }
+
+    @Override
+    public boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof PatternInfo that)) {
+            return false;
+        }
+        return capturingGroupCount == that.capturingGroupCount &&
+                capturingGroupNames.equals(that.capturingGroupNames);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return 31 * capturingGroupCount + capturingGroupNames.hashCode();
+    }
 }
