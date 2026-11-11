@@ -31,23 +31,30 @@ public final class FilteredRe2
 {
     private static final int DEFAULT_MINIMUM_ATOM_LENGTH = 3;
 
+    private final int minimumAtomLength;
     private final List<Re2> patterns;
     private final PrefilterTree prefilterTree;
     private final List<Slice> atoms;
     private final Re2.Options.Encoding encoding;
+    // The hash of the minimum atom length and the patterns, which decide equality, computed when
+    // the collection compiles.
+    private final int hash;
 
     private FilteredRe2(
+            int minimumAtomLength,
             List<Re2> patterns,
             PrefilterTree prefilterTree,
             List<Slice> atoms,
             Re2.Options.Encoding encoding)
     {
+        this.minimumAtomLength = minimumAtomLength;
         this.patterns = List.copyOf(patterns);
         this.prefilterTree = requireNonNull(prefilterTree, "prefilterTree is null");
         this.atoms = atoms.stream()
                 .map(Slice::copy)
                 .toList();
         this.encoding = requireNonNull(encoding, "encoding is null");
+        this.hash = 31 * minimumAtomLength + this.patterns.hashCode();
     }
 
     /// Creates a single-use builder with the default three-byte minimum atom length.
@@ -190,8 +197,32 @@ public final class FilteredRe2
         return -1;
     }
 
+    /// Returns whether `other` is a collection built with the same minimum atom length from
+    /// equal patterns, added in the same order. Patterns compare as [Re2#equals(Object)] does, so
+    /// each pattern's options take part, and the atoms and encoding follow from these inputs.
+    @Override
+    public boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof FilteredRe2 that)) {
+            return false;
+        }
+        return hash == that.hash &&
+                minimumAtomLength == that.minimumAtomLength &&
+                patterns.equals(that.patterns);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return hash;
+    }
+
     public static final class Builder
     {
+        private final int minimumAtomLength;
         private final List<Re2> patterns = new ArrayList<>();
         private final PrefilterTree prefilterTree;
         private Re2.Options.Encoding encoding;
@@ -202,6 +233,7 @@ public final class FilteredRe2
             if (minimumAtomLength < 0) {
                 throw new IllegalArgumentException("minimumAtomLength is negative: " + minimumAtomLength);
             }
+            this.minimumAtomLength = minimumAtomLength;
             prefilterTree = new PrefilterTree(minimumAtomLength);
         }
 
@@ -248,7 +280,7 @@ public final class FilteredRe2
             prefilterTree.compile(atoms);
             Re2.Options.Encoding collectionEncoding =
                     encoding == null ? Re2.Options.Encoding.UTF8 : encoding;
-            return new FilteredRe2(patterns, prefilterTree, atoms, collectionEncoding);
+            return new FilteredRe2(minimumAtomLength, patterns, prefilterTree, atoms, collectionEncoding);
         }
 
         private void requireNotBuilt()

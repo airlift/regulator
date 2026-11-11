@@ -81,7 +81,8 @@ public sealed class TrinoRegexp
         }
 
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// scan probes. Matching reads only the chosen offsets; the compiled pattern keeps the
+        /// distribution only to compare it with other compiles. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
         /// folded byte pairs and folded runs that case-insensitive prefix scans probe, decides
         /// whether a find scans for a folded run behind a leading assertion's literal in place of
@@ -114,22 +115,35 @@ public sealed class TrinoRegexp
     // TrinoRegexp.Options has no syntax settings, so parsing always starts from the same flags.
     private static final int PARSE_FLAGS = Regexp.LIKE_PERL;
 
+    /// The inputs of a compile, which decide equality: the pattern bytes and every option that
+    /// can change what the compile builds, including those that change only performance, such as
+    /// the memory budget, so that a cache keyed on patterns never returns one compiled differently.
+    /// Each subclass and generated class keeps the inputs of the compile that built it.
+    record CompileInputs(Slice pattern, long maxMemory, ByteFrequencies byteFrequencies, boolean generateBytecode, ScanPlanMode scanPlanMode) {}
+
     // The compiled engine; null only in the literal-alternation and literal-set subclasses.
     private final TrinoCompiledPattern re2;
+    private final CompileInputs compileInputs;
+    // The hash of compileInputs, computed when the pattern compiles.
+    private final int hash;
     private final boolean mayHaveSingleByteRepeatMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
     private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
 
-    private TrinoRegexp()
+    private TrinoRegexp(CompileInputs compileInputs)
     {
         this.re2 = null;
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
         this.mayHaveSingleByteRepeatMatcher = false;
     }
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only nested implementations; the non-sealed CompiledScanTrinoRegexp is extended only by its generated hidden class")
-    private TrinoRegexp(TrinoCompiledPattern compiledPattern)
+    private TrinoRegexp(TrinoCompiledPattern compiledPattern, CompileInputs compileInputs)
     {
         this.re2 = requireNonNull(compiledPattern, "compiledPattern is null");
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
         this.mayHaveSingleByteRepeatMatcher = compiledPattern.canMatchEmpty();
     }
 
@@ -191,60 +205,61 @@ public sealed class TrinoRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
+        CompileInputs inputs = new CompileInputs(patternCopy, options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
         ParseResult parsed = TrinoRegexpParser.parse(patternCopy, PARSE_FLAGS);
         LiteralAlternationSpanMatcher literalAlternationMatcher = LiteralAlternationSpanMatcher.analyze(
                 parsed.regexp(),
                 parsed.capturingGroupCount());
         // CompiledPattern.withRequiredTrinoBudget must report what any route added here needs.
-        long forwardMemory = CompiledPattern.forwardMemory(options.maxMemory());
+        long forwardMemory = CompiledPattern.forwardMemory(inputs.maxMemory());
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
-            return new LiteralAlternationTrinoRegexp(patternCopy, literalAlternationMatcher);
+            return new LiteralAlternationTrinoRegexp(inputs, literalAlternationMatcher);
         }
         LiteralSetSpanMatcher literalSetMatcher = LiteralSetSpanMatcher.analyze(parsed.regexp(), parsed.capturingGroupCount(), forwardMemory);
         if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
-            return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
+            return new LiteralSetTrinoRegexp(inputs, literalSetMatcher);
         }
         CompiledPattern.Analysis analysis;
         try {
-            analysis = CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+            analysis = CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, inputs.maxMemory(), inputs.byteFrequencies(), scanPlanMode);
         }
         catch (RegexpCompileMemoryLimitException e) {
             // What each route needs is computed only after every route failed.
-            throw CompiledPattern.withRequiredTrinoBudget(e, parsed, PARSE_FLAGS, options.maxMemory(), literalAlternationMatcher);
+            throw CompiledPattern.withRequiredTrinoBudget(e, parsed, PARSE_FLAGS, inputs.maxMemory(), literalAlternationMatcher);
         }
         TrinoCompiledPattern compiledPattern = TrinoCompiledPattern.create(analysis);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
-            return new BeginLineTrinoRegexp(compiledPattern);
+            return new BeginLineTrinoRegexp(compiledPattern, inputs);
         }
         OrderedLiteralMatcher orderedLiteralMatcher = compiledPattern.createOrderedLiteralMatcher();
         // The ordered matcher takes precedence over the required bytes.
         if (orderedLiteralMatcher != null && compiledPattern.tryReserveForwardDfaMemory(orderedLiteralMatcher.estimatedRetainedSize())) {
-            return new OrderedLiteralTrinoRegexp(compiledPattern, orderedLiteralMatcher);
+            return new OrderedLiteralTrinoRegexp(compiledPattern, inputs, orderedLiteralMatcher);
         }
         DotStarLiteralSpanMatcher dotStarLiteralSpanMatcher = compiledPattern.createDotStarLiteralSpanMatcher();
         if (dotStarLiteralSpanMatcher != null) {
-            return new DotStarLiteralTrinoRegexp(compiledPattern, dotStarLiteralSpanMatcher);
+            return new DotStarLiteralTrinoRegexp(compiledPattern, inputs, dotStarLiteralSpanMatcher);
         }
         if (compiledPattern.hasExactLiteralSpan()) {
-            return new ExactLiteralTrinoRegexp(compiledPattern);
+            return new ExactLiteralTrinoRegexp(compiledPattern, inputs);
         }
         if (compiledPattern.mayHaveFixedWidthByteSpanMatcher()) {
-            TrinoRegexp fixedWidthByteRegexp = FixedWidthByteSpanMatcher.createTrinoRegexp(compiledPattern, parsed.regexp());
+            TrinoRegexp fixedWidthByteRegexp = FixedWidthByteSpanMatcher.createTrinoRegexp(compiledPattern, inputs, parsed.regexp());
             if (fixedWidthByteRegexp != null) {
                 return fixedWidthByteRegexp;
             }
         }
         if (compiledPattern.hasCharacterClassSpan()) {
-            return new CharacterClassTrinoRegexp(compiledPattern);
+            return new CharacterClassTrinoRegexp(compiledPattern, inputs);
         }
-        if (options.generateBytecode()) {
-            TrinoRegexp generated = CompiledScanTrinoRegexp.create(compiledPattern);
+        if (inputs.generateBytecode()) {
+            TrinoRegexp generated = CompiledScanTrinoRegexp.create(compiledPattern, inputs);
             if (generated != null) {
                 return generated;
             }
         }
-        return new TrinoRegexp(compiledPattern);
+        return new TrinoRegexp(compiledPattern, inputs);
     }
 
     /// Creates a mutable matcher retaining every capturing group. Matching uses the Trino language
@@ -285,6 +300,27 @@ public sealed class TrinoRegexp
     public boolean usesGeneratedBytecode()
     {
         return false;
+    }
+
+    /// Returns whether `other` is a Trino pattern compiled from equal pattern bytes with equal
+    /// option values, including those that change only performance, such as the memory budget.
+    /// Two such compiles are equal whichever class each compile built, generated or not.
+    @Override
+    public final boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof TrinoRegexp that)) {
+            return false;
+        }
+        return hash == that.hash && compileInputs.equals(that.compileInputs);
+    }
+
+    @Override
+    public final int hashCode()
+    {
+        return hash;
     }
 
     /// Returns the generated static method holding this pattern's scan attempt loop, with the
@@ -342,7 +378,7 @@ public sealed class TrinoRegexp
     /// Returns a copy of the compiled pattern bytes.
     public Slice pattern()
     {
-        return re2.pattern();
+        return compileInputs.pattern().copy();
     }
 
     /// Returns the number of capturing groups, excluding group zero (the whole match).
@@ -373,9 +409,9 @@ public sealed class TrinoRegexp
     private static final class BeginLineTrinoRegexp
             extends TrinoRegexp
     {
-        private BeginLineTrinoRegexp(TrinoCompiledPattern re2)
+        private BeginLineTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs)
         {
-            super(re2);
+            super(re2, compileInputs);
         }
 
         @Override
@@ -406,9 +442,9 @@ public sealed class TrinoRegexp
     {
         private final OrderedLiteralMatcher matcher;
 
-        private OrderedLiteralTrinoRegexp(TrinoCompiledPattern re2, OrderedLiteralMatcher matcher)
+        private OrderedLiteralTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs, OrderedLiteralMatcher matcher)
         {
-            super(re2);
+            super(re2, compileInputs);
             this.matcher = requireNonNull(matcher, "matcher is null");
         }
 
@@ -811,9 +847,9 @@ public sealed class TrinoRegexp
     {
         private final DotStarLiteralSpanMatcher spanMatcher;
 
-        private DotStarLiteralTrinoRegexp(TrinoCompiledPattern re2, DotStarLiteralSpanMatcher spanMatcher)
+        private DotStarLiteralTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs, DotStarLiteralSpanMatcher spanMatcher)
         {
-            super(re2);
+            super(re2, compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -987,9 +1023,9 @@ public sealed class TrinoRegexp
     {
         private final FixedWidthByteSpanMatcher spanMatcher;
 
-        FixedWidthByteTrinoRegexp(TrinoCompiledPattern re2, FixedWidthByteSpanMatcher spanMatcher)
+        FixedWidthByteTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs, FixedWidthByteSpanMatcher spanMatcher)
         {
-            super(re2);
+            super(re2, compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -1158,14 +1194,11 @@ public sealed class TrinoRegexp
     private static final class LiteralAlternationTrinoRegexp
             extends TrinoRegexp
     {
-        // This subtype has no compiled engine to hold the source bytes, so it keeps them.
-        private final Slice patternBytes;
         private final LiteralAlternationSpanMatcher spanMatcher;
 
-        private LiteralAlternationTrinoRegexp(Slice patternBytes, LiteralAlternationSpanMatcher spanMatcher)
+        private LiteralAlternationTrinoRegexp(CompileInputs compileInputs, LiteralAlternationSpanMatcher spanMatcher)
         {
-            super();
-            this.patternBytes = requireNonNull(patternBytes, "patternBytes is null");
+            super(compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -1173,12 +1206,6 @@ public sealed class TrinoRegexp
         LiteralAlternationSpanMatcher literalAlternationSpanMatcher()
         {
             return spanMatcher;
-        }
-
-        @Override
-        public Slice pattern()
-        {
-            return patternBytes.copy();
         }
 
         @Override
@@ -1359,14 +1386,11 @@ public sealed class TrinoRegexp
     private static final class LiteralSetTrinoRegexp
             extends TrinoRegexp
     {
-        // This subtype has no compiled engine to hold the source bytes, so it keeps them.
-        private final Slice patternBytes;
         private final LiteralSetSpanMatcher spanMatcher;
 
-        private LiteralSetTrinoRegexp(Slice patternBytes, LiteralSetSpanMatcher spanMatcher)
+        private LiteralSetTrinoRegexp(CompileInputs compileInputs, LiteralSetSpanMatcher spanMatcher)
         {
-            super();
-            this.patternBytes = requireNonNull(patternBytes, "patternBytes is null");
+            super(compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -1384,12 +1408,6 @@ public sealed class TrinoRegexp
                 throw new IllegalArgumentException("capturingGroupCount out of range: " + retainedCapturingGroupCount);
             }
             return TrinoRegexpMatcher.literalSet(spanMatcher, source);
-        }
-
-        @Override
-        public Slice pattern()
-        {
-            return patternBytes.copy();
         }
 
         @Override
@@ -1570,9 +1588,9 @@ public sealed class TrinoRegexp
     private static final class ExactLiteralTrinoRegexp
             extends TrinoRegexp
     {
-        private ExactLiteralTrinoRegexp(TrinoCompiledPattern re2)
+        private ExactLiteralTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs)
         {
-            super(re2);
+            super(re2, compileInputs);
         }
 
         @Override
@@ -1744,9 +1762,9 @@ public sealed class TrinoRegexp
     private static final class CharacterClassTrinoRegexp
             extends TrinoRegexp
     {
-        private CharacterClassTrinoRegexp(TrinoCompiledPattern re2)
+        private CharacterClassTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs)
         {
-            super(re2);
+            super(re2, compileInputs);
         }
 
         @Override
@@ -1909,23 +1927,25 @@ public sealed class TrinoRegexp
     abstract static non-sealed class CompiledScanTrinoRegexp
             extends TrinoRegexp
     {
-        /// Wraps the compiled engine `re2`. Only the generated subclass calls this.
-        CompiledScanTrinoRegexp(TrinoCompiledPattern re2)
+        /// Wraps the compiled engine `re2`, compiled from `compileInputs`. Only the generated
+        /// subclass calls this.
+        CompiledScanTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs)
         {
-            super(re2);
+            super(re2, compileInputs);
         }
 
-        /// Returns a Trino pattern over the compiled engine `re2` with a generated class, or `null`
-        /// when the pattern is not eligible or the class cannot be generated. The declared type
-        /// keeps verification of the base class from loading this class.
-        static TrinoRegexp create(TrinoCompiledPattern re2)
+        /// Returns a Trino pattern over the compiled engine `re2`, compiled from `compileInputs`,
+        /// with a generated class, or `null` when the pattern is not eligible or the class cannot
+        /// be generated. The declared type keeps verification of the base class from loading this
+        /// class.
+        static TrinoRegexp create(TrinoCompiledPattern re2, CompileInputs compileInputs)
         {
             ScanKernelGenerator.TrinoRoutes routes = ScanKernelGenerator.TrinoRoutes.of(re2);
             if (routes == null) {
                 return null;
             }
             try {
-                return ScanKernelGenerator.generateCompiledTrinoPattern(routes);
+                return ScanKernelGenerator.generateCompiledTrinoPattern(routes, compileInputs);
             }
             catch (RuntimeException | LinkageError ignored) {
                 // Linking the generator fails here only if a consumer excluded the classfile

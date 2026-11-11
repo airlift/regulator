@@ -156,6 +156,22 @@ public class TestByteFrequencies
     }
 
     @Test
+    public void testEqualsComparesProbabilities()
+    {
+        long[] counts = new long[256];
+        counts['a'] = 10;
+        ByteFrequencies frequencies = ByteFrequencies.fromCounts(counts);
+        assertThat(ByteFrequencies.fromCounts(counts)).isEqualTo(frequencies).hasSameHashCodeAs(frequencies);
+        assertThat(ByteFrequencies.builder().add(utf8Slice("aaaaaaaaaa")).build()).isEqualTo(frequencies);
+        counts['a'] = 11;
+        assertThat(ByteFrequencies.fromCounts(counts)).isNotEqualTo(frequencies);
+
+        // A distribution built from no samples has the uniform probabilities, but only uniform()
+        // ranks folded pairs by English text, so the two compile differently.
+        assertThat(ByteFrequencies.fromCounts(new long[256])).isNotEqualTo(ByteFrequencies.uniform());
+    }
+
+    @Test
     public void testBuilderCountsSampleBytes()
     {
         Slice backing = utf8Slice("xxhttps://a.b/c?id=1 café=2xx");

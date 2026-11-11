@@ -141,6 +141,26 @@ public class TestJavaRegexpOptions
                 .hasMessage("byteFrequencies is null");
     }
 
+    @Test
+    public void testEqualsComparesPatternAndOptions()
+    {
+        // Each compile that generates bytecode defines its own class, and two compiles of one
+        // pattern and options compare equal whichever class each built.
+        JavaRegexp.Options generate = JavaRegexp.Options.defaults().setGenerateBytecode(true);
+        JavaRegexp compiled = JavaRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        JavaRegexp recompiled = JavaRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
+        assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
+
+        // A different pattern, or any option that changes the compile, including options that
+        // change only performance, makes the patterns unequal.
+        assertThat(JavaRegexp.compile(utf8Slice("x([^/]+)/"), generate)).isNotEqualTo(compiled);
+        assertThat(JavaRegexp.compile(utf8Slice("x([^/]+)"))).isNotEqualTo(compiled);
+        assertThat(JavaRegexp.compile(utf8Slice("x([^/]+)"), JavaRegexp.Options.defaults().setGenerateBytecode(true).setCaseInsensitive(true))).isNotEqualTo(compiled);
+        assertThat(JavaRegexp.compile(utf8Slice("x([^/]+)"), JavaRegexp.Options.defaults().setGenerateBytecode(true).setMaxMemory(16 << 20))).isNotEqualTo(compiled);
+        assertThat(JavaRegexp.compile(utf8Slice("x([^/]+)"), JavaRegexp.Options.defaults().setGenerateBytecode(true).setByteFrequencies(ByteFrequencies.englishText()))).isNotEqualTo(compiled);
+    }
+
     private static void assertMatchesJdk(String pattern, String input, JavaRegexp.Options options, int jdkFlags)
     {
         JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern), options);

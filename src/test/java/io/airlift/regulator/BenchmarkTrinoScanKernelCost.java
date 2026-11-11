@@ -58,8 +58,10 @@ public final class BenchmarkTrinoScanKernelCost
     {
         List<ScanKernelGenerator.TrinoRoutes> routes = routes(count);
         List<Slice> inputs = new ArrayList<>(count);
+        List<TrinoRegexp.CompileInputs> compileInputs = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
             inputs.add(input(index));
+            compileInputs.add(compileInputs(index));
         }
 
         System.gc();
@@ -68,8 +70,8 @@ public final class BenchmarkTrinoScanKernelCost
         long codeBytes = 0;
         long classfileBytes = 0;
         long start = System.nanoTime();
-        for (ScanKernelGenerator.TrinoRoutes route : routes) {
-            ScanKernelGenerator.ReportedTrinoPattern generated = ScanKernelGenerator.generateCompiledTrinoPatternForDiagnostics(route);
+        for (int index = 0; index < count; index++) {
+            ScanKernelGenerator.ReportedTrinoPattern generated = ScanKernelGenerator.generateCompiledTrinoPatternForDiagnostics(routes.get(index), compileInputs.get(index));
             patterns.add(generated.pattern());
             for (CompilationReport.ClassInfo classInfo : generated.report().classes()) {
                 classfileBytes += classInfo.classfileBytes();
@@ -131,6 +133,12 @@ public final class BenchmarkTrinoScanKernelCost
             case 2 -> "(?:(?<key>[a-z]+):(?<value>[^/]+))?/end$";
             default -> "((a)?(b)?(c)?(d)?)abcd([^/]+)/$";
         });
+    }
+
+    /// Returns the inputs of a compile of [#expression(int)] that generates bytecode.
+    static TrinoRegexp.CompileInputs compileInputs(int index)
+    {
+        return new TrinoRegexp.CompileInputs(expression(index), Re2.Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), true, CompiledPattern.ScanPlanMode.DEFAULT);
     }
 
     static Slice input(int index)

@@ -91,6 +91,12 @@ public class TestJavaRegexp
         PatternInfo comments = JavaRegexp.parse(utf8Slice("#(ignored)\n(a)"), JavaRegexp.Options.defaults().setComments(true));
         assertThat(comments.capturingGroupCount()).isEqualTo(1);
         assertThat(comments.namedCapturingGroups()).isEmpty();
+
+        // Capture metadata compares by value.
+        assertThat(JavaRegexp.parse(utf8Slice("(?<word>\\w)(b)(?<never>c)"))).isEqualTo(info).hasSameHashCodeAs(info);
+        assertThat(comments).isNotEqualTo(info);
+        assertThat(JavaRegexp.parse(utf8Slice("(a)(b)"))).isNotEqualTo(JavaRegexp.parse(utf8Slice("(a)(b)(c)")));
+        assertThat(JavaRegexp.parse(utf8Slice("(?<x>a)"))).isNotEqualTo(JavaRegexp.parse(utf8Slice("(?<y>a)")));
     }
 
     @Test

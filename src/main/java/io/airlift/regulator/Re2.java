@@ -134,7 +134,8 @@ public sealed class Re2
         }
 
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// scan probes. Matching reads only the chosen offsets; the compiled pattern keeps the
+        /// distribution only to compare it with other compiles. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
         /// folded byte pairs and folded runs that case-insensitive prefix scans probe, decides
         /// whether a find scans for a folded run behind a leading assertion's literal in place of
@@ -278,28 +279,44 @@ public sealed class Re2
         }
     }
 
-    private Re2(Analysis analysis)
+    /// The inputs of a compile, which decide equality: the pattern bytes and every option that
+    /// can change what the compile builds, including those that change only performance, such as
+    /// the memory budget, so that a cache keyed on patterns never returns one compiled differently.
+    /// Each shape class and generated class keeps the inputs of the compile that built it, which
+    /// adds this object of about 40 bytes to what a pattern retains, and for equality also keeps
+    /// alive a custom [ByteFrequencies] distribution, a table of 256 doubles of about 2 KB.
+    private record CompileInputs(Slice pattern, int parseFlags, boolean longestMatch, long maxMemory, ByteFrequencies byteFrequencies, boolean generateBytecode, ScanPlanMode scanPlanMode) {}
+
+    private final CompileInputs compileInputs;
+    // The hash of compileInputs, computed when the pattern compiles.
+    private final int hash;
+
+    private Re2(Analysis analysis, CompileInputs compileInputs)
     {
         super(analysis);
+        this.compileInputs = compileInputs;
+        this.hash = compileInputs.hashCode();
     }
 
     private Re2(Re2 pattern)
     {
         super(pattern);
+        this.compileInputs = pattern.compileInputs;
+        this.hash = pattern.hash;
     }
 
     /// Constructs an instance of the analyzed pattern's shape class.
-    private static Re2 create(Analysis analysis)
+    private static Re2 create(Analysis analysis, CompileInputs compileInputs)
     {
         return switch (analysis.shape()) {
-            case ENGINE -> new Re2(analysis);
-            case EXACT_LITERAL -> new ExactLiteralRe2(analysis);
-            case LITERAL_KERNEL -> new LiteralKernelRe2(analysis);
-            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationRe2(analysis) : new LiteralSetRe2(analysis);
-            case FIXED_WIDTH -> new FixedWidthRe2(analysis);
-            case CLASS_RUN -> new ClassRunRe2(analysis);
-            case BYTE_TABLE -> new ByteTableRe2(analysis);
-            case SCAN_PLAN -> new ScanPlanRe2(analysis);
+            case ENGINE -> new Re2(analysis, compileInputs);
+            case EXACT_LITERAL -> new ExactLiteralRe2(analysis, compileInputs);
+            case LITERAL_KERNEL -> new LiteralKernelRe2(analysis, compileInputs);
+            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationRe2(analysis, compileInputs) : new LiteralSetRe2(analysis, compileInputs);
+            case FIXED_WIDTH -> new FixedWidthRe2(analysis, compileInputs);
+            case CLASS_RUN -> new ClassRunRe2(analysis, compileInputs);
+            case BYTE_TABLE -> new ByteTableRe2(analysis, compileInputs);
+            case SCAN_PLAN -> new ScanPlanRe2(analysis, compileInputs);
         };
     }
 
@@ -376,8 +393,9 @@ public sealed class Re2
 
     private static Re2 compileParsed(Slice pattern, ParseResult parsed, int parseFlags, Options options, ScanPlanMode scanPlanMode)
     {
-        Re2 compiled = create(build(pattern, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), options.longestMatch(), Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode));
-        if (options.generateBytecode()) {
+        CompileInputs inputs = new CompileInputs(pattern, parseFlags, options.longestMatch(), options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
+        Re2 compiled = create(build(pattern, parsed, parseFlags, inputs.maxMemory(), inputs.byteFrequencies(), inputs.longestMatch(), Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode), inputs);
+        if (inputs.generateBytecode()) {
             Re2 generated = CompiledScanRe2.create(compiled);
             if (generated != null) {
                 return generated;
@@ -393,6 +411,27 @@ public sealed class Re2
     public boolean usesGeneratedBytecode()
     {
         return false;
+    }
+
+    /// Returns whether `other` is an RE2 pattern compiled from equal pattern bytes with equal
+    /// effective option values, including those that change only performance, such as the memory
+    /// budget. Two such compiles are equal whichever class each compile built, generated or not.
+    @Override
+    public final boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof Re2 that)) {
+            return false;
+        }
+        return hash == that.hash && compileInputs.equals(that.compileInputs);
+    }
+
+    @Override
+    public final int hashCode()
+    {
+        return hash;
     }
 
     /// Replaces the first match using RE2 rewrite syntax (`\0` through `\9`).
@@ -591,7 +630,7 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return create(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode));
+        return create(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode), new CompileInputs(pattern, flags, longestMatch, maxMemory, byteFrequencies, false, scanPlanMode));
     }
 
     /// The caller passes a private snapshot that it never mutates.
@@ -609,7 +648,7 @@ public sealed class Re2
     /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies)
     {
-        return create(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, ScanPlan.Language.RE2, ScanPlanMode.DISABLED));
+        return create(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, ScanPlan.Language.RE2, ScanPlanMode.DISABLED), new CompileInputs(pattern, flags, false, maxMemory, byteFrequencies, false, ScanPlanMode.DISABLED));
     }
 
     private static boolean rewrite(DynamicSliceOutput out, Slice rewrite, Slice text, int[] groupOffsets, int captureSlotCount)
@@ -690,9 +729,9 @@ public sealed class Re2
     static final class ExactLiteralRe2
             extends Re2
     {
-        private ExactLiteralRe2(Analysis analysis)
+        private ExactLiteralRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -724,9 +763,9 @@ public sealed class Re2
     static final class LiteralKernelRe2
             extends Re2
     {
-        private LiteralKernelRe2(Analysis analysis)
+        private LiteralKernelRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -777,9 +816,9 @@ public sealed class Re2
     {
         private final boolean literalSetCount;
 
-        private LiteralAlternationRe2(Analysis analysis)
+        private LiteralAlternationRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.literalSetCount = analysis.literalSetCount();
         }
 
@@ -810,9 +849,9 @@ public sealed class Re2
         // The literals that a full match reads beside the literal set.
         private final LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals;
 
-        private LiteralSetRe2(Analysis analysis)
+        private LiteralSetRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
         }
 
@@ -845,9 +884,9 @@ public sealed class Re2
     static final class FixedWidthRe2
             extends Re2
     {
-        private FixedWidthRe2(Analysis analysis)
+        private FixedWidthRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -869,9 +908,9 @@ public sealed class Re2
     {
         private final boolean retainedClassCountDfa;
 
-        private ClassRunRe2(Analysis analysis)
+        private ClassRunRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
@@ -904,9 +943,9 @@ public sealed class Re2
     static final class ByteTableRe2
             extends Re2
     {
-        private ByteTableRe2(Analysis analysis)
+        private ByteTableRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
         }
 
         @Override
@@ -932,9 +971,9 @@ public sealed class Re2
         private final boolean singleAttemptCount;
         private final boolean literalKernelFind;
 
-        private ScanPlanRe2(Analysis analysis)
+        private ScanPlanRe2(Analysis analysis, CompileInputs compileInputs)
         {
-            super(analysis);
+            super(analysis, compileInputs);
             this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
             this.singleAttemptCount = analysis.singleAttemptCount();
             this.literalKernelFind = analysis.literalKernelFind();

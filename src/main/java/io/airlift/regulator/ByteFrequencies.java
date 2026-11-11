@@ -15,12 +15,14 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 
+import java.util.Arrays;
+
 import static java.util.Objects.requireNonNull;
 
 /// Background byte probabilities used to choose which byte of a literal a candidate scan probes.
 /// [Re2.Options#setByteFrequencies], [TrinoRegexp.Options#setByteFrequencies],
 /// [JavaRegexp.Options#setByteFrequencies], and [RustRegexp.Options#setByteFrequencies]
-/// select the distribution used during compilation; a compiled pattern keeps only the chosen probe
+/// select the distribution used during compilation; matching reads only the chosen probe
 /// offsets. The options default to [#uniform()], which gives every byte the same
 /// probability, so every case-sensitive literal scan that chooses a probe probes its first byte.
 /// The start literal filter of a pattern that begins with a few literals, the start class filter
@@ -168,10 +170,13 @@ public final class ByteFrequencies
     private static final ByteFrequencies UNIFORM = fromCounts(new long[256]);
 
     private final double[] probabilities;
+    // Computed once, since every compile hashes its distribution.
+    private final int hash;
 
     private ByteFrequencies(double[] probabilities)
     {
         this.probabilities = probabilities;
+        this.hash = Arrays.hashCode(probabilities);
     }
 
     /// Returns a distribution in which every byte is equally common, so every case-sensitive
@@ -324,6 +329,28 @@ public final class ByteFrequencies
     double probability(byte value)
     {
         return probabilities[value & 0xFF];
+    }
+
+    /// Returns whether `other` gives every byte the same probability and compiles the same
+    /// patterns. [#uniform()] is equal only to itself, since only it ranks folded pairs by
+    /// [#englishText()]; a distribution built from no samples has its probabilities but not that
+    /// substitution.
+    @Override
+    public boolean equals(Object other)
+    {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof ByteFrequencies that) || this == UNIFORM || that == UNIFORM) {
+            return false;
+        }
+        return hash == that.hash && Arrays.equals(probabilities, that.probabilities);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return hash;
     }
 
     /// Counts sample bytes for [ByteFrequencies#builder()]. Builders are not thread-safe.

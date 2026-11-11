@@ -155,6 +155,29 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testEqualsComparesPatternAndOptions()
+    {
+        // Each compile that generates bytecode defines its own class, and two compiles of one
+        // pattern and options compare equal whichever class each built, as do patterns that
+        // compile no engine.
+        TrinoRegexp.Options generate = TrinoRegexp.Options.defaults().setGenerateBytecode(true);
+        TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        TrinoRegexp recompiled = TrinoRegexp.compile(utf8Slice("x([^/]+)"), generate);
+        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
+        assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
+        TrinoRegexp alternation = TrinoRegexp.compile(utf8Slice("foo|bar"));
+        assertThat(alternation.literalAlternationSpanMatcher()).isNotNull();
+        assertThat(TrinoRegexp.compile(utf8Slice("foo|bar"))).isEqualTo(alternation).hasSameHashCodeAs(alternation);
+
+        // A different pattern, or any option that changes the compile, including options that
+        // change only performance, makes the patterns unequal.
+        assertThat(TrinoRegexp.compile(utf8Slice("x([^/]+)/"), generate)).isNotEqualTo(compiled);
+        assertThat(TrinoRegexp.compile(utf8Slice("x([^/]+)"))).isNotEqualTo(compiled);
+        assertThat(TrinoRegexp.compile(utf8Slice("x([^/]+)"), TrinoRegexp.Options.defaults().setGenerateBytecode(true).setMaxMemory(16 << 20))).isNotEqualTo(compiled);
+        assertThat(TrinoRegexp.compile(utf8Slice("x([^/]+)"), TrinoRegexp.Options.defaults().setGenerateBytecode(true).setByteFrequencies(ByteFrequencies.englishText()))).isNotEqualTo(compiled);
+    }
+
+    @Test
     public void testFinalLineDollar()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("a$"));

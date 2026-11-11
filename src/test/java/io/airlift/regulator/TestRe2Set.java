@@ -274,6 +274,21 @@ public class TestRe2Set
     }
 
     @Test
+    public void testEqualsComparesPatternsAndOptions()
+    {
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "foo", "ba+r");
+        Re2Set rebuilt = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "foo", "ba+r");
+        assertThat(rebuilt).isEqualTo(set).hasSameHashCodeAs(set);
+
+        // The patterns compare in ID order, and the match mode and every option the set compiles
+        // with take part, including the memory budget.
+        assertThat(buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "ba+r", "foo")).isNotEqualTo(set);
+        assertThat(buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FULL, "foo", "ba+r")).isNotEqualTo(set);
+        assertThat(buildSet(Re2.Options.defaults().setCaseSensitive(false), Re2Set.MatchMode.FIND, "foo", "ba+r")).isNotEqualTo(set);
+        assertThat(buildSet(Re2.Options.defaults().setMaxMemory(16 << 20), Re2Set.MatchMode.FIND, "foo", "ba+r")).isNotEqualTo(set);
+    }
+
+    @Test
     public void testBuilderCannotBeReused()
     {
         Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
@@ -453,6 +468,15 @@ public class TestRe2Set
         assertThatThrownBy(() -> set.matchingPatternIds(null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("text is null");
+    }
+
+    private static Re2Set buildSet(Re2.Options options, Re2Set.MatchMode matchMode, String... patterns)
+    {
+        Re2Set.Builder builder = Re2Set.builder(options, matchMode);
+        for (String pattern : patterns) {
+            builder.add(toSlice(pattern));
+        }
+        return builder.build();
     }
 
     private static Re2Set createExhaustingSet()

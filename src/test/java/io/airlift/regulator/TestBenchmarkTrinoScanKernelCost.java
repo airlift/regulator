@@ -30,7 +30,7 @@ public class TestBenchmarkTrinoScanKernelCost
         for (int index = 0; index < routes.size(); index++) {
             Slice input = BenchmarkTrinoScanKernelCost.input(index);
             Slice other = BenchmarkTrinoScanKernelCost.input(index + 1);
-            TrinoRegexp.CompiledScanTrinoRegexp pattern = ScanKernelGenerator.generateCompiledTrinoPattern(routes.get(index));
+            TrinoRegexp.CompiledScanTrinoRegexp pattern = ScanKernelGenerator.generateCompiledTrinoPattern(routes.get(index), BenchmarkTrinoScanKernelCost.compileInputs(index));
             assertThat(TrinoRegexp.compile(BenchmarkTrinoScanKernelCost.expression(index)).contains(input)).as("pattern %s", index).isTrue();
             assertThat(pattern.find(input, 0, groups)).as("pattern %s", index).isTrue();
             assertThat(groups).as("pattern %s", index).containsExactly(0, input.length());
