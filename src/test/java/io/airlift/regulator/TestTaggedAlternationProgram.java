@@ -307,9 +307,9 @@ public class TestTaggedAlternationProgram
     public void testCacheResetInsideOneSearch()
     {
         // A small budget, 4.5 MiB, fills the many-match cache within one long match, so the search
-        // resets it, in the byte loop and at the end of the text, and must go on with the fresh
-        // tables, choosing the branches a default budget chooses. At 4 MiB the resets come often
-        // enough that the search gives the rest of the text to the NFA.
+        // resets it in the byte loop and must go on with the fresh tables, choosing the branches a
+        // default budget chooses. At 4 MiB the resets come often enough that the search gives the
+        // rest of the text to the NFA.
         Slice patternText = utf8Slice(largeAlternation("[ab]*a[ab]{12}c", "[ab]*b[ab]{12}d", "[ab]*a[ab]{11}", "[ab]+", "x*"));
         Re2 reference = Re2.compile(patternText);
         Re2 small = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(9L << 19));
@@ -326,13 +326,55 @@ public class TestTaggedAlternationProgram
         }
         Slice input = utf8Slice(text.toString());
 
+        assertThat(winningBranches(small.matcher(input))).isEqualTo(winningBranches(reference.matcher(input)));
+
+        // Each search reads a long span between resets, but fewer than ten bytes for each state,
+        // so a matcher's later searches skip the DFA once two resets in a row are slow. Searched
+        // on the DFA alone, every match chooses its branch there, across its resets.
+        int resets = taggedDfa.resetCount();
+        Prog taggedProgram = small.taggedAlternationProgramForDiagnostics();
+        RegexpMatcher matcher = reference.matcher(input);
+        while (matcher.find()) {
+            int group = 1;
+            while (!matcher.matched(group)) {
+                group++;
+            }
+            assertThat(Dfa.searchManyFull(taggedProgram, input, 0, input.length(), matcher.start(), matcher.end())).isEqualTo(group - 1);
+        }
+        assertThat(taggedDfa.resetCount()).isGreaterThan(resets);
+    }
+
+    @Test
+    public void testThrashingManyMatchDfaIsSkipped()
+    {
+        // At 256 KiB the many-match cache holds too few states for words of a and b, so without
+        // the skip each pass over this text resets it about 260 times, after a few matches each.
+        // The first reset has no allowance to judge, so the window opens at the third, and the
+        // matches after it take the ordinary capture engines, choosing the branches a default
+        // budget chooses.
+        Slice patternText = utf8Slice("([ab]*a[ab]{10})|([ab]*b[ab]{10}c)|([ab]+)");
+        Re2 reference = Re2.compile(patternText);
+        Re2 small = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(256L << 10));
+        assertThat(small.usesTaggedAlternationForDiagnostics()).isTrue();
+        Dfa.DfaInstance taggedDfa = small.taggedAlternationProgramForDiagnostics().cachedDfaIfPresent(MANY_MATCH);
+
+        Random random = new Random(1);
+        StringBuilder text = new StringBuilder();
+        while (text.length() < 64 << 10) {
+            for (int letters = 10 + random.nextInt(71); letters > 0; letters--) {
+                text.append(random.nextBoolean() ? 'a' : 'b');
+            }
+            text.append(' ');
+        }
+        Slice input = utf8Slice(text.toString());
+
         int resets = taggedDfa.resetCount();
         RegexpMatcher matcher = small.matcher(input);
-        assertThat(winningBranches(matcher)).isEqualTo(winningBranches(reference.matcher(input)));
-        assertThat(taggedDfa.resetCount()).isGreaterThan(resets);
-        // Every match chose its branch on the many-match DFA.
-        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
-        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        List<String> matches = winningBranches(matcher);
+        assertThat(matches).hasSizeGreaterThan(2000).isEqualTo(winningBranches(reference.matcher(input)));
+        assertThat(taggedDfa.resetCount() - resets).isEqualTo(3);
+        assertThat(taggedDfa.manyMatchSearchSkipsRemaining()).isBetween((1 << 16) - matches.size(), (1 << 16) - 1);
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
     private static List<String> winningBranches(RegexpMatcher matcher)
