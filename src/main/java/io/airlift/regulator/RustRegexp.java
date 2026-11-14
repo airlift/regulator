@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -405,6 +406,14 @@ public sealed class RustRegexp
         return hash;
     }
 
+    @Override
+    final long compileInputsRetainedSize(Slice compiledPattern)
+    {
+        return RetainedSizes.COMPILE_INPUTS_INSTANCE_SIZE +
+                (compileInputs.pattern() == compiledPattern ? 0 : compileInputs.pattern().getRetainedSize()) +
+                compileInputs.byteFrequencies().estimatedRetainedSize();
+    }
+
     /// Returns whether the pattern has a match anywhere in `input` without allocating capture
     /// storage. Outside byte mode, a pattern that can match empty allocates storage for the
     /// match span, to skip an empty match that splits a UTF-8 character. The shape classes,
@@ -686,6 +695,12 @@ public sealed class RustRegexp
         }
 
         @Override
+        long shapeRetainedSize()
+        {
+            return extendingLiterals.estimatedRetainedSize();
+        }
+
+        @Override
         public boolean find(Slice input)
         {
             return findOnLiteralAlternation(input);
@@ -911,5 +926,14 @@ public sealed class RustRegexp
         {
             return false;
         }
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int COMPILE_INPUTS_INSTANCE_SIZE = SizeOf.instanceSize(CompileInputs.class);
+
+        private RetainedSizes() {}
     }
 }

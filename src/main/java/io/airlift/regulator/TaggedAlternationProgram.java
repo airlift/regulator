@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.ArrayDeque;
@@ -26,6 +27,8 @@ import static io.airlift.regulator.RegexpOp.CAPTURE;
 
 final class TaggedAlternationProgram
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(TaggedAlternationProgram.class);
+
     private final Prog program;
     private final int branchCount;
 
@@ -33,6 +36,11 @@ final class TaggedAlternationProgram
     {
         this.program = program;
         this.branchCount = branchCount;
+    }
+
+    long estimatedRetainedSize()
+    {
+        return INSTANCE_SIZE + program.estimatedRetainedSize();
     }
 
     static TaggedAlternationProgram compile(

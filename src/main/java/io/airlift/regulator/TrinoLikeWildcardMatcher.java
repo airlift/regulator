@@ -17,6 +17,7 @@ import io.airlift.regulator.TrinoLikeParser.Any;
 import io.airlift.regulator.TrinoLikeParser.Element;
 import io.airlift.regulator.TrinoLikeParser.Literal;
 import io.airlift.regulator.TrinoLikeParser.ZeroOrMore;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -33,11 +34,20 @@ final class TrinoLikeWildcardMatcher
     private static final int INVALID_CHARACTER = Integer.MIN_VALUE;
     private static final ThreadLocal<Workspace> WORKSPACE = ThreadLocal.withInitial(Workspace::new);
 
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoLikeWildcardMatcher.class);
+
     private final boolean exact;
     private final boolean[] loopback;
     private final int[] match;
     private final int acceptState;
     private final int directAnyCount;
+
+    /// The matcher and its state tables. The thread's workspace is not the matcher's: see
+    /// [Workspace].
+    long estimatedRetainedSize()
+    {
+        return INSTANCE_SIZE + SizeOf.sizeOf(loopback) + SizeOf.sizeOf(match);
+    }
 
     TrinoLikeWildcardMatcher(List<Element> pattern, int start, int end, boolean exact)
     {
@@ -239,6 +249,11 @@ final class TrinoLikeWildcardMatcher
         return INVALID_CHARACTER;
     }
 
+    // The state sets of the matching thread, which every wildcard pattern it matches shares and no
+    // pattern owns, so no pattern's retained size counts them. They grow to the most states of
+    // any pattern the thread has matched here, one more than the characters and `_` after the
+    // pattern's leading literal and before its trailing one, and never shrink: about 12 bytes a
+    // state, held until the thread ends.
     private static final class Workspace
     {
         private int[] currentStates = new int[0];

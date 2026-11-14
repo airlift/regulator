@@ -143,10 +143,19 @@ budget, as
 [How do threads share a pattern's memory?](#how-do-threads-share-a-patterns-memory)
 describes. Its default is 4 times RE2's because Regulator is built for data
 processing, where one compiled pattern runs over many rows. The budget is a
-cap, not a reservation: a typical benchmarked pattern settles at about 10 KB,
-and the default keeps the large DFA graphs of nearly every benchmarked pattern
-cached without resets. A pattern that needs more to compile, or to keep its
-DFAs cached, takes a larger budget from `setMaxMemory`.
+cap, not a reservation, and the default keeps the large DFA graphs of nearly
+every benchmarked pattern cached without resets. A pattern that needs more to
+compile, or to keep its DFAs cached, takes a larger budget from `setMaxMemory`.
+
+To learn what a pattern holds, read its `retainedSizeInBytes()`: an estimate
+of the heap bytes it retains now, plus the native memory of its live DFA
+pointer tables, its DFA caches included. It changes as searches build DFA
+states and caches reset, and the caches grow within the budget, which
+`maxMemoryBytes()` returns. A pattern shared by many threads counts once; each
+thread's `RegexpMatcher` reports its own working memory from its own
+`retainedSizeInBytes()`, which leaves out the pattern. See
+[Retained memory](reference/REGULATOR_API.md#retained-memory) for what the
+estimate leaves out.
 
 Compilation that exceeds the budget throws
 `RegexpCompileMemoryLimitException`. Where compilation proves a lower bound on
@@ -176,6 +185,9 @@ is right for all of them.
 
 Regulator and RE2 share one cache. A state that one thread builds serves every
 thread, and the cache's memory does not grow with the number of threads.
+Regulator's retained sizes follow the same split: a pattern's
+`retainedSizeInBytes()` counts its shared caches once, and a matcher's counts
+only the working memory that matcher keeps for its thread.
 Because the budget is charged once per pattern, not once per thread, a larger
 budget is affordable, and a pattern with a large DFA graph can stay cached
 rather than reset. When a search resets the cache too often for the bytes it

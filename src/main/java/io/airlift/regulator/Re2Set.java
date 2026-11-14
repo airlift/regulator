@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.ArrayList;
@@ -37,6 +38,9 @@ public final class Re2Set
     /// The inputs of a set's compile, which decide equality: the patterns in ID order and every
     /// option the set compiles with. A set reads no other option.
     private record CompileInputs(List<Slice> patterns, int parseFlags, long maxMemory, MatchMode matchMode) {}
+
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(Re2Set.class);
+    private static final int COMPILE_INPUTS_INSTANCE_SIZE = SizeOf.instanceSize(CompileInputs.class);
 
     private final int size;
     private final Prog program;
@@ -113,6 +117,33 @@ public final class Re2Set
             patternIds[index] = matches.denseAt(index);
         }
         return patternIds;
+    }
+
+    /// Returns an estimate of the heap bytes this set retains now, plus the native memory of its
+    /// live DFA pointer tables: its copies of the pattern bytes, the inputs of its compile, its
+    /// program, and the many-match DFA cache its searches have built so far. It reads the DFA
+    /// without locking, while other threads search, and leaves out what [Re2#retainedSizeInBytes()]
+    /// leaves out. Rarely, when concurrent growth or resets replace a DFA's tables throughout a
+    /// read, the read reports that DFA's whole state budget in place of what its cache holds: a
+    /// conservative over-report, not a leak.
+    public long retainedSizeInBytes()
+    {
+        long size = INSTANCE_SIZE +
+                COMPILE_INPUTS_INSTANCE_SIZE +
+                RetainedSizeSupport.unmodifiableListSize(compileInputs.patterns()) +
+                (program == null ? 0 : program.estimatedRetainedSize());
+        for (Slice pattern : compileInputs.patterns()) {
+            size += pattern.getRetainedSize();
+        }
+        return size;
+    }
+
+    /// Returns the memory budget this set was compiled with, in bytes: the value of the options'
+    /// `setMaxMemory`, and the budget a [RegexpMatchMemoryLimitException] of this set reports as its
+    /// [RegexpMatchMemoryLimitException#maxMemoryBytes()].
+    public long maxMemoryBytes()
+    {
+        return compileInputs.maxMemory();
     }
 
     /// Returns whether `other` is a set compiled from equal patterns, added in the same order,

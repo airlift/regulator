@@ -20,6 +20,8 @@ import io.airlift.slice.Slice;
 /// `maximumLength` bytes long, with the original dialect's endpoint assertions.
 final class WordRunMatcher
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(WordRunMatcher.class);
+
     // [0-9A-Za-z_] as bits of the low (0-63) and high (64-127) ASCII halves.
     private static final long WORD_LOW_MASK = 0x03FF_0000_0000_0000L;
     private static final long WORD_HIGH_MASK = 0x07FF_FFFE_87FF_FFFEL;
@@ -108,7 +110,7 @@ final class WordRunMatcher
 
     long estimatedRetainedSize()
     {
-        return SizeOf.instanceSize(WordRunMatcher.class);
+        return INSTANCE_SIZE;
     }
 
     long search(Slice text, int contextStart, int contextEnd, int start, int end, CompiledPattern.Anchor anchor)

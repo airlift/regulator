@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
@@ -432,6 +433,20 @@ public sealed class Re2
     public final int hashCode()
     {
         return hash;
+    }
+
+    /// The byte distribution this pattern was compiled with, which other patterns may share.
+    ByteFrequencies byteFrequencies()
+    {
+        return compileInputs.byteFrequencies();
+    }
+
+    @Override
+    final long compileInputsRetainedSize(Slice compiledPattern)
+    {
+        return RetainedSizes.COMPILE_INPUTS_INSTANCE_SIZE +
+                (compileInputs.pattern() == compiledPattern ? 0 : compileInputs.pattern().getRetainedSize()) +
+                compileInputs.byteFrequencies().estimatedRetainedSize();
     }
 
     /// Replaces the first match using RE2 rewrite syntax (`\0` through `\9`).
@@ -856,6 +871,12 @@ public sealed class Re2
         }
 
         @Override
+        long shapeRetainedSize()
+        {
+            return extendingLiterals.estimatedRetainedSize();
+        }
+
+        @Override
         public boolean find(Slice input)
         {
             return findOnLiteralAlternation(input);
@@ -1081,5 +1102,14 @@ public sealed class Re2
         {
             return false;
         }
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int COMPILE_INPUTS_INSTANCE_SIZE = SizeOf.instanceSize(CompileInputs.class);
+
+        private RetainedSizes() {}
     }
 }

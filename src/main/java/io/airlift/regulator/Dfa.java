@@ -33,6 +33,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntPredicate;
 
 import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
@@ -138,6 +139,13 @@ final class Dfa
     private static final long STATE_KEY_BYTES = instanceSize(StateKey.class);
     private static final long STATE_CACHE_BYTES = instanceSize(StateCache.class);
     private static final long CACHE_TABLES_BYTES = instanceSize(CacheTables.class);
+    private static final long DFA_INSTANCE_BYTES = instanceSize(DfaInstance.class);
+    // How many times a lock-free size read may find that the DFA published new tables during it
+    // before it takes the whole state budget as the charge.
+    private static final int SIZE_READ_ATTEMPTS = 4;
+    private static final long WORK_QUEUE_BYTES = instanceSize(WorkQueue.class);
+    private static final long ABSOLUTE_POINTER_TRANSITIONS_BYTES = instanceSize(AbsolutePointerTransitions.class);
+    private static final long SUPERSEDED_REFERENCE_BYTES = instanceSize(SupersededAbsolutePointerReference.class);
     // One conservatively aligned plan record and its 256-byte membership array.
     private static final long FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY = 32L + 16 + 256;
     private static final Prog.FixedDistanceByteCandidates NO_FIXED_DISTANCE_BYTE_CANDIDATES =
@@ -6161,6 +6169,11 @@ final class Dfa
             this.lastWasMark = true;
         }
 
+        long estimatedRetainedSize()
+        {
+            return WORK_QUEUE_BYTES + set.estimatedRetainedSize();
+        }
+
         boolean isMark(int i)
         {
             return i >= n;
@@ -8318,6 +8331,101 @@ final class Dfa
             // Capped at the rows one array can hold, far beyond every paired cap, which keeps
             // `rowCount * pairedRowLength()` within an int.
             return pairedTransitionMemory(stateLimit, Math.min(stateCount, Integer.MAX_VALUE / pairedRowLength()));
+        }
+
+        // The heap bytes this DFA retains now, plus the native memory of its live pointer table:
+        // what the budget charges the state budget, which holds the state tables, states, paired
+        // rows, fixed-distance candidates, and the live pointer table, heap or native, and the
+        // fixed parts outside it. Tables a search still
+        // reads after a reset are not reachable from the DFA, and superseded native tables the
+        // cleaner has not freed only through phantom references, so neither is counted.
+        //
+        // It takes no lock. It reads the published tables, then the charge, then, behind a
+        // load-load fence, the tables again. The cache charges growth before it publishes the
+        // tables that hold it, and lowers the charge only after it publishes their successor,
+        // behind a store-store fence; every publish is a new `CacheTables`. So when both reads
+        // see the same tables, the charge read is at least the charge of those tables: a refund
+        // that belongs to them becomes visible only after their successor does. The charge fields
+        // are plain longs written under the cache lock; the JLS (17.7) lets only such longs tear,
+        // and HotSpot on the 64-bit platforms Regulator runs on reads them whole. A read that sees
+        // a publish retries. After a few failed validations it takes the whole state budget as
+        // the charge, which no generation's charge exceeds, with the tables current at its last
+        // read. No test forces these interleavings, which would need a hook on the locked path;
+        // the ordering argument is the guarantee.
+        long estimatedRetainedSize()
+        {
+            CacheTables tables = this.tables;
+            long charged = sizeReadCharge();
+            VarHandle.loadLoadFence();
+            int failedValidations = 0;
+            while (this.tables != tables) {
+                tables = this.tables;
+                if (++failedValidations == SIZE_READ_ATTEMPTS) {
+                    // Prog.getCachedDfa never builds a DFA without a positive budget
+                    charged = stateBudget == Long.MAX_VALUE ? sizeReadCharge() : stateBudget;
+                    break;
+                }
+                charged = sizeReadCharge();
+                VarHandle.loadLoadFence();
+            }
+            return DFA_INSTANCE_BYTES +
+                    CACHE_TABLES_BYTES +
+                    startStateCacheMemory(tables.startBeginText) +
+                    startStateCacheMemory(tables.startBeginLine) +
+                    startStateCacheMemory(tables.startAfterWord) +
+                    startStateCacheMemory(tables.startAfterNonWord) +
+                    sizeOf(startByteCandidates) +
+                    sizeOf(startByteNibbleTables) +
+                    (startLiteralFilter == null ? 0 : startLiteralFilter.estimatedRetainedSize()) +
+                    (startClassFilter == null ? 0 : StartClassFilter.INSTANCE_SIZE) +
+                    2 * q0.estimatedRetainedSize() +
+                    sizeOf(stack) +
+                    // The cache mutation lock and the queue of unreachable pointer tables.
+                    RetainedSizeSupport.LOCK_BYTES +
+                    RetainedSizeSupport.REFERENCE_QUEUE_BYTES +
+                    segmentWrapperSize(tables) +
+                    supersededReferenceSize() +
+                    charged;
+        }
+
+        private long sizeReadCharge()
+        {
+            return stateBudget == Long.MAX_VALUE ? retainedStateMemory + pairedTransitionMemory : stateBudget - availableStateMemory;
+        }
+
+        // The references that count superseded native pointer tables until the collector frees
+        // them, without the tables, which only they reach. The walk takes no lock: the list only
+        // gains references at its head, and an unlinked reference ends the walk early.
+        private long supersededReferenceSize()
+        {
+            long size = 0;
+            for (SupersededAbsolutePointerReference reference = supersededAbsolutePointerReferences; reference != null; reference = reference.next) {
+                size += SUPERSEDED_REFERENCE_BYTES;
+            }
+            return size;
+        }
+
+        // The objects around the pointer table and the flat paired rows that the charge, which
+        // holds their memory, leaves out: the table's record and each segment with its scope.
+        private static long segmentWrapperSize(CacheTables tables)
+        {
+            long size = 0;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
+            if (absolutePointers != null) {
+                size += ABSOLUTE_POINTER_TRANSITIONS_BYTES + segmentObjectSize(absolutePointers.segment());
+                if (absolutePointers.arena() != null) {
+                    size += RetainedSizeSupport.instanceSize(absolutePointers.arena().getClass()) + RetainedSizeSupport.NATIVE_CLEANUP_BYTES;
+                }
+            }
+            if (tables.flatPairedRows != null) {
+                size += segmentObjectSize(tables.flatPairedRows);
+            }
+            return size;
+        }
+
+        private static long segmentObjectSize(MemorySegment segment)
+        {
+            return RetainedSizeSupport.instanceSize(segment.getClass()) + RetainedSizeSupport.instanceSize(segment.scope().getClass());
         }
 
         long availableStateMemory()

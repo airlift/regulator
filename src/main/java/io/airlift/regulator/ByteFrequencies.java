@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -177,6 +178,16 @@ public final class ByteFrequencies
     {
         this.probabilities = probabilities;
         this.hash = Arrays.hashCode(probabilities);
+    }
+
+    /// The bytes a compiled pattern retains for this distribution: none for a preset, which every
+    /// pattern shares, and the distribution and its table otherwise.
+    long estimatedRetainedSize()
+    {
+        if (this == ENGLISH_TEXT || this == JSON || this == UNIFORM) {
+            return 0;
+        }
+        return RetainedSizes.INSTANCE_SIZE + SizeOf.sizeOf(probabilities);
     }
 
     /// Returns a distribution in which every byte is equally common, so every case-sensitive
@@ -390,5 +401,13 @@ public final class ByteFrequencies
                 throw new IllegalStateException("ByteFrequencies builder has already built a distribution");
             }
         }
+    }
+
+    // Loaded only when a size is estimated: parsing never sizes objects, and TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(ByteFrequencies.class);
+
+        private RetainedSizes() {}
     }
 }

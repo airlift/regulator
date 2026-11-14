@@ -32,6 +32,7 @@ import static java.util.Objects.requireNonNull;
 final class DotStarLiteralSpanMatcher
         implements GroupZeroSpanSearch
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(DotStarLiteralSpanMatcher.class);
     // The bytes of an ASCII run skipDotAscii reads inline before it considers the vector scan.
     private static final int INLINE_DOT_ASCII_BYTES = 16;
     // Indexed by a byte, the width of the character the dot reads from it, or 0 where the dot
@@ -108,7 +109,7 @@ final class DotStarLiteralSpanMatcher
     /// shared by every matcher, so only the matcher itself is new.
     long estimatedRetainedSize()
     {
-        return SizeOf.instanceSize(DotStarLiteralSpanMatcher.class);
+        return INSTANCE_SIZE;
     }
 
     LiteralSearchKernel searchForDiagnostics()

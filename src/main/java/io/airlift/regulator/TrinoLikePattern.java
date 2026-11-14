@@ -18,6 +18,7 @@ import io.airlift.regulator.TrinoLikeParser.Any;
 import io.airlift.regulator.TrinoLikeParser.Element;
 import io.airlift.regulator.TrinoLikeParser.Literal;
 import io.airlift.regulator.TrinoLikeParser.ZeroOrMore;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
@@ -597,14 +598,52 @@ public sealed class TrinoLikePattern
         };
     }
 
+    /// Returns an estimate of the heap bytes this pattern retains, as Trino's and Airlift's
+    /// `getRetainedSizeInBytes` estimates: its copy of the pattern bytes, its literals, and its
+    /// matcher. It never grows, since a LIKE pattern builds nothing as it matches. The state
+    /// sets with which some patterns that combine `%` and `_` match belong to the matching
+    /// thread rather than to any pattern, so the estimate leaves them out; the API reference
+    /// states their bound. The estimate
+    /// is of heap memory: the class [Options#setGenerateBytecode(boolean)] generates, off by
+    /// default, takes metaspace instead.
+    // Declared after matches, as compileWithOptions is, so that its constants do not grow matches.
+    public long retainedSizeInBytes()
+    {
+        long size = RetainedSizes.INSTANCE_SIZE +
+                (pattern == null ? 0 : literalRetainedSize(pattern)) +
+                literalRetainedSize(prefix) +
+                (suffix == prefix ? 0 : literalRetainedSize(suffix)) +
+                (matcher == null ? 0 : matcher.estimatedRetainedSize());
+        if (escape.isPresent()) {
+            size += SizeOf.OPTIONAL_INT_INSTANCE_SIZE;
+        }
+        return size;
+    }
+
+    // Each literal is a copy, apart from the shared empty slice.
+    private static long literalRetainedSize(Slice literal)
+    {
+        return literal == Slices.EMPTY_SLICE ? 0 : literal.getRetainedSize();
+    }
+
     private interface Matcher
     {
         boolean matches(Slice input, int offset, int length);
+
+        long estimatedRetainedSize();
     }
 
     private record WildcardMatcher(TrinoLikeWildcardMatcher matcher)
             implements Matcher
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(WildcardMatcher.class);
+
+        @Override
+        public long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + matcher.estimatedRetainedSize();
+        }
+
         @Override
         public boolean matches(Slice input, int offset, int length)
         {
@@ -615,6 +654,14 @@ public sealed class TrinoLikePattern
     private record OrderedMatcher(OrderedLiteralMatcher matcher)
             implements Matcher
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(OrderedMatcher.class);
+
+        @Override
+        public long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + matcher.estimatedRetainedSize();
+        }
+
         @Override
         public boolean matches(Slice input, int offset, int length)
         {
@@ -625,6 +672,14 @@ public sealed class TrinoLikePattern
     private record LiteralGapPlanMatcher(LiteralGapMatcher matcher)
             implements Matcher
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralGapPlanMatcher.class);
+
+        @Override
+        public long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + matcher.estimatedRetainedSize();
+        }
+
         @Override
         public boolean matches(Slice input, int offset, int length)
         {
@@ -635,6 +690,8 @@ public sealed class TrinoLikePattern
     private static final class ContainsMatcher
             implements Matcher
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(ContainsMatcher.class);
+
         private final Slice literal;
         // Scans a literal of two or more bytes for its first and last bytes together; a one-byte
         // literal searches with Slice.indexOf.
@@ -646,6 +703,13 @@ public sealed class TrinoLikePattern
             this.literal = requireNonNull(literal, "literal is null");
             this.search = literal.length() > 1 ? LiteralSearchKernel.sharing(literal) : null;
             this.exact = exact;
+        }
+
+        // The search shares the literal's array, which is a whole copy.
+        @Override
+        public long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + literal.getRetainedSize() + (search == null ? 0 : search.estimatedRetainedSize() - SizeOf.sizeOf(literal.byteArray()));
         }
 
         @Override
@@ -725,5 +789,14 @@ public sealed class TrinoLikePattern
         {
             return true;
         }
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot. A generated class adds no field to this class.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoLikePattern.class);
+
+        private RetainedSizes() {}
     }
 }

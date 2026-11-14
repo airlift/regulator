@@ -507,7 +507,18 @@ final class BoundedCharacterClassCounter
         return new Repeat(atom.charClass().ranges(), minimum, maximum, (atom.parseFlags() & LATIN1) != 0);
     }
 
-    record Repeat(RuneRange[] ranges, int minimum, int maximum, boolean latin1) {}
+    record Repeat(RuneRange[] ranges, int minimum, int maximum, boolean latin1)
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Repeat.class);
+        private static final int RUNE_RANGE_INSTANCE_SIZE = SizeOf.instanceSize(RuneRange.class);
+
+        /// The record, its range array, and each range, though ranges can be shared with the
+        /// Unicode tables.
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(ranges) + (long) ranges.length * RUNE_RANGE_INSTANCE_SIZE;
+        }
+    }
 
     static BoundedCharacterClassCounter create(Repeat repeat)
     {

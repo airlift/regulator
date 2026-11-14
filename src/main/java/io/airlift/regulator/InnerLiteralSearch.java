@@ -782,6 +782,14 @@ final class InnerLiteralSearch
         return retainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, reversePrefixProgram, deeperPrefixGates);
     }
 
+    /// What this search retains now: [#estimatedRetainedSize()] charges its reverse-prefix program
+    /// the program's compile bound and its whole DFA budget, while this sizes the program's arrays
+    /// and the DFAs it has built. The forward program belongs to the pattern.
+    long currentRetainedSize()
+    {
+        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes) + reversePrefixProgram.estimatedRetainedSize() + SizeOf.sizeOf(deeperPrefixGates);
+    }
+
     // What a search of these parts retains, for the budget check as it is built and for its
     // report afterward.
     private static long retainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, Prog reversePrefixProgram, long[] deeperPrefixGates)

@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 
@@ -1055,5 +1056,53 @@ public final class RegexpMatcher
     private int regionLength()
     {
         return regionEnd - regionStart;
+    }
+
+    /// Returns an estimate of the heap bytes this matcher retains beyond its pattern: its capture
+    /// buffer, the map of group names it keeps when it keeps fewer groups than its pattern, the
+    /// workspace of each capture engine it has used, and its DFA cursors. The pattern and
+    /// everything it holds, including the DFA caches the cursors read and the names themselves,
+    /// count once in the pattern's `retainedSizeInBytes()`, however many matchers share it; the
+    /// input belongs to the caller. Like the other methods, it reads this matcher's state and is
+    /// called by the thread that uses it.
+    // Declared last, so that its constants follow those of the find methods.
+    public long retainedSizeInBytes()
+    {
+        long size = RetainedSizes.INSTANCE_SIZE + SizeOf.sizeOf(groups);
+        // A matcher that keeps fewer groups than its pattern holds a map of its own of the names
+        // it keeps, whose names and group numbers are the pattern's. Only a matcher that read the
+        // pattern's map holds a nonempty one, so the comparison builds nothing.
+        if (!namedCapturingGroups.isEmpty() && namedCapturingGroups != pattern.namedCapturingGroups()) {
+            size += RetainedSizeSupport.unmodifiableMapSize(namedCapturingGroups);
+        }
+        if (onePassWorkspace != null) {
+            size += onePassWorkspace.estimatedRetainedSize();
+        }
+        if (bitStateWorkspace != null) {
+            size += bitStateWorkspace.estimatedRetainedSize();
+        }
+        if (nfaWorkspace != null) {
+            size += nfaWorkspace.estimatedRetainedSize();
+        }
+        if (positionNfaWorkspace != null) {
+            size += positionNfaWorkspace.estimatedRetainedSize();
+        }
+        if (candidateStartCursor != null) {
+            size += RetainedSizes.CANDIDATE_START_CURSOR_INSTANCE_SIZE;
+        }
+        if (groupZeroForwardCursor != null) {
+            size += RetainedSizes.GROUP_ZERO_FORWARD_CURSOR_INSTANCE_SIZE;
+        }
+        return size;
+    }
+
+    // Loaded only when a size is estimated.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(RegexpMatcher.class);
+        private static final int CANDIDATE_START_CURSOR_INSTANCE_SIZE = SizeOf.instanceSize(Dfa.CandidateStartCursor.class);
+        private static final int GROUP_ZERO_FORWARD_CURSOR_INSTANCE_SIZE = SizeOf.instanceSize(Dfa.GroupZeroForwardCursor.class);
+
+        private RetainedSizes() {}
     }
 }

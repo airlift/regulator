@@ -394,7 +394,14 @@ final class PositionNfa
     /// at most [#MAXIMUM_POSITIONS] bits, 16 longs.
     static final class Workspace
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Workspace.class);
+
         private long[] states;
+
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(states);
+        }
 
         /// Returns an array of at least `2 * words` longs whose first `words` are zero, for a
         /// program of `words` words of state.

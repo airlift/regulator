@@ -105,6 +105,13 @@
             <scope>test</scope>
         </dependency>
 
+        <dependency>
+            <groupId>org.openjdk.jol</groupId>
+            <artifactId>jol-core</artifactId>
+            <version>0.17</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
@@ -207,6 +214,11 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <argLine>--add-modules jdk.incubator.vector ${regulator.nativeAccessJvmArgument} ${regulator.vectorJvmArgument}</argLine>
+                    <systemPropertyVariables>
+                        <!-- TestRetainedSize: JOL finds record field offsets itself and does not attach the serviceability agent. -->
+                        <jol.magicFieldOffset>true</jol.magicFieldOffset>
+                        <jol.skipHotspotSAAttach>true</jol.skipHotspotSAAttach>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>

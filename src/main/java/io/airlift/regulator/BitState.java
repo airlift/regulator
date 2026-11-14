@@ -19,6 +19,7 @@ import io.airlift.slice.Slice;
 import java.util.Arrays;
 
 import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
@@ -264,9 +265,18 @@ final class BitState
 
     static final class Workspace
     {
+        private static final int INSTANCE_SIZE = instanceSize(Workspace.class);
+
         private long[] visited;
         private int[] captures;
         private Job[] jobs;
+
+        // Every slot of the job stack holds a job, created with the stack or as it grows.
+        long estimatedRetainedSize()
+        {
+            Job[] jobs = this.jobs;
+            return INSTANCE_SIZE + sizeOf(visited) + sizeOf(captures) + (jobs == null ? 0 : sizeOf(jobs) + jobs.length * JOB_BYTES);
+        }
 
         private long[] prepareVisited(int wordCount)
         {

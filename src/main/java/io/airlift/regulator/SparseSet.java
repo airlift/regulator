@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
+
 final class SparseSet
 {
     private int size;
@@ -32,6 +34,11 @@ final class SparseSet
     public int size()
     {
         return size;
+    }
+
+    long estimatedRetainedSize()
+    {
+        return RetainedSizes.INSTANCE_SIZE + SizeOf.sizeOf(sparse) + SizeOf.sizeOf(dense);
     }
 
     public boolean isEmpty()
@@ -145,5 +152,13 @@ final class SparseSet
         if (indexValue < 0 || indexValue >= maxSize()) {
             throw new IllegalArgumentException("illegal index: " + indexValue);
         }
+    }
+
+    // Loaded only when a size is estimated: parsing never sizes objects, and TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(SparseSet.class);
+
+        private RetainedSizes() {}
     }
 }

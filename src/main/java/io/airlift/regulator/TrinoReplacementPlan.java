@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
@@ -850,6 +851,8 @@ final class TrinoReplacementPlan
     /// immutable, so callers racing to publish different entries only cost a later reparse.
     static final class CachedTemplate
     {
+        private static final long INSTANCE_SIZE = (long) SizeOf.instanceSize(CachedTemplate.class) + SizeOf.instanceSize(ParsedReplacement.class);
+
         private final byte[] replacement;
         private final int maximumCapturingGroup;
         private final ParsedReplacement template;
@@ -859,6 +862,18 @@ final class TrinoReplacementPlan
             this.replacement = replacement;
             this.maximumCapturingGroup = maximumCapturingGroup;
             this.template = template;
+        }
+
+        /// The template, its replacement bytes, and their parse.
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE +
+                    SizeOf.sizeOf(replacement) +
+                    SizeOf.sizeOf(template.literalBytes()) +
+                    SizeOf.sizeOf(template.operationValues()) +
+                    SizeOf.sizeOf(template.operationLengths()) +
+                    SizeOf.sizeOf(template.referencedGroups()) +
+                    SizeOf.sizeOf(template.groupReferenceCounts());
         }
 
         boolean matches(Slice replacement)

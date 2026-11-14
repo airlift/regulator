@@ -394,13 +394,14 @@ Production accounting uses `SizeOf` and charges all DFA storage the DFA retains
 to the owning budget. Tables that a reset or growth superseded, held only by
 in-flight searches, are uncharged, as
 [Shared DFA Concurrency](../../REGULATOR_DECISIONS.md#shared-dfa-concurrency)
-describes. Tests cover construction, growth, reset, and compressed and
-uncompressed reference layouts.
+describes. Tests cover construction, growth, and reset in the compressed
+reference layout CI runs.
 
-JOL may be used as a temporary diagnostic to check `SizeOf`; it must not become
-a production or test dependency because its exact measurements require JVM
-instrumentation permissions. Compare complete retained graphs, not only shallow
-objects.
+JOL is a test-scope dependency only for the `TestRetainedSize` guard, which
+compares each estimate with JOL's walk of the same objects. The surefire
+configuration sets the properties that let JOL measure without attaching the
+serviceability agent. JOL is never a production dependency. Compare complete
+retained graphs, not only shallow objects.
 
 ## Measurement protocol
 
