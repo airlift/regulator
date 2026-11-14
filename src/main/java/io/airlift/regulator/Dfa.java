@@ -5406,6 +5406,28 @@ final class Dfa
         return result;
     }
 
+    /// Runs [#searchManyFull], judging the resets of the many-match DFA across its searches by
+    /// the rule [#searchJudgingSlowResets] applies to boolean searches: after two slow resets in
+    /// a row the program's next 65,536 searches return -1 without running the DFA, then one tries
+    /// it again. A tagged alternation program declines a skipped search to the ordinary capture
+    /// engines. "Count Fallback After Repeated Bails" in REGULATOR_DECISIONS.md gives the rule.
+    static int searchManyFullJudgingSlowResets(Prog prog, Slice context, int contextStart, int contextEnd, int rangeStart, int rangeEnd)
+    {
+        // Placed after the search loops, as searchJudgingSlowResets is, so its constant pool
+        // entries do not renumber theirs.
+        DfaInstance dfa = prog.cachedDfaIfPresent(DfaInstance.Kind.MANY_MATCH);
+        if (dfa == null) {
+            return searchManyFull(prog, context, contextStart, contextEnd, rangeStart, rangeEnd);
+        }
+        if (dfa.takeManyMatchSearchSkip()) {
+            return -1;
+        }
+        int resetsBefore = dfa.startManyMatchSearch();
+        int result = searchManyFull(prog, context, contextStart, contextEnd, rangeStart, rangeEnd);
+        dfa.judgeManyMatchSearch(resetsBefore, result >= 0 ? rangeEnd - rangeStart : 0);
+        return result;
+    }
+
     /// As [#searchAnchoredWithStop(Prog,Slice,int,int,int,int)], but in the earliest-match mode,
     /// which returns at the first accepting state: a non-negative result says that a match starts
     /// at `start`, and is the Slice offset of the shortest match end from there, a real match end
@@ -6618,23 +6640,29 @@ final class Dfa
         // COUNT_BAIL_SKIPPED_COUNTS DFA counts skip the DFA.
         private static final int COUNT_BAIL_STREAK_LIMIT = 2;
         private static final int COUNT_BAIL_SKIPPED_COUNTS = 16;
-        // The slow resets in a row, judged across boolean searches by isSlowReset, after which
-        // boolean searches skip the DFA.
+        // The slow resets in a row, judged across boolean searches, or across many-match
+        // searches, by isSlowReset, after which those searches skip the DFA.
         private static final int SLOW_RESET_STREAK_LIMIT = 2;
         // The boolean searches that skip the DFA after a streak of slow resets they judged. On
         // the motivating Leipzig grep workload, one boolean search read one line, and a DFA that
         // thrashed reset about every 7,000 lines, so the window holds about ten times that many.
         private static final int BOOLEAN_SEARCH_SKIPPED_SEARCHES = 1 << 16;
+        // The many-match searches that skip the DFA after a streak of slow resets they judged.
+        // Like a boolean search of a line, one search reads one short span, a match the tagged
+        // alternation program picks a branch for, so the window is the boolean searches'.
+        private static final int MANY_MATCH_SEARCH_SKIPPED_SEARCHES = 1 << 16;
 
         private static final VarHandle TABLES;
         private static final VarHandle COUNT_BAIL_SKIPS_REMAINING;
         private static final VarHandle BOOLEAN_SEARCH_SKIPS_REMAINING;
+        private static final VarHandle MANY_MATCH_SEARCH_SKIPS_REMAINING;
 
         static {
             try {
                 TABLES = MethodHandles.lookup().findVarHandle(DfaInstance.class, "tables", CacheTables.class);
                 COUNT_BAIL_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "countBailSkipsRemaining", int.class);
                 BOOLEAN_SEARCH_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "booleanSearchSkipsRemaining", int.class);
+                MANY_MATCH_SEARCH_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "manyMatchSearchSkipsRemaining", int.class);
             }
             catch (ReflectiveOperationException e) {
                 throw new ExceptionInInitializerError(e);
@@ -6793,6 +6821,15 @@ final class Dfa
         // boolean searches race on, as on their streak.
         private int booleanSearchResetCount;
         private int booleanSearchBytesUntilResetNotSlow;
+        // The many-match searches' own streak, skip window, last seen reset count and allowance,
+        // as the boolean searches' are, so neither path's judgements move the other's window.
+        private int manyMatchSearchSlowResetStreak;
+        // Accessed only through MANY_MATCH_SEARCH_SKIPS_REMAINING, with opaque access or a
+        // compare-and-set.
+        @SuppressWarnings("UnusedVariable")
+        private int manyMatchSearchSkipsRemaining;
+        private int manyMatchSearchResetCount;
+        private int manyMatchSearchBytesUntilResetNotSlow;
 
         // The states the cache held when it last reset, written by the reset under the cache
         // mutation lock and read without it by the boolean searches that judge slow resets
@@ -7528,6 +7565,85 @@ final class Dfa
         int booleanSearchSlowResetStreak()
         {
             return booleanSearchSlowResetStreak;
+        }
+
+        // As startBooleanSearch, for a many-match search: returns the reset count the search
+        // judges against afterward, and seeds the allowance from a reset another call caused.
+        private int startManyMatchSearch()
+        {
+            int resets = resetCount;
+            if (resets != manyMatchSearchResetCount) {
+                manyMatchSearchResetCount = resets;
+                manyMatchSearchBytesUntilResetNotSlow = slowResetAllowance();
+            }
+            return resets;
+        }
+
+        // As judgeBooleanSearch, for a many-match search that started at `resetsBefore` resets
+        // and is charged `bytesRead`: the span when it picked a branch, which it read whole, and
+        // nothing when it failed. It judges by the same rule and races as boolean searches do.
+        private void judgeManyMatchSearch(int resetsBefore, int bytesRead)
+        {
+            int resets = resetCount;
+            int bytesLeft = manyMatchSearchBytesUntilResetNotSlow;
+            if (resets != resetsBefore) {
+                if (manyMatchSearchResetCount != resetsBefore) {
+                    return;
+                }
+                manyMatchSearchResetCount = resets;
+                if (isSlowReset(bytesLeft, bytesRead)) {
+                    recordManyMatchSearchSlowReset();
+                }
+                else {
+                    recordManyMatchSearchStreakEnded();
+                }
+                manyMatchSearchBytesUntilResetNotSlow = slowResetAllowance();
+            }
+            else if (bytesLeft > 0 && bytesRead > 0) {
+                bytesLeft -= bytesRead;
+                manyMatchSearchBytesUntilResetNotSlow = bytesLeft;
+                if (bytesLeft <= 0) {
+                    recordManyMatchSearchStreakEnded();
+                }
+            }
+        }
+
+        // Takes one many-match search of the skip window, if one is left, and returns whether it
+        // did. A search that loses the compare-and-set to another runs the DFA instead.
+        private boolean takeManyMatchSearchSkip()
+        {
+            int skips = (int) MANY_MATCH_SEARCH_SKIPS_REMAINING.getOpaque(this);
+            return skips > 0 && MANY_MATCH_SEARCH_SKIPS_REMAINING.compareAndSet(this, skips, skips - 1);
+        }
+
+        // The streak stays at the limit, so a slow reset after the skipped searches opens the next
+        // window at once.
+        private void recordManyMatchSearchSlowReset()
+        {
+            int streak = manyMatchSearchSlowResetStreak;
+            if (streak < SLOW_RESET_STREAK_LIMIT) {
+                streak++;
+                manyMatchSearchSlowResetStreak = streak;
+            }
+            if (streak >= SLOW_RESET_STREAK_LIMIT) {
+                MANY_MATCH_SEARCH_SKIPS_REMAINING.setOpaque(this, MANY_MATCH_SEARCH_SKIPPED_SEARCHES);
+            }
+        }
+
+        // A reset that is not slow, or a many-match search that searched past the slow-reset
+        // allowance, ends the streak, leaving an open window. The guard skips writing a shared
+        // field that is already zero.
+        private void recordManyMatchSearchStreakEnded()
+        {
+            if (manyMatchSearchSlowResetStreak != 0) {
+                manyMatchSearchSlowResetStreak = 0;
+            }
+        }
+
+        // The many-match searches left in their skip window.
+        int manyMatchSearchSkipsRemaining()
+        {
+            return (int) MANY_MATCH_SEARCH_SKIPS_REMAINING.getOpaque(this);
         }
 
         int smallByteSetScanCount()

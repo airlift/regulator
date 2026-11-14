@@ -1746,9 +1746,10 @@ fallback's, so a count that gives up or skips the DFA is exact.
 Each upstream RE2 search judges its own DFA work, and gives up on a thrashing
 DFA when that search alone resets the cache twice, reading fewer than ten bytes
 for each state the cache held between the two resets. Regulator also judges the
-DFA across calls, in two forms that each change only which engine runs: a
-pattern's DFA counts and its boolean searches, as the next paragraphs describe.
-A matcher's finds do not, for the cost given below.
+DFA across calls, in three forms that each change only which engine runs: a
+pattern's DFA counts, its boolean searches, and the many-match searches of its
+tagged alternation program, as the next paragraphs describe. A matcher's
+forward boundary searches do not, for the cost given below.
 
 Upstream RE2 tries the DFA again on every search. Regulator's DFA counts do so
 until two DFA counts of a pattern in a row give up. The pattern's next 16 DFA
@@ -1821,14 +1822,33 @@ streak as it was, but under threads they can move it, as the paragraph on races
 below describes. Like the count's streak, this one is an engine policy, not a
 language rule: every search returns the answer the DFA would.
 
-A matcher's finds do not judge the DFA across finds, so a find loop over a DFA
-that thrashes still rebuilds states as upstream's does. On the 16 MB rebar
-Leipzig text, each find of `[a-q][^u-z]{20,80}[x\xE0-\xFF]` in bytes mode
-searched only to the next sparse match, far fewer bytes than it takes to fill
-the cache twice, so no find gave up, and the finds built 5.8 million states
-over 54 resets. Judging a matcher's finds by the boolean searches' rule, and
-skipping the DFA after two slow resets until the matcher's reset, took the find
-loop of a narrower repeat of that shape, the campaign's bytes-mode
+The [tagged alternation program](#bounded-direct-bitstate-capture) picks the
+winning branch of each match with one many-match DFA search over the match's
+span, and that search has no slow-reset rule of its own, so a cache too small
+for the program's states rebuilt them for every few matches. Its searches judge
+the many-match DFA by the boolean searches' rule, in a streak and 65,536-search
+window of their own on that DFA. A search is charged the span when it picks a
+branch, since it reads the span whole, and nothing when it fails. After two
+slow resets in a row the program's next 65,536 searches decline without
+running the DFA, so the match takes the ordinary capture engines, BitState or
+the NFA, which the tagged program already declines to, and the search after
+them tries the DFA again. Unlike the boolean searches, every
+pattern with the tagged program takes part, since a declined search always has
+those engines. In the A/B's constructed thrash row,
+`([ab]*a[ab]{10})|([ab]*b[ab]{10}c)|([ab]+)` over random words of a and b
+under a 256 KiB budget, the many-match DFA reset 167,759 times in 40 passes over
+1 MiB without the skip and 23 times with it, and no other measured row skipped
+a search. The judgement adds a few field reads to each search, but a search
+that does not reset runs the same DFA loop as before.
+
+A matcher's forward boundary searches do not judge the DFA across finds, so a
+find loop over a DFA that thrashes still rebuilds states as upstream's does. On
+the 16 MB rebar Leipzig text, each find of `[a-q][^u-z]{20,80}[x\xE0-\xFF]` in
+bytes mode searched only to the next sparse match, far fewer bytes than it takes
+to fill the cache twice, so no find gave up, and the finds built 5.8 million
+states over 54 resets. Judging a matcher's finds by the boolean searches' rule,
+and skipping the DFA after two slow resets until the matcher's reset, took the
+find loop of a narrower repeat of that shape, the campaign's bytes-mode
 `[a-q][^u-z]{10,30}[x\xE0-\xFF]`, to 0.083–0.088 of its time on r9g and r8i
 (rebar, settle runner). But the judgement runs after every find: its cheapest
 measured form, a flag, the cached DFA, an opaque read of the reset count and a
@@ -1854,8 +1874,11 @@ baseline's time on r9g and 0.064x on r8i, because they count on the DFA again.
 The counts' streak and skip window, and the boolean searches' own pair, are
 fields on the DFA instance, which every matcher and thread of the pattern
 shares, so DFA counts on several threads race on the first pair, and boolean
-searches on the second. Each skip window is read with opaque access and written
-only with opaque writes or a compare-and-set, so its writes fall in one order.
+searches on the second. The tagged program's many-match searches keep their
+pair, last seen reset count and allowance on the many-match DFA and race on
+them by the boolean searches' rules below. Each skip window is read with
+opaque access and written only with opaque writes or a compare-and-set, so its
+writes fall in one order.
 A skip takes one unit of the latest window with a compare-and-set, and a DFA
 count that loses the compare-and-set runs the DFA, so at most 16 DFA counts
 skip after each window opens, and a window opens only after a DFA count that

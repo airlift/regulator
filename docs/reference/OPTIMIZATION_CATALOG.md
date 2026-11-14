@@ -1295,27 +1295,33 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   calls once it thrashed, by a pattern's streak of bailed counts and its
   16-count window ([#203]), and by RE2's slow-reset test applied across a
   pattern's boolean searches, which have their own streak and 65,536-search
-  window ([design][d-count-fallback]).
+  window, and across the many-match searches of a tagged alternation program,
+  which have another ([design][d-count-fallback]).
 - **Where:** `Dfa.DfaInstance.recordCountBail`,
   `Dfa.DfaInstance.takeCountSkip`, `Dfa.DfaInstance.isSlowReset`,
-  `Dfa.searchJudgingSlowResets`, `CompiledPattern.matchOnOrdinaryEngine`
+  `Dfa.searchJudgingSlowResets`, `CompiledPattern.matchOnOrdinaryEngine`,
+  `Dfa.searchManyFullJudgingSlowResets`
 - **Applies when:** A DFA count, after two DFA counts of the pattern in a row
   gave up; on a pattern with the
   [position automaton](#bit-parallel-position-automaton-for-bounded-repeats),
   an unanchored boolean search, after boolean searches saw two slow resets of
-  the forward DFA in a row
+  the forward DFA in a row; a tagged alternation program's search for a
+  match's branch, after those searches saw two slow resets of its many-match
+  DFA in a row
 - **What it does:** A pattern's next 16 DFA counts skip the DFA and fall back
   at once, and the one after them tries it again. A reset during a boolean
   search is slow when the progress the boolean searches were charged since the
   one before (the match end each returned, the whole window when it found none,
   and nothing when the DFA failed) comes to fewer than ten bytes for each state
   the cache held at that one. After two in a row the pattern's next 65,536
-  boolean searches run on the automaton before one tries the DFA again. A reset
-  is judged by the search whose starting reset count still owns the allowance,
-  so searches in flight together delay or withhold the skip, and a race can
-  also open it at a healthy reset. Each search keeps upstream's rule too; a
-  short line seldom resets twice, so without this its DFA built a state for
-  most bytes it read. A matcher's finds are not judged across finds, since the
+  boolean searches run on the automaton before one tries the DFA again, and a
+  tagged program's next 65,536 branch searches leave their matches to the
+  ordinary capture engines. A reset is judged by the search whose starting
+  reset count still owns the allowance, so searches in flight together delay or
+  withhold the skip, and a race can also open it at a healthy reset. Each
+  boolean search also keeps upstream's per-search rule; a short line seldom
+  resets twice, so without this its DFA built a state for most bytes it read. A
+  matcher's forward boundary searches are not judged across finds, since the
   judgement would run after every find ([design][d-count-fallback]). Short rows
   counted after a thrashing count take 0.049 of the time of skipping the DFA
   for every count after the first bail on Graviton and 0.064 on Intel ([#203]),

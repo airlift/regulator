@@ -128,7 +128,7 @@ final class TaggedAlternationProgram
             int matchEnd,
             int[] groupOffsets)
     {
-        int winningBranch = Dfa.searchManyFull(program, context, contextStart, contextEnd, matchStart, matchEnd);
+        int winningBranch = Dfa.searchManyFullJudgingSlowResets(program, context, contextStart, contextEnd, matchStart, matchEnd);
         if (winningBranch < 0 || winningBranch >= branchCount) {
             return false;
         }
