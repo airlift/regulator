@@ -19,15 +19,17 @@ package io.airlift.regulator;
 /// entirely in a region `[start, end)` of its input, as the general engine reports it for that
 /// region, reads nothing outside the region, and never matches empty.
 ///
-/// The interface declares no search method. Each implementation has its own region search that
-/// nothing overrides, as a final class, as a sealed class whose one subclass overrides no method
-/// for [LiteralSetSpanMatcher], or as an abstract sealed class for
-/// [LiteralAlternationSpanMatcher], whose final search tests the receiver against its two final
-/// subclasses and calls that class's search. [RegexpMatcher] tests the receiver against each
-/// class and calls that search directly, so each call site binds statically and can inline. One
-/// interface call site would see every class in a process whose patterns use them all, as a
-/// Trino server's do, and C2 calls a megamorphic site through the interface table without
-/// inlining.
+/// The interface declares no search method. Each implementation has its own region search, as a
+/// final class, as a sealed class whose one subclass overrides no method for
+/// [LiteralSetSpanMatcher], as an abstract sealed class for [LiteralAlternationSpanMatcher],
+/// whose final search tests the receiver against its two final subclasses and calls that class's
+/// search, or as a sealed class for [DotStarLiteralSpanMatcher], whose one subclass overrides its
+/// search for dots with stops besides a line feed. [RegexpMatcher] tests the receiver against
+/// each class and calls that search directly, so each call site binds statically and can inline,
+/// or, for the dot-star literal matcher, sees at most its two classes, which C2 can inline by
+/// testing for each, and binds statically while the subclass is not loaded. One interface call
+/// site would see every class in a process whose patterns use them all, as a Trino server's do,
+/// and C2 calls a megamorphic site through the interface table without inlining.
 sealed interface GroupZeroSpanSearch
         permits DotStarLiteralSpanMatcher,
                 FixedWidthByteSpanMatcher,

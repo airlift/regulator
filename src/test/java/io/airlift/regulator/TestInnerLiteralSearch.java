@@ -267,23 +267,22 @@ public class TestInnerLiteralSearch
             }
         }
         // A pattern of the dot-star literal matcher's shape, such as `.*literal.*`, is left to that
-        // matcher, and no inner literal search is built for it. Java's dot and the Unicode dot of
-        // Rust's bytes API give no such shape, and the pattern takes the search.
+        // matcher, and no inner literal search is built for it, also where the dots stop at other
+        // characters besides a line feed, as Java's do. The Unicode dot of Rust's bytes API gives
+        // no such shape, and the pattern takes the search.
         Slice dotStar = utf8Slice(".*coolfunctionname.*");
         for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
                 Map.entry("RE2", Re2.compile(dotStar)),
                 Map.entry("RE2 Latin-1", Re2.compile(dotStar, Re2.Options.latin1())),
                 Map.entry("Trino", TrinoRegexp.compile(dotStar).re2()),
-                Map.entry("Rust", RustRegexp.compile(dotStar)))) {
+                Map.entry("Rust", RustRegexp.compile(dotStar)),
+                Map.entry("Java", JavaRegexp.compile(dotStar)))) {
             assertThat(compiled.getValue().createDotStarLiteralSpanMatcher()).as(compiled.getKey()).isNotNull();
             assertThat(compiled.getValue().innerLiteralSearchForDiagnostics()).as(compiled.getKey()).isNull();
         }
-        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
-                Map.entry("Java", JavaRegexp.compile(dotStar)),
-                Map.entry("Rust bytes", RustRegexp.compile(dotStar, RUST_BYTES_OPTIONS)))) {
-            assertThat(compiled.getValue().createDotStarLiteralSpanMatcher()).as(compiled.getKey()).isNull();
-            assertThat(literal(compiled.getValue().innerLiteralSearchForDiagnostics())).as(compiled.getKey()).isEqualTo("coolfunctionname");
-        }
+        CompiledPattern rustBytes = RustRegexp.compile(dotStar, RUST_BYTES_OPTIONS);
+        assertThat(rustBytes.createDotStarLiteralSpanMatcher()).isNull();
+        assertThat(literal(rustBytes.innerLiteralSearchForDiagnostics())).isEqualTo("coolfunctionname");
         // Rust's multi-line caret is a leading assertion the DFA runs, so a run after it is a class
         // run prefix too.
         assertThat(literal("(?m)^.{0,3}Finn")).isEqualTo("Finn");

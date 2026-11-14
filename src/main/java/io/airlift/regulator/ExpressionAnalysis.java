@@ -44,16 +44,39 @@ final class ExpressionAnalysis
     // and CR LF takes two.
     private static final int JAVA_FINAL_TERMINATOR_BYTES = 3;
 
+    // The most characters a class may leave out and still be a dot that stops at them: Java's
+    // default dot leaves out five, a line feed, a carriage return, U+0085, U+2028, and U+2029.
+    private static final int MAXIMUM_DOT_STOPS = 8;
+
     enum Gap
     {
         NONE,
         ONE_BYTE,
         ONE_CODE_POINT,
         ONE_NON_NEWLINE_CODE_POINT,
+        /// A character of a class that holds every character but a line feed and other stops,
+        /// which the sequence's [LiteralSequence#dotStops] name. A class of exactly `[^\n]` is
+        /// ONE_NON_NEWLINE_CODE_POINT instead.
+        ONE_NON_STOP_CODE_POINT,
         ZERO_OR_MORE_BYTES,
         ZERO_OR_MORE_CODE_POINTS,
         ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS,
+        ZERO_OR_MORE_NON_STOP_CODE_POINTS,
         REQUIRES_GENERAL_ENGINE,
+    }
+
+    /// The characters a [Gap#ONE_NON_STOP_CODE_POINT] or [Gap#ZERO_OR_MORE_NON_STOP_CODE_POINTS]
+    /// gap does not match, its stops, as ranges in order: a line feed and at least one other
+    /// character, at most [#MAXIMUM_DOT_STOPS] in all. Java's default dot stops at a line feed,
+    /// a carriage return, U+0085, U+2028, and U+2029, and Rust's CRLF dot at a line feed and a
+    /// carriage return. The gap's class holds every other character up to [Regexp#maxRune] of
+    /// its flags, which is U+00FF where `latin1` is set.
+    record DotStops(List<RuneRange> ranges, boolean latin1)
+    {
+        DotStops
+        {
+            ranges = List.copyOf(ranges);
+        }
     }
 
     /// @param encoded the length in the [MatchLength] encoding, from which the minimum and
@@ -84,14 +107,17 @@ final class ExpressionAnalysis
     static final class LiteralSequence
     {
         private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSequence.class);
+        private static final int DOT_STOPS_INSTANCE_SIZE = SizeOf.instanceSize(DotStops.class);
+        private static final int RUNE_RANGE_INSTANCE_SIZE = SizeOf.instanceSize(RuneRange.class);
 
         private final List<byte[]> literals;
         private final List<Gap> gaps;
+        private final DotStops dotStops;
         private final boolean anchoredAtStart;
         private final boolean anchoredAtEnd;
         private final boolean finalLineEnd;
 
-        private LiteralSequence(List<byte[]> literals, List<Gap> gaps, boolean anchoredAtStart, boolean anchoredAtEnd, boolean finalLineEnd)
+        private LiteralSequence(List<byte[]> literals, List<Gap> gaps, DotStops dotStops, boolean anchoredAtStart, boolean anchoredAtEnd, boolean finalLineEnd)
         {
             List<byte[]> literalCopies = new ArrayList<>(literals.size());
             for (byte[] literal : literals) {
@@ -99,6 +125,7 @@ final class ExpressionAnalysis
             }
             this.literals = List.copyOf(literalCopies);
             this.gaps = List.copyOf(gaps);
+            this.dotStops = dotStops;
             this.anchoredAtStart = anchoredAtStart;
             this.anchoredAtEnd = anchoredAtEnd;
             this.finalLineEnd = finalLineEnd;
@@ -109,6 +136,10 @@ final class ExpressionAnalysis
             long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(literals) + RetainedSizeSupport.unmodifiableListSize(gaps);
             for (byte[] literal : literals) {
                 size += program.sharesPrefix(literal) ? 0 : SizeOf.sizeOf(literal);
+            }
+            if (dotStops != null) {
+                List<RuneRange> ranges = dotStops.ranges();
+                size += DOT_STOPS_INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(ranges) + (long) ranges.size() * RUNE_RANGE_INSTANCE_SIZE;
             }
             return size;
         }
@@ -148,6 +179,15 @@ final class ExpressionAnalysis
         Gap gapAfter(int literalIndex)
         {
             return gaps.get(literalIndex + 1);
+        }
+
+        /// Returns the stops of every [Gap#ONE_NON_STOP_CODE_POINT] and
+        /// [Gap#ZERO_OR_MORE_NON_STOP_CODE_POINTS] gap: those of the sequence's first class with
+        /// stops, or `null` when it has none. A gap whose class has other stops is
+        /// [Gap#REQUIRES_GENERAL_ENGINE], so the gaps share one set.
+        DotStops dotStops()
+        {
+            return dotStops;
         }
 
         boolean anchoredAtStart()
@@ -360,8 +400,8 @@ final class ExpressionAnalysis
             case CAPTURE -> children.getFirst().elements;
             case CONCAT -> concatenateElements(children);
             case STAR -> repeatedGap(children.getFirst());
-            case ANY_BYTE -> List.of(new GapElement(Gap.ONE_BYTE));
-            case ANY_CHAR -> List.of(new GapElement(Gap.ONE_CODE_POINT));
+            case ANY_BYTE -> List.of(new GapElement(Gap.ONE_BYTE, null));
+            case ANY_CHAR -> List.of(new GapElement(Gap.ONE_CODE_POINT, null));
             case CHAR_CLASS -> singleCharacterGap(regexp);
             default -> null;
         };
@@ -405,17 +445,49 @@ final class ExpressionAnalysis
             case ONE_BYTE -> Gap.ZERO_OR_MORE_BYTES;
             case ONE_CODE_POINT -> Gap.ZERO_OR_MORE_CODE_POINTS;
             case ONE_NON_NEWLINE_CODE_POINT -> Gap.ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS;
+            case ONE_NON_STOP_CODE_POINT -> Gap.ZERO_OR_MORE_NON_STOP_CODE_POINTS;
             default -> null;
         };
-        return gap == null ? null : List.of(new GapElement(gap));
+        return gap == null ? null : List.of(new GapElement(gap, gapElement.stops));
     }
 
     private static List<Element> singleCharacterGap(Regexp regexp)
     {
-        if (!isNonNewlineCharacterClass(regexp)) {
+        if (isNonNewlineCharacterClass(regexp)) {
+            return List.of(new GapElement(Gap.ONE_NON_NEWLINE_CODE_POINT, null));
+        }
+        DotStops stops = dotStops(regexp);
+        return stops == null ? null : List.of(new GapElement(Gap.ONE_NON_STOP_CODE_POINT, stops));
+    }
+
+    /// Returns the stops of a class that holds every character up to [Regexp#maxRune] but a line
+    /// feed and others, at most [#MAXIMUM_DOT_STOPS] in all, or `null` for any other class. The
+    /// caller has checked that the class is not `[^\n]`.
+    private static DotStops dotStops(Regexp regexp)
+    {
+        CharClass characterClass = regexp.charClass();
+        int maximumRune = Regexp.maxRune(regexp.parseFlags());
+        if (characterClass.rangeCount() > MAXIMUM_DOT_STOPS + 1 || characterClass.contains('\n')) {
             return null;
         }
-        return List.of(new GapElement(Gap.ONE_NON_NEWLINE_CODE_POINT));
+        List<RuneRange> stops = new ArrayList<>();
+        int stopCount = 0;
+        int next = 0;
+        for (RuneRange range : characterClass.ranges()) {
+            if (range.low() > next) {
+                stops.add(new RuneRange(next, range.low() - 1));
+                stopCount += range.low() - next;
+            }
+            next = range.high() + 1;
+        }
+        if (next <= maximumRune) {
+            stops.add(new RuneRange(next, maximumRune));
+            stopCount += maximumRune - next + 1;
+        }
+        if (stopCount > MAXIMUM_DOT_STOPS || next > maximumRune + 1) {
+            return null;
+        }
+        return new DotStops(stops, (regexp.parseFlags() & LATIN1) != 0);
     }
 
     private static boolean isNonNewlineCharacterClass(Regexp regexp)
@@ -500,6 +572,7 @@ final class ExpressionAnalysis
         DynamicSliceOutput runBuffer = null;
         boolean runBuffered = false;
         Gap pendingGap = Gap.NONE;
+        DotStops sequenceStops = null;
         for (int elementIndex = start; elementIndex < end; elementIndex++) {
             Element element = elements.get(elementIndex);
             if (element instanceof AssertionElement) {
@@ -511,7 +584,13 @@ final class ExpressionAnalysis
                 continue;
             }
             if (element instanceof GapElement gapElement) {
-                pendingGap = mergeGap(pendingGap, gapElement.gap);
+                // The first gap with stops names the sequence's; a later gap with other stops
+                // needs the general engine.
+                if (sequenceStops == null) {
+                    sequenceStops = gapElement.stops;
+                }
+                Gap gap = gapElement.stops == null || gapElement.stops.equals(sequenceStops) ? gapElement.gap : Gap.REQUIRES_GENERAL_ENGINE;
+                pendingGap = mergeGap(pendingGap, gap);
                 continue;
             }
 
@@ -546,7 +625,7 @@ final class ExpressionAnalysis
             literals.set(literals.size() - 1, runBuffer.slice().getBytes());
         }
         gaps.add(pendingGap);
-        return new LiteralSequence(literals, gaps, anchoredAtStart, anchoredAtEnd, hasFinalLineEnd && !hasExactEnd);
+        return new LiteralSequence(literals, gaps, sequenceStops, anchoredAtStart, anchoredAtEnd, hasFinalLineEnd && !hasExactEnd);
     }
 
     private static Gap mergeGap(Gap left, Gap right)
@@ -764,7 +843,9 @@ final class ExpressionAnalysis
     private record ConcatenationElement(List<Element> elements)
             implements Element {}
 
-    private record GapElement(Gap gap)
+    // The stops of a ONE_NON_STOP_CODE_POINT or ZERO_OR_MORE_NON_STOP_CODE_POINTS gap, and null for
+    // every other gap.
+    private record GapElement(Gap gap, DotStops stops)
             implements Element {}
 
     private record LiteralElement(byte[] bytes)

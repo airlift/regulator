@@ -1789,16 +1789,18 @@ ordinary engine would.
   one-shot searches ([#245], [design][d-trino-literal], [design][d-boolean]).
 - **Where:** `DotStarLiteralSpanMatcher.analyze`,
   `DotStarLiteralSpanMatcher.findSpan`, `DotStarLiteralSpanMatcher.count`,
+  `DotStarLiteralSpanMatcher.MultipleStops`,
   `CompiledPattern.oneShotDotStarLiteral`,
   `CompiledPattern.matchInternalOnLiteralKernel`
 - **Applies when:** Unanchored, capture-free patterns of one case-sensitive
   literal between greedy `.*` gaps whose dots match any character but a line
-  feed, in Trino span operations and in these calls of RE2, Java with `(?d)`,
-  and Rust: counts, group-zero matcher finds, and the unanchored `find` of a
-  range, `findInto`, `findResult`, and RE2's `replaceFirst`, `replaceAll`, and
-  `extract`; anchored calls keep the engine, and the matcher yields to the
-  forward DFAs, as [Limits and defaults](REGULATOR_API.md#limits-and-defaults)
-  describes
+  feed and at most seven other stops, no more than two of them ASCII, such as
+  Java's default dot and Rust's CRLF dot, in Trino span operations and in
+  these calls of RE2, Java, and Rust: counts, group-zero matcher finds, and
+  the unanchored `find` of a range, `findInto`, `findResult`, and RE2's
+  `replaceFirst`, `replaceAll`, and `extract`; anchored calls keep the engine,
+  and the matcher yields to the forward DFAs, as [Limits and
+  defaults](REGULATOR_API.md#limits-and-defaults) describes
 - **What it does:** `.*lit.*` finds the literal's first occurrence with the
   pattern's contains search, then widens over the characters the dots match on
   each side. The walk that fixes the match start begins at the region start
@@ -1806,7 +1808,11 @@ ordinary engine would.
   the literal, found by a backward scan: no character the dots read holds a
   line feed, so the walk would restart at each one, and only a malformed byte
   after the last can move the start further. A count scans only the trailing
-  dots and resumes at their end.
+  dots and resumes at their end. Dots with other stops, such as Java's, which
+  also stop at `\r`, U+0085, U+2028, and U+2029, take a variant whose ASCII
+  runs and backward jump look for every ASCII stop and which reads a non-ASCII
+  character as the class's byte ranges do; dots of exactly `[^\n]` keep their
+  own walk.
   ASCII bytes step inline, and after 16 ASCII bytes a run with at least 64
   bytes left switches to the vector scan the DFA count uses to leave a `[^\n]`
   loop. Everyday `.*lit.*` counts in RE2 and Rust run in 0.26 to 0.32 of

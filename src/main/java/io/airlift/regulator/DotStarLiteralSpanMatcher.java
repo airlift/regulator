@@ -13,24 +13,34 @@
  */
 package io.airlift.regulator;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
+import java.util.Arrays;
+
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS;
+import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_STOP_CODE_POINTS;
 import static java.util.Objects.requireNonNull;
 
-/// Finds the spans of a `.*literal.*` pattern whose dots match any character but a line feed:
-/// the literal's first occurrence, widened over the characters the dots match on each side.
+/// Finds the spans of a `.*literal.*` pattern whose dots match any character but their stops: the
+/// literal's first occurrence, widened over the characters the dots match on each side.
 ///
-/// The dots read characters as the compiled program's byte ranges for the class `[^\n]` read them,
-/// which in every language depend only on the pattern's encoding. A UTF-8 class holding all of
-/// U+0080 through U+10FFFF compiles to lenient byte ranges (see [Utf8#re2CharacterWidth]), which
-/// accept overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF, and
-/// reject bare continuation bytes, C0, C1, F5-FF, and cut-short sequences. A Latin-1 pattern, RE2's
-/// Latin-1 option or Rust's bytes API, reads each byte as a character. The encoding selects a table
-/// of character widths at compile time, so the walk has no branch on the language.
-final class DotStarLiteralSpanMatcher
+/// This class serves dots whose only stop is a line feed. The dots read characters as the
+/// compiled program's byte ranges for the class `[^\n]` read them, which in every language depend
+/// only on the pattern's encoding. A UTF-8 class holding all of U+0080 through U+10FFFF compiles to
+/// lenient byte ranges (see [Utf8#re2CharacterWidth]), which accept overlong three- and four-byte
+/// forms, encoded surrogates, and values above U+10FFFF, and reject bare continuation bytes, C0,
+/// C1, F5-FF, and cut-short sequences. A Latin-1 pattern, RE2's Latin-1 option or Rust's bytes API,
+/// reads each byte as a character. The encoding selects a table of character widths at compile
+/// time, so the walk has no branch on the language. Dots with other stops as well, such as Java's
+/// default dot, take [MultipleStops], whose searches and count walk by the same rules. Each class
+/// keeps its walks private, and each search and count entry calls its own class's walk directly:
+/// in a JVM that has linked an override of a walk, the walk is no longer statically bound, and C2
+/// stops inlining the line-feed walk into its callers.
+sealed class DotStarLiteralSpanMatcher
         implements GroupZeroSpanSearch
+        permits DotStarLiteralSpanMatcher.MultipleStops
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(DotStarLiteralSpanMatcher.class);
     // The bytes of an ASCII run skipDotAscii reads inline before it considers the vector scan.
@@ -47,6 +57,7 @@ final class DotStarLiteralSpanMatcher
     private final LiteralSearchKernel search;
     private final byte[] characterWidths;
 
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "Sealed, and its one subclass is final, so no subclass can finalize a partly built matcher")
     private DotStarLiteralSpanMatcher(Slice literal, LiteralSearchKernel search, byte[] characterWidths)
     {
         this.literal = requireNonNull(literal, "literal is null");
@@ -58,9 +69,11 @@ final class DotStarLiteralSpanMatcher
     /// literal, which they take from the same literal sequence when it holds exactly one literal,
     /// as every sequence this accepts does, so the matcher retains no copy of its own. `search` is
     /// the pattern's boolean contains search for that literal, or null, and `latin1` whether the
-    /// pattern reads its input as Latin-1. A Rust bytes-API pattern is Latin-1, and its only
-    /// `[^\n]` dots are the byte classes of `(?-u)`, since its Unicode dot also excludes the
-    /// surrogates, which the analysis does not take for a gap.
+    /// pattern reads its input as Latin-1. Dots of exactly `[^\n]` take this class, and dots that
+    /// also stop at other characters take [MultipleStops]. A Rust bytes-API pattern is Latin-1, and
+    /// its only dots that take a matcher are the byte classes of `(?-u)`: its Unicode dot is a
+    /// class of characters, which also excludes the surrogates, and a Latin-1 pattern takes no
+    /// matcher for one.
     static DotStarLiteralSpanMatcher analyze(ExpressionAnalysis analysis, Slice literal, LiteralSearchKernel search, boolean latin1)
     {
         ExpressionAnalysis.LiteralSequence sequence = analysis.literalSequence();
@@ -72,8 +85,13 @@ final class DotStarLiteralSpanMatcher
                 sequence.literalCount() != 1 ||
                 sequence.anchoredAtStart() ||
                 sequence.anchoredAtEnd() ||
-                sequence.leadingGap() != ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS ||
-                sequence.gapAfter(0) != ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS) {
+                sequence.gapAfter(0) != sequence.leadingGap()) {
+            return null;
+        }
+        if (sequence.leadingGap() == ZERO_OR_MORE_NON_STOP_CODE_POINTS) {
+            return MultipleStops.analyze(literal, search, sequence.dotStops(), latin1);
+        }
+        if (sequence.leadingGap() != ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS) {
             return null;
         }
 
@@ -125,7 +143,7 @@ final class DotStarLiteralSpanMatcher
         if (start < 0 || start > input.length()) {
             return Dfa.SEARCH_NO_MATCH;
         }
-        return findSpan(input, start, input.length());
+        return findSpanWithinLine(input, start, input.length(), null);
     }
 
     /// Returns the span of the first match lying entirely in `[start, end)` of `input`, or
@@ -140,24 +158,28 @@ final class DotStarLiteralSpanMatcher
     /// `start` or at or past `end`.
     long findSpan(Slice input, int start, int end)
     {
-        return findSpan(input, start, end, null);
+        return findSpanWithinLine(input, start, end, null);
     }
 
     /// Returns [#findSpan(Slice,int,int)], adding its forward vector scans over ASCII runs and
-    /// its backward scans for the last line feed to `diagnostics`.
+    /// its backward scans for the last ASCII stop to `diagnostics`.
     long findSpanForDiagnostics(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
-        return findSpan(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
+        return findSpanWithinLine(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
     /// Returns [#findSpan(Slice,int,int)], adding its scans to `diagnostics` as
     /// [#findSpanForDiagnostics(Slice,int,int,ScanDiagnostics)] counts them, unless it is `null`,
-    /// as every production search passes it.
-    /// The literal-kernel searches call this overload directly, which saves them the frame of the
-    /// other, and it calls the contains search itself rather than through `findLiteral`, to keep
-    /// the search's word reads within C2's inline depth below the public entries; see
-    /// [CompiledPattern#oneShotDotStarLiteral].
+    /// as every production search passes it. The literal-kernel searches call this overload.
     long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
+    {
+        return findSpanWithinLine(input, start, end, diagnostics);
+    }
+
+    // The walk behind every search, for dots whose only stop is a line feed. It calls the contains
+    // search itself rather than through findLiteral, to keep the search's word reads within C2's
+    // inline depth below the public entries; see CompiledPattern.oneShotDotStarLiteral.
+    private long findSpanWithinLine(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
         int literalStart = search != null ? search.findContains(input, start, end - start) : findLiteral(input, start, end);
         if (literalStart < 0) {
@@ -350,8 +372,308 @@ final class DotStarLiteralSpanMatcher
         return widths;
     }
 
+    /// The matcher for dots that stop at a line feed and at other characters, the gap's
+    /// [ExpressionAnalysis.DotStops]: Java's default dot, which also stops at a carriage return,
+    /// U+0085, U+2028, and U+2029, Rust's CRLF dot, which also stops at a carriage return, or a
+    /// class such as `[^\r\n]` in any language. The searches and the count walk as the enclosing
+    /// class's do, with these differences:
+    ///
+    /// - The ASCII runs stop at every ASCII stop, at most [#MAXIMUM_ASCII_STOPS], which the vector
+    ///   scans take as their candidates.
+    /// - The walk to the literal, at an ASCII stop, jumps to after the last ASCII stop before the
+    ///   literal. No character the dots read holds an ASCII byte after its first, so the walk would
+    ///   land on each of them, and each one starts the match after it.
+    /// - A non-ASCII byte reads as the compiled program's byte ranges for the class read it. A UTF-8
+    ///   class without a non-ASCII stop holds all of U+0080 through U+10FFFF, whose lenient ranges
+    ///   the enclosing class's width table reads. Any other UTF-8 class accepts exactly the
+    ///   encodings of its members, an encoded surrogate among them unless the surrogates are stops,
+    ///   which [Utf8#re2DecodeClassCharacter] reads, and then the dots match the character unless
+    ///   it is a stop. A Latin-1 class reads each byte as a character, one of the stops or not.
+    ///
+    /// The enclosing class keeps its own walks, rather than these with a line feed as the only
+    /// stop, so the dots of RE2, Rust, Trino, and Java's `(?d)` compile as they did before this
+    /// class. A change to the rules of one walk needs the same change in the other. This class
+    /// overrides only the thin entries that call the walks, never a walk, so linking it leaves
+    /// the enclosing class's walk statically bound and inlined into its callers.
+    static final class MultipleStops
+            extends DotStarLiteralSpanMatcher
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(MultipleStops.class);
+
+        // The most ASCII stops the vector scans take.
+        private static final int MAXIMUM_ASCII_STOPS = 3;
+
+        // The ASCII stops, a line feed among them, and how many there are; an unused one repeats
+        // the first.
+        private final byte firstAsciiStop;
+        private final byte secondAsciiStop;
+        private final byte thirdAsciiStop;
+        private final int asciiStopCount;
+        // In a UTF-8 pattern with non-ASCII stops, each one's range as its first and last code
+        // points, and otherwise null, where the width table reads every byte.
+        private final int[] nonAsciiStops;
+
+        private MultipleStops(Slice literal, LiteralSearchKernel search, byte[] characterWidths, byte[] asciiStops, int asciiStopCount, int[] nonAsciiStops)
+        {
+            super(literal, search, characterWidths);
+            this.firstAsciiStop = asciiStops[0];
+            this.secondAsciiStop = asciiStopCount > 1 ? asciiStops[1] : asciiStops[0];
+            this.thirdAsciiStop = asciiStopCount > 2 ? asciiStops[2] : asciiStops[0];
+            this.asciiStopCount = asciiStopCount;
+            this.nonAsciiStops = nonAsciiStops;
+        }
+
+        /// Returns the matcher for dots with `stops`, or null when they have more ASCII stops than
+        /// the vector scans take, when the stops' class reads characters in another encoding than
+        /// the pattern, or when the dots do not read `literal` as whole characters, none a stop.
+        private static MultipleStops analyze(Slice literal, LiteralSearchKernel search, ExpressionAnalysis.DotStops stops, boolean latin1)
+        {
+            if (stops.latin1() != latin1) {
+                return null;
+            }
+            byte[] characterWidths = characterWidths(latin1);
+            byte[] asciiStops = new byte[MAXIMUM_ASCII_STOPS];
+            int asciiStopCount = 0;
+            int[] nonAsciiStops = new int[stops.ranges().size() * 2];
+            int nonAsciiStopCount = 0;
+            for (RuneRange range : stops.ranges()) {
+                for (int value = range.low(); value <= Math.min(range.high(), latin1 ? 0xFF : 0x7F); value++) {
+                    characterWidths[value] = 0;
+                    if (value < 0x80) {
+                        if (asciiStopCount == MAXIMUM_ASCII_STOPS) {
+                            return null;
+                        }
+                        asciiStops[asciiStopCount++] = (byte) value;
+                    }
+                }
+                if (!latin1 && range.high() >= 0x80) {
+                    nonAsciiStops[nonAsciiStopCount++] = Math.max(range.low(), 0x80);
+                    nonAsciiStops[nonAsciiStopCount++] = range.high();
+                }
+            }
+            MultipleStops matcher = new MultipleStops(literal, search, characterWidths, asciiStops, asciiStopCount, nonAsciiStopCount == 0 ? null : Arrays.copyOf(nonAsciiStops, nonAsciiStopCount));
+            return matcher.readsCharacters(literal) ? matcher : null;
+        }
+
+        /// Returns the memory this matcher adds to its pattern: the matcher, its width table, which
+        /// zeroes its stops, and its non-ASCII stops.
+        @Override
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(super.characterWidths) + SizeOf.sizeOf(nonAsciiStops);
+        }
+
+        /// Returns whether the dots read the literal as whole characters, none a stop; see the
+        /// enclosing class's isCharacters.
+        private boolean readsCharacters(Slice literal)
+        {
+            if (literal.length() == 0) {
+                return false;
+            }
+            byte[] bytes = literal.byteArray();
+            int end = literal.byteArrayOffset() + literal.length();
+            int position = literal.byteArrayOffset();
+            while (position < end) {
+                byte value = bytes[position];
+                int width = value >= 0 ? super.characterWidths[value] : nonAsciiWidth(bytes, position, end);
+                if (width == 0) {
+                    return false;
+                }
+                position += width;
+            }
+            return true;
+        }
+
+        @Override
+        long findSpan(Slice input, int start)
+        {
+            requireNonNull(input, "input is null");
+            if (start < 0 || start > input.length()) {
+                return Dfa.SEARCH_NO_MATCH;
+            }
+            return findSpanBetweenStops(input, start, input.length(), null);
+        }
+
+        @Override
+        long findSpan(Slice input, int start, int end)
+        {
+            return findSpanBetweenStops(input, start, end, null);
+        }
+
+        @Override
+        long findSpanForDiagnostics(Slice input, int start, int end, ScanDiagnostics diagnostics)
+        {
+            return findSpanBetweenStops(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
+        }
+
+        @Override
+        long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
+        {
+            return findSpanBetweenStops(input, start, end, diagnostics);
+        }
+
+        // The enclosing class's findSpanWithinLine for these dots, which calls the contains
+        // search itself for the same reason.
+        private long findSpanBetweenStops(Slice input, int start, int end, ScanDiagnostics diagnostics)
+        {
+            LiteralSearchKernel search = super.search;
+            int literalStart = search != null ? search.findContains(input, start, end - start) : super.findLiteral(input, start, end);
+            if (literalStart < 0) {
+                return Dfa.SEARCH_NO_MATCH;
+            }
+
+            byte[] bytes = input.byteArray();
+            int inputOffset = input.byteArrayOffset();
+            int regionEnd = inputOffset + end;
+            int literalPosition = inputOffset + literalStart;
+            // The match starts after the last byte before the literal where the dots match nothing.
+            int matchStart = inputOffset + start;
+            int position = skipAscii(bytes, matchStart, literalPosition, diagnostics);
+            while (position < literalPosition) {
+                if (bytes[position] >= 0) {
+                    position = afterLastAsciiStop(bytes, position, literalPosition, diagnostics);
+                    matchStart = position;
+                }
+                else {
+                    int width = nonAsciiWidth(bytes, position, regionEnd);
+                    if (width == 0) {
+                        position++;
+                        matchStart = position;
+                    }
+                    else {
+                        position += width;
+                    }
+                }
+                position = skipAscii(bytes, position, literalPosition, diagnostics);
+            }
+
+            int matchEnd = dotsEnd(bytes, literalPosition + super.literal.length(), regionEnd, diagnostics);
+            return ((long) (matchStart - inputOffset) << 32) | ((matchEnd - inputOffset) & 0xFFFF_FFFFL);
+        }
+
+        @Override
+        long count(Slice input)
+        {
+            return countMatches(input, null);
+        }
+
+        @Override
+        long countForDiagnostics(Slice input, ScanDiagnostics diagnostics)
+        {
+            return countMatches(input, requireNonNull(diagnostics, "diagnostics is null"));
+        }
+
+        // A null `diagnostics`, as every production count passes, counts nothing.
+        private long countMatches(Slice input, ScanDiagnostics diagnostics)
+        {
+            byte[] bytes = input.byteArray();
+            int inputOffset = input.byteArrayOffset();
+            int inputEnd = inputOffset + input.length();
+            int literalLength = super.literal.length();
+            long count = 0;
+            int searchStart = 0;
+            while (searchStart < input.length()) {
+                int literalStart = super.findLiteral(input, searchStart, input.length());
+                if (literalStart < 0) {
+                    break;
+                }
+                count++;
+                searchStart = dotsEnd(bytes, inputOffset + literalStart + literalLength, inputEnd, diagnostics) - inputOffset;
+            }
+            return count;
+        }
+
+        /// Returns where the dots after a literal ending at `position` stop: at the first byte
+        /// before `end` where they match no character, or at `end`.
+        private int dotsEnd(byte[] bytes, int position, int end, ScanDiagnostics diagnostics)
+        {
+            position = skipAscii(bytes, position, end, diagnostics);
+            while (position < end && bytes[position] < 0) {
+                int width = nonAsciiWidth(bytes, position, end);
+                if (width == 0) {
+                    break;
+                }
+                position += width;
+                position = skipAscii(bytes, position, end, diagnostics);
+            }
+            return position;
+        }
+
+        /// Returns the position after the last ASCII stop in `[begin, end)`, which holds one at
+        /// `begin`, reading nothing outside it, by the enclosing class's afterLastLineFeed rules.
+        private int afterLastAsciiStop(byte[] bytes, int begin, int end, ScanDiagnostics diagnostics)
+        {
+            if (diagnostics != null) {
+                diagnostics.backwardScanCount++;
+            }
+            if (end - begin >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && VectorSupport.isAvailable()) {
+                int stop = VectorByteSetScanner.findLast(bytes, begin, end - begin, firstAsciiStop, secondAsciiStop, thirdAsciiStop, asciiStopCount);
+                return stop < 0 ? begin : stop + 1;
+            }
+            byte[] characterWidths = super.characterWidths;
+            for (int position = end; position > begin; position--) {
+                byte value = bytes[position - 1];
+                if (value >= 0 && characterWidths[value] == 0) {
+                    return position;
+                }
+            }
+            return begin;
+        }
+
+        /// Returns the first position at or after `position`, before `end`, holding an ASCII stop
+        /// or a byte with its high bit set, or `end`, by the enclosing class's skipDotAscii rules.
+        private int skipAscii(byte[] bytes, int position, int end, ScanDiagnostics diagnostics)
+        {
+            byte[] characterWidths = super.characterWidths;
+            int inlineEnd = end - position >= INLINE_DOT_ASCII_BYTES + CompiledPattern.MINIMUM_LONG_SEARCH_BYTES ? position + INLINE_DOT_ASCII_BYTES : end;
+            while (position < inlineEnd) {
+                byte value = bytes[position];
+                if (value < 0 || characterWidths[value] == 0) {
+                    return position;
+                }
+                position++;
+            }
+            if (end - position >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && VectorSupport.isAvailable()) {
+                if (diagnostics != null) {
+                    diagnostics.vectorScanCount++;
+                }
+                int stop = VectorByteSetScanner.findHighBitOr(bytes, position, end - position, firstAsciiStop, secondAsciiStop, thirdAsciiStop, asciiStopCount);
+                return stop < 0 ? end : stop;
+            }
+            while (position < end) {
+                byte value = bytes[position];
+                if (value < 0 || characterWidths[value] == 0) {
+                    break;
+                }
+                position++;
+            }
+            return position;
+        }
+
+        /// Returns the width of the character the dots read at `position`, a byte with its high bit
+        /// set before `end`, or 0 where they match none there.
+        private int nonAsciiWidth(byte[] bytes, int position, int end)
+        {
+            int[] stops = nonAsciiStops;
+            if (stops == null) {
+                return characterWidth(super.characterWidths, bytes, position, end);
+            }
+            long decoded = Utf8.re2DecodeClassCharacter(bytes, position, end, false);
+            int codePoint = Utf8.decodedCodePoint(decoded);
+            if (codePoint < 0) {
+                return 0;
+            }
+            for (int index = 0; index < stops.length; index += 2) {
+                if (codePoint >= stops[index] && codePoint <= stops[index + 1]) {
+                    return 0;
+                }
+            }
+            return Utf8.decodedWidth(decoded);
+        }
+    }
+
     /// Counts the scans that a diagnostics search or count of a dot-star literal takes: the
-    /// forward vector scans over ASCII runs and the backward scans for the last line feed.
+    /// forward vector scans over ASCII runs and the backward scans for the last ASCII stop.
     static final class ScanDiagnostics
     {
         private long vectorScanCount;
@@ -363,7 +685,7 @@ final class DotStarLiteralSpanMatcher
             return vectorScanCount;
         }
 
-        /// The backward scans, vector or byte by byte, for the last line feed before the literal.
+        /// The backward scans, vector or byte by byte, for the last ASCII stop before the literal.
         long backwardScanCount()
         {
             return backwardScanCount;

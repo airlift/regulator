@@ -1057,9 +1057,9 @@ abstract sealed class CompiledPattern
         // UTF-8 sequences can take a few more instructions. The reverse prefix program takes half
         // the reverse budget, or less if the search would otherwise not fit beside that estimate,
         // and the search is left out unless its reverse prefix DFA can initialize. A pattern of the
-        // dot-star literal matcher's shape below, such as `.*literal.*` in RE2, Trino, and Rust's
-        // string API, is left to that matcher: only the class-run proof admits its prefix of dots,
-        // so the search is left out, as it was before that proof.
+        // dot-star literal matcher's shape below, such as `.*literal.*` in RE2, Trino, Java, and
+        // Rust's string API, is left to that matcher: only the class-run proof admits its prefix
+        // of dots, so the search is left out, as it was before that proof.
         if (requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
                 booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null) {
             long forwardEstimate = Compiler.estimatedProgramMemory(semanticProgram) + Dfa.DfaInstance.minimumMemory(semanticProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH);
@@ -3346,9 +3346,9 @@ abstract sealed class CompiledPattern
     /// Creates a group-zero matcher without the class counter or the group-zero forward cursor.
     /// The candidate-start cursor, lowered search, and scan plans stay, and a compact pattern
     /// still reaches its counter through [#matchRegionInto]. Its finds of a `.*literal.*` pattern
-    /// in RE2, Java with UNIX_LINES, and Rust still take the dot-star literal matcher, so a test
-    /// that needs the engine's spans runs the same pattern with its dots inside a capture, which
-    /// has no such matcher.
+    /// in RE2, Java, and Rust still take the dot-star literal matcher, so a test that needs the
+    /// engine's spans runs the same pattern with its dots inside a capture, which has no such
+    /// matcher.
     RegexpMatcher genericGroupZeroMatcherForDiagnostics(Slice input)
     {
         return new RegexpMatcher(this, input, null, 0, false);
@@ -5500,7 +5500,8 @@ abstract sealed class CompiledPattern
         return gap == ExpressionAnalysis.Gap.NONE ||
                 gap == ExpressionAnalysis.Gap.ZERO_OR_MORE_BYTES ||
                 gap == ExpressionAnalysis.Gap.ZERO_OR_MORE_CODE_POINTS ||
-                gap == ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS;
+                gap == ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS ||
+                gap == ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_STOP_CODE_POINTS;
     }
 
     private static boolean canMatchUnrestrictedGapDirectly(ExpressionAnalysis.Gap gap, boolean latin1)

@@ -131,7 +131,7 @@ public class TestBenchmarkPatternDispatch
                                 }
                                 assertNoProgramSearch(fresh, description);
                             }
-                            if (target.equals("DOT_STAR_LITERAL") && (reference instanceof Re2 || reference instanceof RustRegexp)) {
+                            if (target.equals("DOT_STAR_LITERAL") && reference instanceof CompiledPattern) {
                                 // A fresh pattern shows that the one-shot searches over these rows
                                 // run the dot-star literal matcher and never the program.
                                 CompiledPattern fresh = (CompiledPattern) interpreted(language, expression(target));
@@ -344,10 +344,7 @@ public class TestBenchmarkPatternDispatch
         Shape expected = switch (target) {
             case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
             case "EXACT_LITERAL", "SINGLE_BYTE" -> EXACT_LITERAL;
-            case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES" -> LITERAL_KERNEL;
-            // Java's dot also stops at `\r`, U+0085, U+2028, and U+2029, so its `.*timeout.*`
-            // is no contained literal.
-            case "DOT_STAR_LITERAL" -> compiled instanceof JavaRegexp ? ENGINE : LITERAL_KERNEL;
+            case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES", "DOT_STAR_LITERAL" -> LITERAL_KERNEL;
             case "CHARACTER_CLASS" -> CLASS_RUN;
             case "LITERAL_ALTERNATION" -> LITERAL_ALTERNATION;
             case "FIXED_WIDTH" -> FIXED_WIDTH;
@@ -379,16 +376,10 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();
             }
             case "DOT_STAR_LITERAL" -> {
-                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
-                // RE2 and Rust count the literal kernel's dot-star spans, and the matcher finds them.
-                if (compiled instanceof JavaRegexp) {
-                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNull();
-                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isNull();
-                }
-                else {
-                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNotNull();
-                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createDotStarLiteralSpanMatcher());
-                }
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
+                // The literal kernel counts the dot-star spans, and the matcher finds them.
+                assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNotNull();
+                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createDotStarLiteralSpanMatcher());
             }
             case "SINGLE_BYTE" -> {
                 assertThat(compiled.sharedSingleByteMatcher()).as(description).isNotNull();
@@ -527,10 +518,10 @@ public class TestBenchmarkPatternDispatch
     }
 
     // The non-overlapping matches of a find loop over the whole input: the generic group-zero
-    // matcher's, whose finds of DOT_STAR_LITERAL in RE2 and Rust still take the dot-star literal
-    // matcher, as the benchmark's do, or a Trino pattern's count. A test that needs the engine's
-    // spans runs the pattern with its dots inside a capture instead, as TestPublicEngineAgreement
-    // does.
+    // matcher's, whose finds of DOT_STAR_LITERAL in RE2, Java, and Rust still take the dot-star
+    // literal matcher, as the benchmark's do, or a Trino pattern's count. A test that needs the
+    // engine's spans runs the pattern with its dots inside a capture instead, as
+    // TestPublicEngineAgreement does.
     private static long iterate(Object pattern, Slice input)
     {
         return switch (pattern) {

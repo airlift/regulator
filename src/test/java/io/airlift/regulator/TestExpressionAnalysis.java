@@ -32,10 +32,12 @@ import java.util.function.Supplier;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.NONE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ONE_BYTE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ONE_NON_NEWLINE_CODE_POINT;
+import static io.airlift.regulator.ExpressionAnalysis.Gap.ONE_NON_STOP_CODE_POINT;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.REQUIRES_GENERAL_ENGINE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_BYTES;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_CODE_POINTS;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS;
+import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_NON_STOP_CODE_POINTS;
 import static io.airlift.regulator.Prefilter.PrefilterOp.AND;
 import static io.airlift.regulator.Prefilter.PrefilterOp.ATOM;
 import static io.airlift.slice.Slices.utf8Slice;
@@ -198,6 +200,22 @@ public class TestExpressionAnalysis
         assertSequence("foo.bar", false, false, List.of("foo", "bar"), List.of(NONE, ONE_NON_NEWLINE_CODE_POINT, NONE));
         assertSequence("foo\\Cbar", false, false, List.of("foo", "bar"), List.of(NONE, ONE_BYTE, NONE));
         assertSequence("foo.*bar", false, false, List.of("foo", "bar"), List.of(NONE, ZERO_OR_MORE_NON_NEWLINE_CODE_POINTS, NONE));
+        assertThat(analyze("foo.*bar").literalSequence().dotStops()).isNull();
+
+        // A class of every character but a line feed and other stops is a gap that names its
+        // stops, as Java's default dot is, and the sequence's gaps share one set of stops.
+        assertSequence("[^\\r\\n]*foo[^\\r\\n]bar", false, false, List.of("foo", "bar"), List.of(ZERO_OR_MORE_NON_STOP_CODE_POINTS, ONE_NON_STOP_CODE_POINT, NONE));
+        assertThat(analyze("[^\\r\\n]*foo").literalSequence().dotStops())
+                .isEqualTo(new ExpressionAnalysis.DotStops(List.of(new RuneRange('\n', '\n'), new RuneRange('\r', '\r')), false));
+        assertSequence("[^\\r\\n]*foo[^\\t\\n]*", false, false, List.of("foo"), List.of(ZERO_OR_MORE_NON_STOP_CODE_POINTS, REQUIRES_GENERAL_ENGINE));
+        ExpressionAnalysis.LiteralSequence javaDots = JavaRegexp.compile(utf8Slice(".*foo.*")).expressionAnalysisForDiagnostics().literalSequence();
+        assertThat(List.of(javaDots.leadingGap(), javaDots.gapAfter(0))).containsExactly(ZERO_OR_MORE_NON_STOP_CODE_POINTS, ZERO_OR_MORE_NON_STOP_CODE_POINTS);
+        assertThat(javaDots.dotStops())
+                .isEqualTo(new ExpressionAnalysis.DotStops(List.of(new RuneRange('\n', '\n'), new RuneRange('\r', '\r'), new RuneRange(0x85, 0x85), new RuneRange(0x2028, 0x2029)), false));
+        // A gap stops at eight characters at most, here three of them ASCII; a ninth keeps the
+        // general engine.
+        assertSequence("[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}]*foo", false, false, List.of("foo"), List.of(ZERO_OR_MORE_NON_STOP_CODE_POINTS, NONE));
+        assertSequence("[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}\\x{FEFF}]*foo", false, false, List.of("foo"), List.of(REQUIRES_GENERAL_ENGINE, NONE));
 
         ExpressionAnalysis alternate = analyze("foo|bar");
         assertThat(alternate.literalSequence()).isNull();
