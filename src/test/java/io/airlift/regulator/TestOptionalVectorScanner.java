@@ -92,6 +92,8 @@ public class TestOptionalVectorScanner
             // options come first, so a test's own `-XX:MaxVectorSize=8` wins over them.
             command.addAll(TestingJvmArguments.vectorWidthOptions());
             command.addAll(jvmArguments);
+            // The probe checks which scans its searches took.
+            command.add("-Dio.airlift.regulator.dfa.route-counts=true");
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));
             command.add(VectorScannerProbe.class.getName());

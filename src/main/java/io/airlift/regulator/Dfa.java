@@ -163,6 +163,32 @@ final class Dfa
     private static final PointerReaderProbe POINTER_READER_PROBE = Boolean.getBoolean("io.airlift.regulator.dfa.pointer-reader-probe")
             ? new PointerReaderProbe()
             : null;
+    // Whether searches count the routes they take, such as each scan and hand-off, so tests can
+    // check which one a search chose. Only tests set `io.airlift.regulator.dfa.route-counts`;
+    // production never counts, because every thread searching a compiled pattern shares its DFAs,
+    // and concurrent searches storing to the same counters would move their cache lines between
+    // cores. C2 folds this constant, so with it off each countRoute call compiles to nothing.
+    private static final boolean COUNTS_ROUTES = Boolean.getBoolean("io.airlift.regulator.dfa.route-counts");
+    // The routes countRoute counts, each an index into a DFA's route counts.
+    private static final int BYTE_SCAN_FALLBACK_ROUTE = 0;
+    private static final int SMALL_BYTE_SET_SCAN_ROUTE = 1;
+    private static final int CONTIGUOUS_RANGE_SCAN_ROUTE = 2;
+    private static final int MIXED_BYTE_SET_SCAN_ROUTE = 3;
+    private static final int START_LITERAL_FILTER_SCAN_ROUTE = 4;
+    private static final int START_CLASS_FILTER_SCAN_ROUTE = 5;
+    private static final int SELF_LOOP_EXIT_BYTE_SCAN_ROUTE = 6;
+    private static final int COUNT_SELF_LOOP_SCAN_ROUTE = 7;
+    private static final int COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE = 8;
+    private static final int COUNT_SELF_LOOP_NO_MATCH_POINTER_HAND_OFF_ROUTE = 9;
+    private static final int COUNT_SELF_LOOP_REARM_ROUTE = 10;
+    private static final int SELF_LOOP_STAY_RANGE_SCAN_ROUTE = 11;
+    private static final int MATCHING_SELF_LOOP_SCAN_ROUTE = 12;
+    private static final int MATCHING_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE = 13;
+    private static final int REVERSE_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE = 14;
+    private static final int FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE = 15;
+    private static final int PREFIX_RUN_SCAN_ROUTE = 16;
+    private static final int ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE = 17;
+    private static final int COUNTED_ROUTES = 18;
 
     private Dfa() {}
 
@@ -175,6 +201,14 @@ final class Dfa
     static boolean nativeAccessEnabled()
     {
         return Dfa.class.getModule().isNativeAccessEnabled();
+    }
+
+    // A call site is smaller bytecode than a field increment, so counting grows no caller.
+    private static void countRoute(DfaInstance dfa, int route)
+    {
+        if (COUNTS_ROUTES) {
+            dfa.routeCounts[route]++;
+        }
     }
 
     public static final long SEARCH_FAILED = Long.MIN_VALUE;
@@ -591,7 +625,7 @@ final class Dfa
                     transitions = tables.transitions;
                     stateRefs = dfa.stateReferences(tables, stateOffset);
                     if (matchingSelfLoopEnd != position + 1) {
-                        dfa.matchingSelfLoopScanCount++;
+                        countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
                     }
                     position = matchingSelfLoopEnd - 1;
                     lastMatchBoundary = position;
@@ -839,7 +873,7 @@ final class Dfa
                 if (canUseStartByteAcceleration(dfa, anchoredEffective, true, startData.flag())) {
                     if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
                             !dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
-                        dfa.byteScanFallbackCount++;
+                        countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
                     }
                     else {
                         int startByteScanSet = selectByteScanSet(
@@ -866,7 +900,7 @@ final class Dfa
                     }
                 }
                 else if (fixedDistanceScanRejected) {
-                    dfa.byteScanFallbackCount++;
+                    countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
                 }
                 if (!startIsMatch && textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
                     tables = dfa.requestPairedTransitions(tables);
@@ -1692,7 +1726,7 @@ final class Dfa
                 if (!cursor.consumeWork(matchingSelfLoopEnd - position)) {
                     return CANDIDATE_FALLBACK;
                 }
-                dfa.matchingSelfLoopScanCount++;
+                countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
                 transitionCount += matchingSelfLoopEnd - position;
                 lastMatchBoundary = matchingSelfLoopEnd - 1;
                 position = matchingSelfLoopEnd;
@@ -1822,7 +1856,7 @@ final class Dfa
                             ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
                             : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
                 byteScanRejected = true;
-                dfa.byteScanFallbackCount++;
+                countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
             else {
                 // A scalar choice is resampled only when a search reaches this scan, so searches
@@ -1856,7 +1890,7 @@ final class Dfa
             }
         }
         else if (byteScanRejected) {
-            dfa.byteScanFallbackCount++;
+            countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
         }
 
         if (!startIsMatch &&
@@ -1970,7 +2004,7 @@ final class Dfa
             }
             skippedBytes += exitPosition - position;
             totalSkippedBytes += exitPosition - position;
-            dfa.countSelfLoopScanCount++;
+            countRoute(dfa, COUNT_SELF_LOOP_SCAN_ROUTE);
             productive |= exitByteSet > 0 || exitPosition - position >= VectorByteSetScanner.SHORT_SCAN_BYTES;
             // Each skipped byte of a matching self-loop records a match ending before that byte.
             if (isMatchingSelfLoop(exitByteSet) && exitPosition > position) {
@@ -2006,7 +2040,7 @@ final class Dfa
                     long stepped = stepSelfLoopRearmBytes(tables.transitions, byteMap, bytes, position, Math.min(contextEnd - position, rearmBytes), stateOffset);
                     position = (int) (stepped >>> 32);
                     stateOffset = (int) stepped;
-                    dfa.countSelfLoopRearmCount++;
+                    countRoute(dfa, COUNT_SELF_LOOP_REARM_ROUTE);
                     rearm = false;
                     step = 0;
                     shortScanCount = 0;
@@ -2059,7 +2093,7 @@ final class Dfa
             if (dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
                 long result = searchForwardAbsolutePointers(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
                 recordCountSelfLoopScanProductivity(dfa, productive);
-                dfa.countSelfLoopNoMatchPointerHandOffCount++;
+                countRoute(dfa, COUNT_SELF_LOOP_NO_MATCH_POINTER_HAND_OFF_ROUTE);
                 return result;
             }
             if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
@@ -2101,7 +2135,7 @@ final class Dfa
                         false,
                         false);
                 recordCountSelfLoopScanProductivity(dfa, productive);
-                dfa.countSelfLoopMatchHandOffCount++;
+                countRoute(dfa, COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE);
                 return result;
             }
             if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
@@ -2111,7 +2145,7 @@ final class Dfa
                             ? searchForwardPairsFlatFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false)
                             : searchForwardPairsFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false);
                     recordCountSelfLoopScanProductivity(dfa, productive);
-                    dfa.countSelfLoopMatchHandOffCount++;
+                    countRoute(dfa, COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE);
                     return result;
                 }
             }
@@ -2301,7 +2335,7 @@ final class Dfa
                     !(cursor == null
                             ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
                             : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
-                dfa.byteScanFallbackCount++;
+                countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
             else {
                 int startByteScanSet = selectByteScanSet(
@@ -2328,7 +2362,7 @@ final class Dfa
             }
         }
         else if (fixedDistanceScanRejected) {
-            dfa.byteScanFallbackCount++;
+            countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
         }
 
         if (!startIsMatch &&
@@ -3316,7 +3350,7 @@ final class Dfa
         tables = dfa.tablesAfterWrite(tables);
         if (exitByteSet != 0) {
             int exitPosition = findSelfLoopExit(dfa, bytes, position, textEnd, exitByteSet);
-            dfa.selfLoopExitByteScanCount++;
+            countRoute(dfa, SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
             int stateOffset = rowStateOffset(stateReferences, dfa.nextSize, tables.transitions);
             return ((long) (exitPosition < 0 ? textEnd : exitPosition) << 32) | (stateOffset & 0xFFFF_FFFFL);
         }
@@ -3500,7 +3534,7 @@ final class Dfa
             // Computing the loop's exit bytes may have published grown tables.
             tables = dfa.tablesAfterWrite(tables);
             if (matchingSelfLoopEnd != position) {
-                dfa.matchingSelfLoopScanCount++;
+                countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
                 position = matchingSelfLoopEnd;
                 lastMatchBoundary = position - 1;
             }
@@ -3768,7 +3802,7 @@ final class Dfa
             // Computing the loop's exit bytes may have published grown tables.
             tables = dfa.tablesAfterWrite(tables);
             if (matchingSelfLoopEnd != position) {
-                dfa.matchingSelfLoopScanCount++;
+                countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
                 position = matchingSelfLoopEnd;
                 lastMatchBoundary = position - 1;
             }
@@ -3909,7 +3943,7 @@ final class Dfa
             return stepMatchingSelfLoopTransitions(dfa, tables, bytes, runEnd, textEnd, stateOffset);
         }
         int exitPosition = findSelfLoopExit(dfa, bytes, runEnd, textEnd, exitByteSet);
-        dfa.matchingSelfLoopExitByteScanCount++;
+        countRoute(dfa, MATCHING_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
         return exitPosition < 0 ? textEnd : exitPosition;
     }
 
@@ -3919,7 +3953,7 @@ final class Dfa
     private static int findSelfLoopExit(DfaInstance dfa, byte[] bytes, int position, int end, long exitByteSet)
     {
         if (exitByteSet < 0) {
-            dfa.selfLoopStayRangeScanCount++;
+            countRoute(dfa, SELF_LOOP_STAY_RANGE_SCAN_ROUTE);
             int rangeCount = (int) (((exitByteSet >>> 15) & 1) | ((exitByteSet >>> 30) & 2)) + 1;
             return VectorByteSetScanner.findOutsideRanges(bytes, position, end - position, exitByteSet & SELF_LOOP_STAY_RANGES_MASK, rangeCount);
         }
@@ -4253,7 +4287,7 @@ final class Dfa
                         next = position;
                     }
                     else {
-                        dfa.prefixRunScanCount++;
+                        countRoute(dfa, PREFIX_RUN_SCAN_ROUTE);
                         next = prog.prefixAccel(bytes, position, textEnd - position);
                         if (next > position) {
                             prefixScanCoversThrough = next + prog.prefixAccelMaximumLead() - prog.prefixAccelMinimumLead();
@@ -4293,7 +4327,7 @@ final class Dfa
                 }
                 if (byteCandidateOffset > 0) {
                     if (next - position < MINIMUM_PRODUCTIVE_FIXED_DISTANCE_SKIP) {
-                        dfa.fixedDistanceShortSkipFallbackCount++;
+                        countRoute(dfa, FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE);
                         return searchForwardContinuation(
                                 dfa,
                                 tables,
@@ -4478,7 +4512,7 @@ final class Dfa
         // Either filter is built only when the Vector API is available.
         if (byteScanSet == START_LITERAL_FILTER_MARKER) {
             if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
-                dfa.startLiteralFilterScanCount++;
+                countRoute(dfa, START_LITERAL_FILTER_SCAN_ROUTE);
                 return VectorByteSetScanner.findLiteralSet(data, offset, length, dfa.startLiteralFilter);
             }
             // A filter taken for rare start bytes serves only vector searches; shorter ones check
@@ -4486,31 +4520,42 @@ final class Dfa
             if (dfa.startLiteralFilterVectorOnly) {
                 return findByteCandidate(candidates, data, offset, length);
             }
-            dfa.startLiteralFilterScanCount++;
+            countRoute(dfa, START_LITERAL_FILTER_SCAN_ROUTE);
             return dfa.startLiteralFilter.find(data, offset, length);
         }
         // As for a literal filter taken for rare start bytes, shorter searches check each input
         // byte against the start byte table.
         if (byteScanSet == START_CLASS_FILTER_MARKER) {
             if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
-                dfa.startClassFilterScanCount++;
+                countRoute(dfa, START_CLASS_FILTER_SCAN_ROUTE);
                 return VectorByteSetScanner.findClassSequence(data, offset, length, dfa.startClassFilter);
             }
             return findByteCandidate(candidates, data, offset, length);
         }
         if (VectorSupport.isAvailable() && length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
-            if (byteScanSet == MIXED_BYTE_SET_MARKER) {
-                dfa.mixedByteSetScanCount++;
-            }
-            else if (byteScanSet >>> 24 > 3) {
-                dfa.contiguousRangeScanCount++;
-            }
-            else {
-                dfa.smallByteSetScanCount++;
+            // Guarded here as well: the helper exceeds C2's inline size for cold call sites, and a
+            // folded branch leaves no call to decline.
+            if (COUNTS_ROUTES) {
+                countByteSetRoute(dfa, byteScanSet);
             }
             return findByteSet(data, offset, length, byteScanSet, dfa.startByteNibbleTables);
         }
         return findByteCandidate(candidates, data, offset, length);
+    }
+
+    // Counts the scan [#findByteSet] runs for `byteScanSet`. Choosing the route here keeps the
+    // choice out of findByteSetCandidate, whose bytecode size TestHotMethodSize caps.
+    private static void countByteSetRoute(DfaInstance dfa, int byteScanSet)
+    {
+        if (byteScanSet == MIXED_BYTE_SET_MARKER) {
+            countRoute(dfa, MIXED_BYTE_SET_SCAN_ROUTE);
+        }
+        else if (byteScanSet >>> 24 > 3) {
+            countRoute(dfa, CONTIGUOUS_RANGE_SCAN_ROUTE);
+        }
+        else {
+            countRoute(dfa, SMALL_BYTE_SET_SCAN_ROUTE);
+        }
     }
 
     /// Returns the position of the first byte of `data[offset, offset + length)` in the byte set
@@ -4891,7 +4936,7 @@ final class Dfa
         if (!startIsMatch && maximumBytes == 0 && !endMatch && !wantEarliestMatch && dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
             long result = searchBackwardAbsolutePointers(dfa, tables, bytes, textBegin, position, ctxBegin, stateOffset);
             if (result != ABSOLUTE_POINTER_RETRY_OBJECT) {
-                dfa.absolutePointerBackwardSearchCount++;
+                countRoute(dfa, ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE);
                 return result;
             }
         }
@@ -4955,7 +5000,7 @@ final class Dfa
                 if (dfa.prog.hasLoop() || dfa.prog.canMatchEmpty()) {
                     int matchingSelfLoopBegin = scanMatchingSelfLoopTransitionsBackward(dfa, tables, bytes, scanBegin, position, stateOffset);
                     if (matchingSelfLoopBegin != position) {
-                        dfa.matchingSelfLoopScanCount++;
+                        countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
                         position = matchingSelfLoopBegin;
                         lastMatchBoundary = position + 1;
                     }
@@ -5159,7 +5204,7 @@ final class Dfa
                         (byte) (exitByteSet >>> 16),
                         (exitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK);
             }
-            dfa.reverseSelfLoopExitByteScanCount++;
+            countRoute(dfa, REVERSE_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
             int runBegin = exitPosition < 0 ? textBegin : exitPosition + 1;
             return ((long) runBegin << 32) | (stateOffset & 0xFFFF_FFFFL);
         }
@@ -6802,7 +6847,6 @@ final class Dfa
         private long supersededAbsolutePointerMemory;
         private int shortAbsolutePointerSearchCount;
         private volatile int absolutePointerTransitionCount;
-        private int absolutePointerBackwardSearchCount;
         volatile int stateCount;
 
         private TestingFailurePoint testingFailurePoint;
@@ -6854,29 +6898,14 @@ final class Dfa
         private int pairedRowSelectionCount;
         // Paired tables released to make room for a state, excluding clears at search end, rejection and reset.
         private int pairedRowReleaseCount;
-        private int byteScanFallbackCount;
-        private int smallByteSetScanCount;
-        private int contiguousRangeScanCount;
-        private int mixedByteSetScanCount;
-        private int startLiteralFilterScanCount;
-        private int startClassFilterScanCount;
-        private int selfLoopExitByteScanCount;
-        private int countSelfLoopScanCount;
-        private int countSelfLoopMatchHandOffCount;
-        private int countSelfLoopNoMatchPointerHandOffCount;
-        private int countSelfLoopRearmCount;
+        // How many times searches took each route, indexed by route; null unless COUNTS_ROUTES.
+        private final int[] routeCounts = COUNTS_ROUTES ? new int[COUNTED_ROUTES] : null;
         // The running count's unproductive self-loop search streak, the self-loop cutoff: a search
         // advances it when it reaches no eligible self-loop or scans only stay-form runs shorter
         // than VectorByteSetScanner.SHORT_SCAN_BYTES; any exit-form scan or a stay run of at least
         // that length clears it. Each count call loads it from its sampling, or zero, and stores it
         // back after each search.
         private int countSelfLoopUnproductiveCount;
-        private int selfLoopStayRangeScanCount;
-        private int matchingSelfLoopScanCount;
-        private int matchingSelfLoopExitByteScanCount;
-        private int reverseSelfLoopExitByteScanCount;
-        private int fixedDistanceShortSkipFallbackCount;
-        private int prefixRunScanCount;
 
         public DfaInstance(Prog prog, Kind kind, long maxMemory)
         {
@@ -7659,31 +7688,39 @@ final class Dfa
             return (int) MANY_MATCH_SEARCH_SKIPS_REMAINING.getOpaque(this);
         }
 
+        private int routeCount(int route)
+        {
+            if (routeCounts == null) {
+                throw new IllegalStateException("DFA route counting is off; set -Dio.airlift.regulator.dfa.route-counts=true");
+            }
+            return routeCounts[route];
+        }
+
         int smallByteSetScanCount()
         {
-            return smallByteSetScanCount;
+            return routeCount(SMALL_BYTE_SET_SCAN_ROUTE);
         }
 
         int contiguousRangeScanCount()
         {
-            return contiguousRangeScanCount;
+            return routeCount(CONTIGUOUS_RANGE_SCAN_ROUTE);
         }
 
         int mixedByteSetScanCount()
         {
-            return mixedByteSetScanCount;
+            return routeCount(MIXED_BYTE_SET_SCAN_ROUTE);
         }
 
         int startLiteralFilterScanCount()
         {
-            return startLiteralFilterScanCount;
+            return routeCount(START_LITERAL_FILTER_SCAN_ROUTE);
         }
 
         /// Returns how many times forward searches called [Prog#prefixAccel] for a folded run
         /// behind a lead of varying width.
         int prefixRunScanCount()
         {
-            return prefixRunScanCount;
+            return routeCount(PREFIX_RUN_SCAN_ROUTE);
         }
 
         StartLiteralFilter startLiteralFilter()
@@ -7693,7 +7730,7 @@ final class Dfa
 
         int startClassFilterScanCount()
         {
-            return startClassFilterScanCount;
+            return routeCount(START_CLASS_FILTER_SCAN_ROUTE);
         }
 
         StartClassFilter startClassFilter()
@@ -7703,7 +7740,7 @@ final class Dfa
 
         int fixedDistanceShortSkipFallbackCount()
         {
-            return fixedDistanceShortSkipFallbackCount;
+            return routeCount(FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE);
         }
 
         private long selfLoopExitByteSet(CacheTables tables, Object[] stateReferences)
@@ -8210,7 +8247,7 @@ final class Dfa
 
         int absolutePointerBackwardSearchCount()
         {
-            return absolutePointerBackwardSearchCount;
+            return routeCount(ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE);
         }
 
         boolean absolutePointerTransitionsAvailable()
@@ -8351,42 +8388,42 @@ final class Dfa
 
         int matchingSelfLoopScanCount()
         {
-            return matchingSelfLoopScanCount;
+            return routeCount(MATCHING_SELF_LOOP_SCAN_ROUTE);
         }
 
         int matchingSelfLoopExitByteScanCount()
         {
-            return matchingSelfLoopExitByteScanCount;
+            return routeCount(MATCHING_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
         }
 
         int selfLoopExitByteScanCount()
         {
-            return selfLoopExitByteScanCount;
+            return routeCount(SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
         }
 
         int reverseSelfLoopExitByteScanCount()
         {
-            return reverseSelfLoopExitByteScanCount;
+            return routeCount(REVERSE_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE);
         }
 
         int countSelfLoopScanCount()
         {
-            return countSelfLoopScanCount;
+            return routeCount(COUNT_SELF_LOOP_SCAN_ROUTE);
         }
 
         int countSelfLoopMatchHandOffCount()
         {
-            return countSelfLoopMatchHandOffCount;
+            return routeCount(COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE);
         }
 
         int countSelfLoopNoMatchPointerHandOffCount()
         {
-            return countSelfLoopNoMatchPointerHandOffCount;
+            return routeCount(COUNT_SELF_LOOP_NO_MATCH_POINTER_HAND_OFF_ROUTE);
         }
 
         int countSelfLoopRearmCount()
         {
-            return countSelfLoopRearmCount;
+            return routeCount(COUNT_SELF_LOOP_REARM_ROUTE);
         }
 
         int countSelfLoopUnproductiveCount()
@@ -8396,7 +8433,7 @@ final class Dfa
 
         int selfLoopStayRangeScanCount()
         {
-            return selfLoopStayRangeScanCount;
+            return routeCount(SELF_LOOP_STAY_RANGE_SCAN_ROUTE);
         }
 
         int pairedMatchContinuationToUnpairedCount()
@@ -8438,7 +8475,7 @@ final class Dfa
 
         int byteScanFallbackCount()
         {
-            return byteScanFallbackCount;
+            return routeCount(BYTE_SCAN_FALLBACK_ROUTE);
         }
 
         long estimatedPairedTransitionMemory()
@@ -8496,6 +8533,8 @@ final class Dfa
                     (startClassFilter == null ? 0 : StartClassFilter.INSTANCE_SIZE) +
                     2 * q0.estimatedRetainedSize() +
                     sizeOf(stack) +
+                    // The route counts, which exist only when tests count routes.
+                    sizeOf(routeCounts) +
                     // The cache mutation lock and the queue of unreachable pointer tables.
                     RetainedSizeSupport.LOCK_BYTES +
                     RetainedSizeSupport.REFERENCE_QUEUE_BYTES +

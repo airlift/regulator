@@ -440,6 +440,7 @@ run_semantic_verifier "DFA absolute-pointer probe" \
     taskset --cpu-list "${CPU_LIST}" \
     java "${route_jvm_arguments[@]}" \
     -Dio.airlift.regulator.dfa.pointer-reader-probe=true \
+    -Dio.airlift.regulator.dfa.route-counts=true \
     -cp "${CLASSPATH}" \
     io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}"
 # Units of one shard on one host share a route's semantic tests. The

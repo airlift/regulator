@@ -936,7 +936,9 @@ through one volatile field:
 - a reader search loads the root once when it starts and reads only through it;
   it takes no lock and never waits for a writer; its only stores are racy
   performance hints that need no ordering, such as the counters and flags that
-  select paired rows or the pointer table. The skip windows of DFA counts and
+  select paired rows or the pointer table. The counts of the scans a search
+  takes, which tests check, are kept only when a test turns them on, so
+  concurrent readers store nothing for them. The skip windows of DFA counts and
   of boolean searches are the exception: a skip takes one unit of its window
   with a compare-and-set, so that racing calls cannot skip more calls than a
   window holds, as
