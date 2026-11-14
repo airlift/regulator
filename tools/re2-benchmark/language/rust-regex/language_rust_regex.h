@@ -33,6 +33,8 @@ void language_rust_regex_free_error(char* error);
 LanguageRustCaptureLocations* language_rust_regex_capture_locations(const LanguageRustRegex* regex);
 void language_rust_regex_free_capture_locations(LanguageRustCaptureLocations* locations);
 bool language_rust_regex_is_match(const LanguageRustRegex* regex, const char* data, size_t length);
+bool language_rust_regex_find(const LanguageRustRegex* regex, const char* data, size_t length, size_t* start,
+                              size_t* end);
 uint64_t language_rust_regex_count(const LanguageRustRegex* regex, const char* data, size_t length);
 uint64_t language_rust_regex_count_spans(const LanguageRustRegex* regex, const char* data, size_t length);
 uint64_t language_rust_regex_count_captures(const LanguageRustRegex* regex, LanguageRustCaptureLocations* locations,

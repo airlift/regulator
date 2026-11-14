@@ -19,8 +19,11 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.CharacterCodingException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.HexFormat;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -56,6 +59,10 @@ public class TestLanguageBenchmark
         assertThat(inputs.sources().getFirst().bytes().byteArrayOffset()).isEqualTo(3);
         assertThat(inputs.sources().getFirst().text()).isEqualTo("x💰é");
         assertEnginesAgree(inputs);
+        // The JDK reports the UTF-16 offsets 1 to 3; every engine's first match is the UTF-8 bytes 1 to 5.
+        var jdk = BenchmarkLanguageComparison.compile("jdk", inputs);
+        assertThat(jdk.utf8Bounds(inputs.sources().getFirst(), jdk.find(inputs.sources().getFirst())))
+                .isEqualTo(BenchmarkLanguageComparison.bounds(1, 5));
 
         Files.writeString(path, hex("a*") + "\n0\t3\t" + hex("ab") + "\n3\t1\t\n");
         assertEnginesAgree(TestingLanguageBenchmarkInputs.read(path), ENGINES.stream().filter(engine -> !engine.equals("rust")).toList());
@@ -112,6 +119,8 @@ public class TestLanguageBenchmark
             assertThat(benchmark.singleUseCount(data)).isZero();
             assertThat(benchmark.reusedCount(data)).isEqualTo(2);
             assertThat(benchmark.reusedCount(data)).isZero();
+            assertThat(benchmark.reusedFind(data)).isEqualTo(BenchmarkLanguageComparison.bounds(0, 1));
+            assertThat(benchmark.reusedFind(data)).isEqualTo(BenchmarkLanguageComparison.NO_MATCH);
         }
     }
 
@@ -122,14 +131,38 @@ public class TestLanguageBenchmark
         Path path = directory.resolve("operations.tsv");
         Files.writeString(path, "61\n3\t2\t6161\n0\t0\t62\n");
         for (String engine : ENGINES) {
-            for (String operation : List.of("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount")) {
+            for (String operation : List.of("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount", "reusedFind")) {
                 var data = new BenchmarkLanguageComparison.BenchmarkData();
                 data.engine = engine;
                 data.workloadFile = path.toString();
                 data.setup(operation);
-                assertThat(BenchmarkLanguageComparison.verifyOperation(data, operation))
-                        .isEqualTo(operation.equals("compile") ? "compiled\n" : operation.endsWith("Contains") ? "1\n0\n" : "2\n0\n");
+                assertThat(BenchmarkLanguageComparison.verifyOperation(data, operation)).isEqualTo(switch (operation) {
+                    case "compile" -> "compiled\n";
+                    case "singleUseContains", "reusedContains" -> "1\n0\n";
+                    // The first match spans bytes 0 to 1, packed as 0 << 32 | 1.
+                    case "reusedFind" -> "1\n-1\n";
+                    default -> "2\n0\n";
+                });
             }
+        }
+    }
+
+    @Test
+    public void testFindVerificationRejectsBoundsThatChangeAfterTheRotationWraps()
+            throws Exception
+    {
+        Path path = directory.resolve("operations.tsv");
+        Files.writeString(path, "61\n3\t2\t6161\n0\t0\t62\n");
+        // A wrong end, then a wrong start, each only once a source comes round again; match or no match is unchanged.
+        for (long drift : List.of(1L, 1L << 32)) {
+            var data = new BenchmarkLanguageComparison.BenchmarkData();
+            data.engine = "re2";
+            data.workloadFile = path.toString();
+            data.setup("reusedFind");
+            data.compiled = new DriftingFind(data.compiled, drift, Collections.newSetFromMap(new IdentityHashMap<>()));
+            assertThatThrownBy(() -> BenchmarkLanguageComparison.verifyOperation(data, "reusedFind"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("verification failed");
         }
     }
 
@@ -168,8 +201,42 @@ public class TestLanguageBenchmark
                     assertThat(compiled.count(source)).as("%s %s", engine, inputs.patternText())
                             .isEqualTo(source.expectedCount());
                     assertThat(compiled.contains(source)).isEqualTo(source.expectedCount() > 0);
+                    long bounds = compiled.utf8Bounds(source, compiled.find(source));
+                    assertThat(bounds).as("%s %s", engine, inputs.patternText())
+                            .isEqualTo(reference.utf8Bounds(source, reference.find(source)));
+                    assertThat(BenchmarkLanguageComparison.holdsFirstMatch(source, bounds, compiled.matches(source))).isTrue();
                 }
             }
+        }
+    }
+
+    /// Reports the delegate's first-match bounds moved by `drift` whenever it sees a source a second time.
+    private record DriftingFind(BenchmarkLanguageComparison.Compiled delegate, long drift, Set<TestingLanguageBenchmarkInputs.Source> seen)
+            implements BenchmarkLanguageComparison.Compiled
+    {
+        @Override
+        public boolean contains(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return delegate.contains(source);
+        }
+
+        @Override
+        public long count(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return delegate.count(source);
+        }
+
+        @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            long bounds = delegate.find(source);
+            return seen.add(source) || bounds == BenchmarkLanguageComparison.NO_MATCH ? bounds : bounds + drift;
+        }
+
+        @Override
+        public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return delegate.matches(source);
         }
     }
 

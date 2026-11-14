@@ -3,7 +3,8 @@ import { createRoot } from "react-dom/client";
 import { descriptions, performance as performanceNotes } from "./workload-notes.json";
 
 export type Result = {
-  state: "compared" | "not-compatible" | "did-not-finish";
+  // A not-measured result exists only on the page, for an operation its results lack; see withUnmeasuredFinds.
+  state: "compared" | "not-compatible" | "did-not-finish" | "not-measured";
   reason?: string;
   estimator?: "median" | "mean";
   uncertainty?: {
@@ -178,6 +179,18 @@ export function workloadCommentary(row: Row) {
   };
 }
 
+// Results collected before the find operation hold no reusedFind rows. Each everyday workload still shows one,
+// after its other operations, as not measured yet rather than missing or blank.
+export function withUnmeasuredFinds(rows: Row[]): Row[] {
+  const measured = new Set(rows.filter(row => row.operation === "reusedFind").map(row => row.caseId));
+  const last = new Map(rows.filter(row => row.source === "language").map(row => [row.caseId, row]));
+  return rows.flatMap(row => measured.has(row.caseId) || last.get(row.caseId) !== row ? [row] : [row, {
+    ...row, id: row.id.replace(/[^/]+$/, "reusedFind"), operation: "reusedFind", model: "reusedFind",
+    result: { state: "not-measured", reason: "Not measured yet: these results were collected before the find operation.", warnings: [], hosts: [] },
+    originalResult: undefined, originalResultLabel: undefined, measurementSource: undefined, measurementWarnings: undefined,
+  }]);
+}
+
 export function displayResult(result: Result): Result {
   if (result.state === "compared") return result;
   const completedTime = (side: "candidate" | "comparator") => {
@@ -229,6 +242,7 @@ export function duration(ns: number | null | undefined, signed = false): string 
 }
 
 export function comparisonText(result: Result): string {
+  if (result.state === "not-measured") return "not measured yet";
   if (result.state === "not-compatible") return "not compatible";
   if (result.state === "did-not-finish") return "did not finish";
   if (intervalIncludesOne(result)) return "no clear difference";
@@ -281,7 +295,7 @@ function tieConditions(result: Result, gap: Gap | null): string[] {
 // as for gains between Regulator variants, the ratio and its interval decide. Results that were not
 // compared, and timing warnings without an interval, get no tier.
 export function significanceTier(result: Result, gap: Gap | null): Tier {
-  if (result.state !== "compared") return result.state === "not-compatible" ? "na" : "timeout";
+  if (result.state !== "compared") return result.state === "did-not-finish" ? "timeout" : "na";
   if (!result.uncertainty && result.warnings.length > 0) return "na";
   if (tieConditions(result, gap).length > 0) return "tie";
   const ratio = result.ratio!;
@@ -463,6 +477,7 @@ function operationDescription(row: Row): string {
     compile: "Construct the pattern without executing it.",
     reusedContains: "Test one input for a match reusing a warmed pattern.",
     reusedCount: "Count matches in one input reusing a warmed pattern.",
+    reusedFind: "Find the first match's bounds in one input reusing a warmed pattern.",
     singleUseContains: "Compile the pattern, then test one input for a match.",
     singleUseCount: "Compile the pattern, then count matches in one input.",
     singleUse: "Compile the LIKE pattern, then match one input.",
@@ -542,7 +557,7 @@ function MeasurementAnnotations({ row, comparator, phase }: { row: Row; comparat
 }
 
 function operationName(operation: string): string {
-  return ({ reusedContains: "contains", reusedCount: "count", singleUseContains: "single-use contains", singleUseCount: "single-use count", compile: "construction", singleUse: "single use", matches: "reused match" } as Record<string, string>)[operation] || operation;
+  return ({ reusedContains: "contains", reusedCount: "count", reusedFind: "find", singleUseContains: "single-use contains", singleUseCount: "single-use count", compile: "construction", singleUse: "single use", matches: "reused match" } as Record<string, string>)[operation] || operation;
 }
 
 function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string }) {
@@ -842,7 +857,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       ...(row.variantGainWarnings ? { variantGainWarnings: Object.fromEntries(Object.entries(row.variantGainWarnings).map(([id, warnings]) => [id, shownWarnings(warnings)])) } : {}) }));
   const pending = selectedRows.filter(row => comparisonIssue(row));
   const rows = selectedRows.filter(row => !comparisonIssue(row));
-  const ordinary = rows.filter(row => row.population === "ordinary-scalar" && row.operation.startsWith("reused"));
+  const ordinary = withUnmeasuredFinds(rows.filter(row => row.population === "ordinary-scalar" && row.operation.startsWith("reused")));
   const bulk = rows.filter(row => workloadSection(row) === "bulk-text");
   const literalProbes = rows.filter(row => workloadSection(row) === "literal-probe");
   const specialized = rows.filter(row => workloadSection(row) === "specialized-patterns" && !regularEngineRow(row));
@@ -877,7 +892,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
     </div>
     <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
-    {ordinary.length > 0 && section("Everyday regex operations", "Reused patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
+    {ordinary.length > 0 && section("Everyday regex operations", "Reused patterns over rotating inputs. Contains, count, and find are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
     {specialized.length > 0 && section("Compiled patterns", <>By default, a pattern with a scan plan runs uncompiled and Regulator interprets the plan. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Compiled times are a best case: each compiled pattern is const-bound the way Trino binds it, one pattern per call site. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
     {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation on a warmed, reused pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}

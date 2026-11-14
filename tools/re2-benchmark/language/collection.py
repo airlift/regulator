@@ -36,7 +36,9 @@ RELEASE_1_0_ENGINES = {language: ENGINES[language] for language in ("re2", "java
 # key that names the binary's option (--native-runner) and its evidence (native_binary_sha256).
 NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark", "native"),
                   "native-rust": ("language_rust_benchmark", "language_rust_bulk_benchmark", "native_rust")}
-OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount")
+OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount", "reusedFind")
+# reusedFind returns the first match's start and end UTF-8 byte offsets as start << 32 | end, or this for no match.
+NO_MATCH = -1
 MODES = ("native", "safe")
 # The JDK baseline/comparators.tsv pins for every JVM observation.
 JDK_VERSION = "25.0.4+7"
@@ -157,13 +159,14 @@ def prepare(destination):
         "representation": {"regulator": "precomputed UTF-8 Slice", "jdk": "precomputed String",
                            "joni": "precomputed UTF-8 bytes", "native-re2": "identical UTF-8 bytes",
                            "native-rust": "identical UTF-8 bytes, validated before timing"},
-        "matcher_policy": {"re2": "public count; public find for contains",
-                           "java": "public count; public find for contains",
-                           "trino": "public contains/count", "rust": "public count; public find for contains",
+        "matcher_policy": {"re2": "public count; public find for contains; public findInto group zero for find",
+                           "java": "public count; public find for contains; public findInto group zero for find",
+                           "trino": "public contains/count; reused group-zero matcher for find",
+                           "rust": "public count; public find for contains; public findInto group zero for find",
                            "jdk": "reuse Matcher.reset(input)",
                            "joni": "new Matcher for each input, as in the Trino byte-array route",
                            "native-re2": "reuse RE2; Match with zero or one submatch",
-                           "native-rust": "reuse Regex; find_iter count, is_match for contains"},
+                           "native-rust": "reuse Regex; find_iter count, is_match for contains, find for find"},
     }
     validate_manifest(manifest, destination)
     save(destination / "manifest.json", manifest)
@@ -466,6 +469,7 @@ def validate_receipts(manifest, receipts):
     # The shared registry promises equivalent semantics, including recorded translations.
     for case in manifest["cases"]:
         traces = []
+        first_matches = []
         for identity, observed_case, language, engine, mode in observations(manifest):
             if observed_case["id"] != case["id"]:
                 continue
@@ -504,8 +508,43 @@ def validate_receipts(manifest, receipts):
                 raise ValueError("missing operation verification receipts")
             for operation, operation_receipt in receipt["operations"].items():
                 validate_operation_receipt(case, language, operation, operation_receipt)
+            find = receipt["operations"]["reusedFind"]
+            if find["outcome"] == "completed":
+                if receipt["outcome"] == "completed":
+                    check_first_matches(case, receipt["trace"], find["trace"])
+                first_matches.append(find["trace"])
         if len(set(traces)) > 1:
             raise SemanticFailure(f"verification-failed: engines disagree for {case['id']}")
+        if len(set(first_matches)) > 1:
+            raise SemanticFailure(f"verification-failed: engines disagree about first matches for {case['id']}")
+
+
+def first_match_bounds(case, trace):
+    """Each source's first-match bounds, (start, end) or None, from a reusedFind trace: one line per source, NO_MATCH
+    exactly where the source expects no match, and otherwise bounds within the source."""
+    lines = trace.splitlines()
+    if len(lines) != len(case["sources"]) or trace != "".join(line + "\n" for line in lines):
+        raise ValueError("first-match trace has wrong input count or line endings")
+    result = []
+    for line, source in zip(lines, case["sources"]):
+        value = int(line)
+        if value == NO_MATCH:
+            if source["expected_count"]:
+                raise SemanticFailure(f"first-match trace misses an expected match: {case['id']}")
+            result.append(None)
+            continue
+        start, end = value >> 32, value & 0xffffffff
+        if not source["expected_count"] or value < 0 or str(value) != line or not start <= end <= source["input_bytes"]:
+            raise SemanticFailure(f"first-match trace disagrees with its source: {case['id']}")
+        result.append((start, end))
+    return result
+
+
+def check_first_matches(case, trace, find_trace):
+    """Require a reusedFind trace's bounds to hold the bytes of the first match of the verified match trace."""
+    for line, source, bounds in zip(trace.splitlines(), case["sources"], first_match_bounds(case, find_trace)):
+        if bounds is not None and bytes.fromhex(source["hex"])[bounds[0]:bounds[1]].hex() != line.partition(":")[2].split(",")[0]:
+            raise SemanticFailure(f"first-match bounds disagree with the match trace: {case['id']}")
 
 
 def expected_operation_trace(case, operation):
@@ -522,8 +561,16 @@ def validate_operation_receipt(case, language, operation, receipt):
     if outcome == "not-compatible":
         return
     if outcome == "completed":
+        trace = receipt.get("trace")
+        if operation == "reusedFind":
+            # The inputs record counts but no expected first-match bounds, so validate_receipts compares the bounds
+            # across engines and with the match trace.
+            if not isinstance(trace, str) or receipt.get("trace_sha256") != digest(trace.encode()):
+                raise ValueError("missing or corrupt first-match trace")
+            first_match_bounds(case, trace)
+            return
         expected = expected_operation_trace(case, operation)
-        if receipt.get("trace") != expected or receipt.get("trace_sha256") != digest(expected.encode()):
+        if trace != expected or receipt.get("trace_sha256") != digest(expected.encode()):
             raise SemanticFailure(f"operation verification failed: {case['id']}/{operation}")
         return
     if outcome != "did-not-finish":

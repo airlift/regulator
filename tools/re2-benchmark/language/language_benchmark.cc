@@ -36,6 +36,13 @@ struct Re2Engine {
         return pattern.Match(input, 0, input.size(), RE2::UNANCHORED, nullptr, 0);
     }
 
+    static int64_t find(const RE2& pattern, absl::string_view input) {
+        absl::string_view match;
+        if (!pattern.Match(input, 0, input.size(), RE2::UNANCHORED, &match, 1)) return kNoMatch;
+        size_t start = static_cast<size_t>(match.data() - input.data());
+        return match_bounds(start, start + match.size());
+    }
+
     static int64_t count(const RE2& pattern, absl::string_view input, std::vector<std::string>* matches = nullptr) {
         absl::string_view match;
         size_t next = 0;

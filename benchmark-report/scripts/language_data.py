@@ -205,8 +205,8 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
     expected = {(language, platform, mode, f'{suite}/{case_id}/{operation}')
                 for suite, case_id, language in selected
                 for platform in platforms for mode in MEMORY_MODES
-                for operation in (('compile', 'singleUseContains', 'singleUseCount', 'reusedContains', 'reusedCount')
-                                  if suite == 'language-lifecycle' else
+                for operation in (('compile', 'singleUseContains', 'singleUseCount', 'reusedContains', 'reusedCount',
+                                   'reusedFind') if suite == 'language-lifecycle' else
                                   ('compile',) if cases[suite, case_id]['model'] == 'compile' else ('execute',))}
     actual = {(row['language'], row['platform'], row['memoryMode'], row['id']) for row in rows}
     if actual != expected or len(rows) != len(expected):

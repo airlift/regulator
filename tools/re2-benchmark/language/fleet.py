@@ -789,6 +789,7 @@ def export(directory, plan, result_root, receipts, output, coverage):
     # Each platform runs the classes of its own engine build.
     classes_digests = {}
     semantic_traces = {}
+    first_matches = {}
     for receipt in receipts:
         attempt = unit_dispatch.unit_attempt_directory(result_root, receipt)
         if validate_unit_attempt(attempt, directory) != receipt:
@@ -802,6 +803,11 @@ def export(directory, plan, result_root, receipts, output, coverage):
                     previous = semantic_traces.setdefault(case["id"], verification["trace"])
                     if previous != verification["trace"]:
                         raise ValueError("verification-failed: language partitions disagree")
+                find = verification["operations"].get("reusedFind", {})
+                if find.get("outcome") == "completed":
+                    previous = first_matches.setdefault(case["id"], find["trace"])
+                    if previous != find["trace"]:
+                        raise ValueError("verification-failed: language partitions disagree about first matches")
             provenance = data["provenance"]
             identity = {key: provenance[key] for key in CANDIDATE_FIELDS}
             digest = provenance["jvm_build"]["classes_archive_sha256"]

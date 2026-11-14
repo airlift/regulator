@@ -48,6 +48,9 @@ import static io.airlift.slice.Slices.utf8Slice;
 @Measurement(iterations = 10, time = 1)
 public class BenchmarkLanguageComparison
 {
+    /// What reusedFind returns when the source has no match.
+    static final long NO_MATCH = -1;
+
     @State(Scope.Thread)
     public static class BenchmarkData
     {
@@ -58,7 +61,7 @@ public class BenchmarkLanguageComparison
         public String workloadFile;
 
         private TestingLanguageBenchmarkInputs inputs;
-        private Compiled compiled;
+        Compiled compiled;
         private int sourceIndex;
 
         @Setup
@@ -142,6 +145,12 @@ public class BenchmarkLanguageComparison
         return data.compiled.count(data.nextSource());
     }
 
+    @Benchmark
+    public long reusedFind(BenchmarkData data)
+    {
+        return data.compiled.find(data.nextSource());
+    }
+
     static Object compilePattern(String engine, TestingLanguageBenchmarkInputs inputs)
     {
         return switch (engine) {
@@ -169,14 +178,20 @@ public class BenchmarkLanguageComparison
     private static Compiled createMatcher(Object pattern, TestingLanguageBenchmarkInputs.Source source)
     {
         return switch (pattern) {
-            case Re2 re2 -> new SliceCompiled(re2, null, re2.matcher(source.bytes(), 0));
-            case JavaRegexp java -> new SliceCompiled(null, java, java.matcher(source.bytes(), 0));
-            case TrinoRegexp trino -> new TrinoCompiled(trino);
-            case RustRegexp rust -> new RustCompiled(rust, rust.matcher(source.bytes(), 0));
+            case Re2 re2 -> new SliceCompiled(re2, null, re2.matcher(source.bytes(), 0), new int[2]);
+            case JavaRegexp java -> new SliceCompiled(null, java, java.matcher(source.bytes(), 0), new int[2]);
+            case TrinoRegexp trino -> new TrinoCompiled(trino, trino.matcher(source.bytes(), 0));
+            case RustRegexp rust -> new RustCompiled(rust, rust.matcher(source.bytes(), 0), new int[2]);
             case Pattern jdk -> new JdkCompiled(jdk.matcher(source.text()));
             case Regex joni -> new JoniCompiled(joni);
             default -> throw new IllegalStateException("unhandled compiled pattern");
         };
+    }
+
+    /// The first match's bounds in one `long`, the start in the high 32 bits and the end in the low.
+    static long bounds(int start, int end)
+    {
+        return ((long) start << 32) | end;
     }
 
     interface Compiled
@@ -185,10 +200,19 @@ public class BenchmarkLanguageComparison
 
         long count(TestingLanguageBenchmarkInputs.Source source);
 
+        /// The first match's bounds, as [#bounds(int,int)] packs them, in the offsets the engine reports, or [#NO_MATCH].
+        long find(TestingLanguageBenchmarkInputs.Source source);
+
+        /// Converts what [#find] returned for the source to UTF-8 byte offsets of the source, outside timing.
+        default long utf8Bounds(TestingLanguageBenchmarkInputs.Source source, long bounds)
+        {
+            return bounds;
+        }
+
         List<String> matches(TestingLanguageBenchmarkInputs.Source source);
     }
 
-    private record SliceCompiled(Re2 re2, JavaRegexp java, RegexpMatcher matcher)
+    private record SliceCompiled(Re2 re2, JavaRegexp java, RegexpMatcher matcher, int[] groups)
             implements Compiled
     {
         @Override
@@ -204,6 +228,13 @@ public class BenchmarkLanguageComparison
         }
 
         @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            boolean found = re2 != null ? re2.findInto(source.bytes(), groups) : java.findInto(source.bytes(), groups);
+            return found ? bounds(groups[0], groups[1]) : NO_MATCH;
+        }
+
+        @Override
         public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
         {
             matcher.reset(source.bytes());
@@ -215,7 +246,8 @@ public class BenchmarkLanguageComparison
         }
     }
 
-    private record TrinoCompiled(TrinoRegexp pattern)
+    // Trino's API has no findInto; its matcher, retaining group zero only, is the call that reports a match's bounds.
+    private record TrinoCompiled(TrinoRegexp pattern, TrinoRegexpMatcher matcher)
             implements Compiled
     {
         @Override
@@ -231,13 +263,19 @@ public class BenchmarkLanguageComparison
         }
 
         @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return matcher.reset(source.bytes()).find() ? bounds(matcher.start(), matcher.end()) : NO_MATCH;
+        }
+
+        @Override
         public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
         {
             return pattern.extractAll(source.bytes()).stream().map(BenchmarkLanguageComparison::hex).toList();
         }
     }
 
-    private record RustCompiled(RustRegexp pattern, RegexpMatcher matcher)
+    private record RustCompiled(RustRegexp pattern, RegexpMatcher matcher, int[] groups)
             implements Compiled
     {
         @Override
@@ -250,6 +288,12 @@ public class BenchmarkLanguageComparison
         public long count(TestingLanguageBenchmarkInputs.Source source)
         {
             return pattern.count(source.bytes());
+        }
+
+        @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return pattern.findInto(source.bytes(), groups) ? bounds(groups[0], groups[1]) : NO_MATCH;
         }
 
         @Override
@@ -278,6 +322,23 @@ public class BenchmarkLanguageComparison
         {
             matcher.reset(source.text());
             return countMatches(matcher);
+        }
+
+        // UTF-16 offsets of the String; utf8Bounds converts them outside timing.
+        @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return matcher.reset(source.text()).find() ? bounds(matcher.start(), matcher.end()) : NO_MATCH;
+        }
+
+        @Override
+        public long utf8Bounds(TestingLanguageBenchmarkInputs.Source source, long bounds)
+        {
+            if (bounds == NO_MATCH) {
+                return bounds;
+            }
+            String text = source.text();
+            return bounds(utf8Slice(text.substring(0, (int) (bounds >>> 32))).length(), utf8Slice(text.substring(0, (int) bounds)).length());
         }
 
         @Override
@@ -310,6 +371,16 @@ public class BenchmarkLanguageComparison
             return findAll(source.bytes(), null);
         }
 
+        // Joni reports a match's bounds relative to the start the matcher was given, the Slice's first byte.
+        @Override
+        public long find(TestingLanguageBenchmarkInputs.Source source)
+        {
+            Slice bytes = source.bytes();
+            int base = bytes.byteArrayOffset();
+            io.airlift.joni.Matcher matcher = pattern.matcher(bytes.byteArray(), base, base + bytes.length());
+            return matcher.search(base, base + bytes.length(), Option.DEFAULT) >= 0 ? bounds(matcher.getBegin(), matcher.getEnd()) : NO_MATCH;
+        }
+
         @Override
         public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
         {
@@ -338,6 +409,18 @@ public class BenchmarkLanguageComparison
             }
             return count;
         }
+    }
+
+    /// Whether bounds, in UTF-8 offsets, hold the bytes of the first of the matches, or no match when there are none.
+    static boolean holdsFirstMatch(TestingLanguageBenchmarkInputs.Source source, long bounds, List<String> matches)
+    {
+        if (bounds == NO_MATCH) {
+            return matches.isEmpty();
+        }
+        int start = (int) (bounds >>> 32);
+        int end = (int) bounds;
+        return !matches.isEmpty() && 0 <= start && start <= end && end <= source.bytes().length()
+                && hex(source.bytes().slice(start, end - start)).equals(matches.getFirst());
     }
 
     private static String hex(Slice source)
@@ -384,7 +467,8 @@ public class BenchmarkLanguageComparison
             List<String> matches = compiled.matches(source);
             long count = compiled.count(source);
             boolean contains = compiled.contains(source);
-            if (count != source.expectedCount() || contains != (count != 0) || matches.size() != count) {
+            long bounds = compiled.utf8Bounds(source, compiled.find(source));
+            if (count != source.expectedCount() || contains != (count != 0) || matches.size() != count || !holdsFirstMatch(source, bounds, matches)) {
                 throw new IllegalStateException("verification failed for " + args[1]);
             }
             System.out.println(count + ":" + String.join(",", matches));
@@ -401,22 +485,31 @@ public class BenchmarkLanguageComparison
             return "compiled\n";
         }
         StringBuilder trace = new StringBuilder();
+        List<TestingLanguageBenchmarkInputs.Source> sources = data.inputs.sources();
+        long[] firstPass = new long[sources.size()];
         // Exercise exactly the selected public operation, twice through the complete rotation.
         // A count timeout must not prevent compilation or contains from being qualified.
         for (int pass = 0; pass < 2; pass++) {
-            for (TestingLanguageBenchmarkInputs.Source source : data.inputs.sources()) {
+            for (int index = 0; index < sources.size(); index++) {
+                TestingLanguageBenchmarkInputs.Source source = sources.get(index);
                 long actual = switch (operation) {
                     case "singleUseContains" -> benchmark.singleUseContains(data) ? 1 : 0;
                     case "singleUseCount" -> benchmark.singleUseCount(data);
                     case "reusedContains" -> benchmark.reusedContains(data) ? 1 : 0;
                     case "reusedCount" -> benchmark.reusedCount(data);
+                    case "reusedFind" -> data.compiled.utf8Bounds(source, benchmark.reusedFind(data));
                     default -> throw new IllegalArgumentException("unknown operation: " + operation);
                 };
-                long expected = operation.endsWith("Contains") ? (source.expectedCount() == 0 ? 0 : 1) : source.expectedCount();
-                if (actual != expected) {
+                // The inputs record counts but no expected first-match bounds, so collection compares the first pass's
+                // bounds across engines and with the trace. The second pass must repeat the first exactly, so reused
+                // state that goes wrong once the rotation wraps is rejected too.
+                boolean verified = operation.equals("reusedFind") ? (actual == NO_MATCH) == (source.expectedCount() == 0)
+                        : actual == (operation.endsWith("Contains") ? (source.expectedCount() == 0 ? 0 : 1) : source.expectedCount());
+                if (!verified || (pass > 0 && actual != firstPass[index])) {
                     throw new IllegalStateException("verification failed for " + data.engine + "/" + operation);
                 }
                 if (pass == 0) {
+                    firstPass[index] = actual;
                     trace.append(actual).append('\n');
                 }
             }

@@ -5,6 +5,16 @@ import tempfile
 import unittest
 
 
+def run_case(runner, pattern, source, count, offset=3, operation=None, mode="--verify-operation"):
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "input.tsv"
+        path.write_text(pattern.encode().hex() + f"\n{offset}\t{count}\t" + source.encode().hex() + "\n")
+        command = [runner, "--verify", str(path)] if operation is None else [
+            runner, mode, str(path), *operation.split()]
+        return subprocess.run(command,
+                              capture_output=True, text=True, timeout=10)
+
+
 class NativeRunnerChecks:
     """Each native comparator runs the same lifecycle checks through the shared harness."""
 
@@ -14,15 +24,8 @@ class NativeRunnerChecks:
     # Whether the runner has the specialized replace operation.
     REPLACES = None
 
-    def run_case(self, pattern, source, count, offset=3, operation=None, mode="--verify-operation"):
-        runner = os.environ[self.RUNNER]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.tsv"
-            path.write_text(pattern.encode().hex() + f"\n{offset}\t{count}\t" + source.encode().hex() + "\n")
-            command = [runner, "--verify", str(path)] if operation is None else [
-                runner, mode, str(path), *operation.split()]
-            return subprocess.run(command,
-                                  capture_output=True, text=True, timeout=10)
+    def run_case(self, *arguments, **options):
+        return run_case(os.environ[self.RUNNER], *arguments, **options)
 
     def test_empty_matches_advance_and_terminate(self):
         count, trace = self.EMPTY_AFTER_MATCH
@@ -56,11 +59,22 @@ class NativeRunnerChecks:
 
     def test_each_operation_has_its_own_checked_result(self):
         count, _ = self.EMPTY_AFTER_MATCH
-        for operation in ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount"):
+        # The first match spans bytes 0 to 1, packed as 0 << 32 | 1.
+        expected = {"compile": "compiled\n", "singleUseContains": "1\n", "singleUseCount": f"{count}\n",
+                    "reusedContains": "1\n", "reusedCount": f"{count}\n", "reusedFind": "1\n"}
+        for operation, trace in expected.items():
             with self.subTest(operation=operation):
                 result = self.run_case("a*", "ab", count, operation=operation)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "compiled\n" if operation == "compile" else "1\n" if operation.endswith("Contains") else f"{count}\n")
+                self.assertEqual(result.stdout, trace)
+
+    def test_first_match_bounds_are_utf8_offsets(self):
+        result = self.run_case("é|💰", "x💰é", 2, operation="reusedFind")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"{1 << 32 | 5}\n")
+        result = self.run_case("a", "b", 0, operation="reusedFind")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "-1\n")
 
     def test_compile_does_not_execute_other_operations(self):
         result = self.run_case("a", "a", 0, operation="compile")
@@ -100,6 +114,21 @@ class TestNativeRustRunner(NativeRunnerChecks, unittest.TestCase):
     RUNNER = "LANGUAGE_NATIVE_RUST_RUNNER"
     EMPTY_AFTER_MATCH = (2, "2:61,\n")
     REPLACES = False
+
+
+@unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_HARNESS_TEST_RUNNER"),
+                     "build and set LANGUAGE_NATIVE_HARNESS_TEST_RUNNER for the harness's own checks")
+class TestNativeHarness(unittest.TestCase):
+    """The harness over a stand-in engine whose find moves a match's end once an input comes round again."""
+
+    def test_find_must_repeat_its_bounds_after_the_rotation_wraps(self):
+        runner = os.environ["LANGUAGE_NATIVE_HARNESS_TEST_RUNNER"]
+        result = run_case(runner, "a", "ba", 1, operation="reusedCount")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The first pass is right and still matches on the second, so only comparing the passes rejects it.
+        result = run_case(runner, "a", "ba", 1, operation="reusedFind")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verification failed", result.stderr)
 
 
 if __name__ == "__main__":

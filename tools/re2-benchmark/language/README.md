@@ -17,8 +17,8 @@ eight rotating inputs each. Each workload runs through:
 Regulator runs with native access enabled and disabled. The comparator runs
 once per language and host, and supplies the comparison for both modes.
 Each engine measures compilation, single-use contains and count, and reused
-contains and count. That produces 780 engine observations and 520 paired rows
-per architecture. These counts describe this additional suite, not the full
+contains, count, and find. That produces 936 engine observations and 624 paired
+rows per architecture. These counts describe this additional suite, not the full
 qualification campaign.
 
 ## Measurement contracts
@@ -33,7 +33,18 @@ Single use includes compilation and one public operation. Reused measurements
 retain the compiled pattern. RE2, Java, and Rust counts use their public
 `count` methods; JDK reuses `Matcher.reset`; Trino uses its public `contains`
 and `count` operations. Joni constructs a matcher for each byte-array input as
-its Trino route does. Compilation does not construct a matcher. Native
+its Trino route does.
+
+`reusedFind` returns the first match's bounds, or no match. RE2, Java, and Rust
+call `findInto` with a reused two-element group-zero buffer. Trino's API has no
+`findInto`, so it resets one reused `TrinoRegexpMatcher` that retains group zero
+only, then calls `find`, `start`, and `end`. The JDK calls `find`, `start`, and
+`end` after `Matcher.reset`, Joni calls `search` and reads `getBegin` and
+`getEnd`, native RE2 calls `Match` with one submatch, and the `regex` crate
+calls `find`. Each returns the start and end packed into one `long` as
+`start << 32 | end`, or -1. Every engine but the JDK reports UTF-8 byte offsets
+of the source; the JDK's UTF-16 offsets are converted to UTF-8 offsets outside
+timing, only to verify them. Compilation does not construct a matcher. Native
 compilation includes destruction of the compiled object; Java allocation and
 amortized GC are recorded by JMH. These lifetime costs are not assumed to be
 identical.
@@ -42,8 +53,8 @@ The Rust comparator is the pinned `regex` crate with its default features,
 linked as a static library behind a C interface. It builds each pattern with
 `RegexBuilder` as `tools/rust-regex-golden` does, setting only Unicode mode and
 case insensitivity, so the crate's default size and nest limits apply. Contains
-is `is_match` and count is `find_iter` counting; each makes one call across the
-interface per input. Span and capture counts use the crate's own iteration,
+is `is_match`, count is `find_iter` counting, and find is `find`; each makes one
+call across the interface per input. Span and capture counts use the crate's own iteration,
 with capture locations reused across matches, and the trace checks that loop
 against `captures_iter`. A panic aborts the process rather than unwinding into
 C++. The release profile is Rebar's `rust/regex` profile: fat LTO, one codegen
@@ -76,13 +87,17 @@ workload and is not part of the primary collector. Historical
 count-by-iteration measurements remain distinct from public-count measurements
 even when their input/result is identical.
 
-Verification checks existence, counts, and the ordered bytes of every whole
-match, independently of timing. Each of the five timed operations also has its
-own isolated preflight and receipt. An iteration timeout does not imply that
-compilation or contains timed out. Timed-fork setup checks only the selected
-operation, so it cannot introduce a different operation's timeout.
-Subgroup captures, match offsets, replacement, and split are not result demands
-in this suite. Their existing dedicated
+Verification checks existence, counts, the ordered bytes of every whole match,
+and the first match's bounds, independently of timing. Each of the six timed
+operations also has its own isolated preflight and receipt. The inputs record
+counts but no expected first-match bounds, so find's receipts must agree across
+every engine and language and hold the bytes of the first match in the match
+trace. Each execution preflight runs twice through the inputs, and the second
+pass must return exactly what the first did for each input. An iteration timeout
+does not imply that compilation or contains timed out. Timed-fork setup checks
+only the selected operation, so it cannot introduce a different operation's
+timeout. Subgroup captures, later match offsets, replacement, and split are not
+result demands in this suite. Their existing dedicated
 benchmarks remain required. A recorded language translation must preserve this
 suite's operation contracts; successful parsing alone is insufficient.
 
@@ -140,7 +155,7 @@ Each native runner is a shared harness, `language_harness.h` or
 may choose among adapters from the case's inputs before timing, as the Rust
 bulk runner does. The harness owns input loading, the command line, phase
 markers, and benchmark registration. A lifecycle adapter supplies compile,
-contains, count with an optional match trace, and the input check; its harness
+contains, find, count with an optional match trace, and the input check; its harness
 rotates the inputs and runs the timed operations. A bulk adapter supplies
 compile, the input check, per-search state allocated outside timing, and the
 timed loop that runs one Rebar model and optionally writes its trace.
@@ -191,10 +206,16 @@ Tests:
 ```sh
 ./mvnw -Dtest=TestLanguageBenchmark test
 python3 -m unittest discover -s tools/re2-benchmark/language -p 'test_*.py'
+RE2_BENCHMARK_TARGETS=language_harness_test tools/re2-benchmark/build.sh
 LANGUAGE_NATIVE_RUNNER=target/re2-benchmark-build/language_benchmark \
 LANGUAGE_NATIVE_RUST_RUNNER=target/re2-benchmark-build/language_rust_benchmark \
+LANGUAGE_NATIVE_HARNESS_TEST_RUNNER=target/re2-benchmark-build/language_harness_test \
   python3 -m unittest discover -s tools/re2-benchmark/language -p 'test_native_*.py'
 ```
+
+`language_harness_test` runs the shared harness over a stand-in engine whose
+find goes wrong only on the second pass through the inputs, to test the
+harness's own checks. It is never measured.
 
 ## Target-host measurement and saved data
 
