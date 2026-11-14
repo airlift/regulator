@@ -1149,10 +1149,17 @@ requests paired transitions or a pointer table releases the paired table's
 complete memory charge under the existing exclusive cache protocol, and paired
 transitions stay disabled until the next cache reset. The observation counter
 is a best-effort performance hint shared by concurrent readers; races may
-change when rejection occurs but cannot change matching behavior. A cache
-reset clears the rejection and the counter, and enables paired transitions for
-the new cache generation only when the DFA holds no pointer table, has none
-withheld, and has not given one back.
+change when rejection occurs but cannot change matching behavior. A DFA count
+keeps its own copy for the whole count: it reads the counter when it starts,
+counts its own searches, rejects the paired table the moment its copy reaches
+the threshold, and stores its copy back once when it ends. A count whose
+searches alternate short and long would otherwise store to the shared counter
+at nearly every match, and concurrent counts of one pattern would trade its
+cache line; one thread alone sees the same counts and the same rejection
+either way. A cache reset clears the rejection and the counter, a count's copy
+included, and enables paired transitions for the new cache generation only
+when the DFA holds no pointer table, has none withheld, and has not given one
+back.
 
 ## DFA Row Index Without A Divide
 
