@@ -2084,21 +2084,21 @@ general engine does: a region end that cuts `abc` of `abc|x|ab` leaves `ab`.
 Compilation resolves the matcher; a pattern with a single-byte table or a class
 counter finds on that instead.
 
-The count of a `.*literal.*` pattern whose dots match any character but a line
-feed, a group-zero `RegexpMatcher.find()` of it within the matcher's region,
-and its unanchored one-shot searches run the dot-star literal matcher in RE2,
-Java, and Rust, as Trino's dot-star subtype does for its span operations: the
-literal's first occurrence, found with the pattern's contains search, widened
-over the characters the dots match on each side. The one-shot searches are
-`find` of a range, `findInto`, `findResult`, and RE2's `replaceFirst` and
-`extract`, which the literal-kernel classes answer from their one-shot
-`matchInto`, above the engine hook, and RE2's `replaceAll`, whose loop reaches
-the matcher through the engine hook. An anchored call keeps the ordinary
-engine: a match from the call's start cannot cross the first line feed, past
-which the matcher would search on for the literal. An unanchored call makes no
-long-window check, which for such a pattern would never shorten the search: its
-find plan is the contains plan, only a pattern that finds on the general engine
-or a lowered program checks long windows for a required literal, and the
+The count of a `.*literal.*` pattern whose dots match any character but their
+stops, a line feed and at most seven others, a group-zero `RegexpMatcher.find()`
+of it within the matcher's region, and its unanchored one-shot searches run the
+dot-star literal matcher in RE2, Java, and Rust, as Trino's dot-star subtype
+does for its span operations: the literal's first occurrence, found with the
+pattern's contains search, widened over the characters the dots match on each
+side. The one-shot searches are `find` of a range, `findInto`, `findResult`, and
+RE2's `replaceFirst` and `extract`, which the literal-kernel classes answer from
+their one-shot `matchInto`, above the engine hook, and RE2's `replaceAll`, whose
+loop reaches the matcher through the engine hook. An anchored call keeps the
+ordinary engine: a match from the call's start cannot cross the first line feed,
+past which the matcher would search on for the literal. An unanchored call makes
+no long-window check, which for such a pattern would never shorten the search:
+its find plan is the contains plan, only a pattern that finds on the general
+engine or a lowered program checks long windows for a required literal, and the
 matcher scans for the literal itself and stops at the region's end. The matcher
 calls the contains search itself, and `matchInto` calls the matcher. C2 limits
 inline depth below the method it compiles, and forwarding frames spend that
@@ -2115,16 +2115,25 @@ after each literal, and resumes there. Both walks step over ASCII other than a
 line feed without the width table, and a run with at least 64 bytes left with
 the vector scan the DFA count uses to leave a `[^\n]` loop.
 
-The dots read characters as the compiled byte ranges of `[^\n]` do, which
-depend only on the pattern's encoding, so compilation picks a table of
-character widths and the walk has no language branch. In UTF-8 the class holds
-all of U+0080 through U+10FFFF, whose byte ranges accept overlong three- and
-four-byte forms, encoded surrogates, and values above U+10FFFF, and reject bare
-continuation bytes, C0, C1, F5–FF, and cut-short sequences; RE2's Latin-1
-option and Rust's bytes API with `(?-u)` read each byte as a character. Java's
-default dot also stops at `\r`, U+0085, U+2028, and U+2029, and Rust's Unicode
-dot in bytes mode at the surrogates, so the analysis takes neither for such a
-pattern; Java's `(?d)` dot is `[^\n]` and takes the matcher.
+The dots read characters as the compiled byte ranges of their class do, which
+depend only on the pattern's encoding and the class's stops, so compilation
+picks a table of character widths and the walk has no language branch. For
+`[^\n]` in UTF-8 the class holds all of U+0080 through U+10FFFF, whose byte
+ranges accept overlong three- and four-byte forms, encoded surrogates, and
+values above U+10FFFF, and reject bare continuation bytes, C0, C1, F5–FF, and
+cut-short sequences; RE2's Latin-1 option and Rust's bytes API with `(?-u)` read
+each byte as a character. The analysis names a dot's stops, the characters its
+class leaves out, so the matcher takes any dot that stops at a line feed and at
+most seven others, no more than two of them ASCII. Java's default dot also stops
+at `\r`, U+0085, U+2028, and U+2029, and Rust's CRLF dot at `\r`. Dots of
+exactly `[^\n]`, as in RE2, Trino, Rust, and Java's `(?d)`, keep the walk
+described above; other dots take a variant of it, whose ASCII runs and backward
+jump look for every ASCII stop, at most three, and which reads a non-ASCII
+character as the class's byte ranges do: a UTF-8 class that leaves out a
+non-ASCII character accepts exactly the encodings of its members, so Java's
+default dot rejects the overlong forms and values above U+10FFFF that `[^\n]`
+accepts. Rust's Unicode dot in bytes mode is a class of characters in a pattern
+that reads bytes, so the analysis takes no matcher for it.
 
 The matcher reserves its own size from the forward-DFA budget after the
 contains search and, in every language, [yields to the forward
@@ -3377,7 +3386,7 @@ assertions are judged at `s0` as for the earlier match. The prefix matches
 `[s0, h)`, so the reverse search from the first hit finds the leftmost start. An
 assertion after the run, or a second class, could fail on the shorter span. A
 pattern of the dot-star literal matcher's shape, as `.*coolfunctionname.*` is in
-RE2, Trino, and Rust's string API, is left to that matcher: no other proof
+RE2, Trino, Java, and Rust's string API, is left to that matcher: no other proof
 admits its prefix of dots, so it takes no inner literal search. A pattern that
 only this proof gives a search keeps its
 [long-window required literal check](#required-literal-absence-on-long-windows)

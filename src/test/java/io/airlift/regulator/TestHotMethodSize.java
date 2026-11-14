@@ -250,29 +250,51 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
-    /// Keeps the dot-star literal matcher's span searches small enough for C2 to inline into the
-    /// literal-kernel searches and the group-zero matcher finds that call them, so the contains
-    /// search inlines beneath them.
+    /// Keeps the dot-star literal matcher's span searches and the walks behind them, for dots that
+    /// stop only at a line feed and for dots with other stops, small enough for C2 to inline into
+    /// the literal-kernel searches, the Trino searches, and the group-zero matcher finds that call
+    /// them, so the contains search inlines beneath them.
     @Test
     public void testDotStarLiteralSpanSearchFitsInlineSize()
     {
-        assertThat(codeLengths(DotStarLiteralSpanMatcher.class, "findSpan"))
-                .as("DotStarLiteralSpanMatcher.findSpan bytecode bytes")
-                .isNotEmpty()
-                .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+        for (Class<?> type : List.of(DotStarLiteralSpanMatcher.class, DotStarLiteralSpanMatcher.MultipleStops.class)) {
+            String walk = type == DotStarLiteralSpanMatcher.class ? "findSpanWithinLine" : "findSpanBetweenStops";
+            for (String method : List.of("findSpan", "findSpanForDiagnostics", walk)) {
+                assertThat(codeLengths(type, method))
+                        .as("%s.%s bytecode bytes", type.getSimpleName(), method)
+                        .isNotEmpty()
+                        .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+            }
+        }
     }
 
-    /// Keeps each call from a one-shot matchInto to the contains search direct: each literal-kernel
-    /// override calls the overload of findSpan that takes the diagnostics, not the one that
-    /// forwards to it, and that overload calls the contains search itself. Each frame between a
-    /// public one-shot entry and the search's word reads costs C2 inline depth.
+    /// Keeps each call from a span search to the contains search direct and statically bound:
+    /// each findSpan entry of the dot-star literal matcher calls only its own class's private walk,
+    /// never another entry, which [DotStarLiteralSpanMatcher.MultipleStops] overrides, and the walk
+    /// calls the contains search itself. A JVM that links the override stops inlining a walk
+    /// reached through an entry, and each frame between a public one-shot entry and the search's
+    /// word reads costs C2 inline depth.
     @Test
     public void testOneShotDotStarLiteralCallsContainsSearchDirectly()
     {
         String findSpan = "findSpan" + MethodType.methodType(long.class, Slice.class, int.class, int.class, DotStarLiteralSpanMatcher.ScanDiagnostics.class).toMethodDescriptorString();
-        assertThat(calledOverloads(DotStarLiteralSpanMatcher.class, method -> overload(method).equals(findSpan), LiteralSearchKernel.class))
-                .as("LiteralSearchKernel methods DotStarLiteralSpanMatcher.%s calls", findSpan)
-                .anyMatch(call -> call.startsWith("findContains("));
+        for (Class<?> type : List.of(DotStarLiteralSpanMatcher.class, DotStarLiteralSpanMatcher.MultipleStops.class)) {
+            String walk = type == DotStarLiteralSpanMatcher.class ? "findSpanWithinLine" : "findSpanBetweenStops";
+            for (MethodModel entry : ClassFile.of().parse(classfile(type)).methods()) {
+                if (!entry.methodName().equalsString("findSpan") && !entry.methodName().equalsString("findSpanForDiagnostics")) {
+                    continue;
+                }
+                Predicate<MethodModel> caller = method -> method.methodName().equals(entry.methodName()) && method.methodType().equals(entry.methodType());
+                assertThat(Stream.of(DotStarLiteralSpanMatcher.class, DotStarLiteralSpanMatcher.MultipleStops.class)
+                        .flatMap(owner -> invocations(type, caller, owner))
+                        .map(invoke -> invoke.name().stringValue()))
+                        .as("matcher methods %s.%s%s calls", type.getSimpleName(), entry.methodName(), entry.methodType())
+                        .containsExactly(walk);
+            }
+            assertThat(calledMethods(type, walk, LiteralSearchKernel.class))
+                    .as("LiteralSearchKernel methods %s.%s calls", type.getSimpleName(), walk)
+                    .contains("findContains");
+        }
         for (Class<?> type : List.of(Re2.LiteralKernelRe2.class, JavaRegexp.LiteralKernelJavaRegexp.class, RustRegexp.LiteralKernelRustRegexp.class)) {
             assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), DotStarLiteralSpanMatcher.class))
                     .as("DotStarLiteralSpanMatcher methods %s.matchInto calls", type.getSimpleName())
@@ -541,12 +563,6 @@ public class TestHotMethodSize
                 .filter(InvokeInstruction.class::isInstance)
                 .map(InvokeInstruction.class::cast)
                 .filter(invoke -> invoke.owner().asInternalName().equals(ownerName));
-    }
-
-    // A method's name and descriptor.
-    private static String overload(MethodModel method)
-    {
-        return method.methodName().stringValue() + method.methodType().stringValue();
     }
 
     private static int codeLength(Class<?> type, String methodName)

@@ -299,6 +299,69 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testDotStarLiteralLineTerminatorsMatchJdk()
+    {
+        // A `.*literal.*` pattern finds on the dot-star literal matcher, whose dots stop where the
+        // JDK's dot does: at a line feed, a carriage return, U+0085, U+2028, and U+2029 by default,
+        // and only at a line feed with UNIX_LINES. DOTALL keeps the engine. Its finds, regions,
+        // counts, and boolean finds match the JDK's for each terminator before, after, and on both
+        // sides of the literal, a carriage return and a line feed on either side of it in both
+        // orders, the characters on either side of U+0085 and of U+2028 and U+2029, whose
+        // encodings share their lead bytes, and an ASCII and a non-ASCII literal.
+        List<String> templates = List.of(
+                "",
+                "L",
+                "xLy",
+                "\nL",
+                "L\n",
+                "\nL\n",
+                "\rL",
+                "L\r",
+                "\rL\r",
+                "\u0085L",
+                "L\u0085",
+                "\u0085L\u0085",
+                "\u2028L",
+                "L\u2028",
+                "\u2029L\u2029",
+                "\u2028L\u2029",
+                "\rL\n",
+                "\nL\r",
+                "\r\nL\r\n",
+                "\u0084L\u0086",
+                "\u2027L\u202A",
+                "éL€\nL",
+                "L\rL");
+        for (String literal : List.of("ab", "é€")) {
+            List<String> inputs = templates.stream()
+                    .map(template -> template.replace("L", literal))
+                    .toList();
+            for (String mode : List.of("", "(?d)", "(?s)")) {
+                String pattern = mode + ".*" + literal + ".*";
+                JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+                DotStarLiteralSpanMatcher spanMatcher = regexp.createDotStarLiteralSpanMatcher();
+                switch (mode) {
+                    case "" -> assertThat(spanMatcher).as(pattern).isExactlyInstanceOf(DotStarLiteralSpanMatcher.MultipleStops.class);
+                    case "(?d)" -> assertThat(spanMatcher).as(pattern).isExactlyInstanceOf(DotStarLiteralSpanMatcher.class);
+                    default -> assertThat(spanMatcher).as(pattern).isNull();
+                }
+                assertEveryRegionMatchesJdk(pattern, inputs, true);
+                Pattern jdk = Pattern.compile(pattern);
+                for (String input : inputs) {
+                    String description = "%s on [%s]".formatted(pattern, input.replace("\r", "\\r").replace("\n", "\\n"));
+                    Matcher expected = jdk.matcher(input);
+                    long count = 0;
+                    while (expected.find()) {
+                        count++;
+                    }
+                    assertThat(regexp.count(utf8Slice(input))).as(description + " count").isEqualTo(count);
+                    assertThat(regexp.find(utf8Slice(input))).as(description + " find").isEqualTo(count > 0);
+                }
+            }
+        }
+    }
+
+    @Test
     public void testMarkRunWordBoundariesMatchJdk()
     {
         // A nonspacing mark takes its base from the letter or digit before its run of marks. The

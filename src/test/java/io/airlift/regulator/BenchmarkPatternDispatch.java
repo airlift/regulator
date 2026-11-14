@@ -87,10 +87,10 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// the one-byte exact literal `,`, which a matcher's `find` reads with the
 /// single-byte table on SHORT rows and with the group-zero forward cursor's vector scan on LONG
 /// rows. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
-/// `(?s)`; RE2 and Rust search it as a contained literal and count and iterate its spans on the
-/// dot-star literal matcher, while Java, whose dot stops at more line terminators, runs the
-/// ordinary search. TestBenchmarkPatternDispatch checks each route in RE2, Java, and Rust, and in
-/// Trino only that FOLDED_PAIR_SEQUENCE takes no fixed-width route. SHORT rows are 16 to 64 bytes
+/// `(?s)`, and in Java also at the other line terminators; RE2, Java, and Rust search it as a
+/// contained literal and count and iterate its spans on the dot-star literal matcher.
+/// TestBenchmarkPatternDispatch checks each route in RE2, Java, and Rust, and in Trino only that
+/// FOLDED_PAIR_SEQUENCE takes no fixed-width route. SHORT rows are 16 to 64 bytes
 /// and LONG rows 1024 bytes, padded in the host run of the anchored URL pattern, after the text of
 /// ANCHORED_LITERAL, whose search reads only its start, after the first literal of
 /// ORDERED_LITERALS_BYTES, so its gap search crosses the padding before it decides, and before the

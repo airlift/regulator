@@ -158,6 +158,7 @@ public class TestRetainedSize
         assertMatchesHeapGraph("pattern after matching", () -> Re2.compile(Slices.utf8Slice(WORD_ALTERNATION)), Re2::countMatches, Re2::retainedSizeInBytes);
         assertMatchesHeapGraph("LIKE pattern after matching", () -> TrinoLikePattern.compile(Slices.utf8Slice("a%b_c%d")), TrinoLikePattern::matches, TrinoLikePattern::retainedSizeInBytes);
         assertMatchesHeapGraph("500 named groups (map sizing)", () -> JavaRegexp.compile(Slices.utf8Slice(namedGroups(500))), (_, _) -> {}, JavaRegexp::retainedSizeInBytes);
+        assertMatchesHeapGraph("Java default-dot literal (dot stops, span matcher)", () -> JavaRegexp.compile(Slices.utf8Slice(".*foo.*")), JavaRegexp::find, JavaRegexp::retainedSizeInBytes);
         assertMatchesHeapGraph("Rust \\w before reverse compile (shared Unicode ranges)", () -> RustRegexp.compile(Slices.utf8Slice("([\\w!]*)([\\w!])")), (_, _) -> {}, RustRegexp::retainedSizeInBytes);
         assertMatchesHeapGraph("named-group map views (duplicate names, cached views)", () -> Re2.compile(Slices.utf8Slice("(?P<same>a)(?P<same>b)")), (pattern, _) -> {
             assertThat(pattern.capturingGroupNames().keySet()).hasSize(2);
