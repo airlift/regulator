@@ -8136,7 +8136,11 @@ final class Dfa
         private void recordPairedSearch(int searchedBytes)
         {
             if (searchedBytes >= SHORT_PAIRED_SEARCH_BYTES) {
-                shortPairedSearchCount = 0;
+                // Concurrent searches share this hint; storing only a change keeps long searches
+                // from writing its cache line every time.
+                if (shortPairedSearchCount != 0) {
+                    shortPairedSearchCount = 0;
+                }
                 return;
             }
 
