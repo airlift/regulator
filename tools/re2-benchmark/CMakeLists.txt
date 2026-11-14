@@ -19,6 +19,10 @@ target_link_libraries(language_benchmark PRIVATE re2::re2 benchmark::benchmark)
 add_executable(language_bulk_benchmark language/language_bulk_benchmark.cc)
 target_link_libraries(language_bulk_benchmark PRIVATE re2::re2 benchmark::benchmark)
 
+# A runner over a stand-in engine that tests the lifecycle harness's own checks.
+add_executable(language_harness_test language/language_harness_test.cc)
+target_link_libraries(language_harness_test PRIVATE benchmark::benchmark)
+
 # The Rust comparator is the pinned regex crate as a static library, built by
 # Cargo from its lock file with no flags beyond its release profile.
 find_program(CARGO_EXECUTABLE cargo)

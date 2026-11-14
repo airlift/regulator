@@ -158,7 +158,7 @@ assertRatio(exports.summaryRatios({ ...data, rows: [1e200, 1e200, 1e-200, 1e-200
   .map(ratio => summaryRow("range", ratio)) }).re2.everyday, 1);
 const excluded = [
   { platform: "c8i" }, { memoryMode: "safe" }, { operation: "singleUseContains" },
-  { operation: "compile" }, { population: "diagnostics-and-stress" },
+  { operation: "compile" }, { operation: "reusedFind" }, { population: "diagnostics-and-stress" },
   { population: "bulk-text", caseId: "unicode/codepoints/any-one", operation: "execute" },
   { population: "bulk-text", caseId: "captures/contiguous-letters", operation: "execute" },
   { population: "bulk-text", caseId: "imported/sherlock/repeated-class-negation", operation: "execute" },
@@ -185,6 +185,15 @@ assert.equal(likeSummary.textProcessing, null);
 assert.equal(exports.summaryRatios({ ...data, rows: [] }).java.everyday, null);
 const html = renderToStaticMarkup(React.createElement(LanguageReport, { data }));
 assert.match(html, /Regex pattern lifecycle/);
+// Results collected before the find operation list each everyday workload's find after its other operations,
+// with no times and no ratio, as not measured yet; measured results show their own.
+const everydaySection = page => page.split('<h2>Everyday regex operations</h2>')[1].split('</section>')[0];
+const unmeasuredFind = everydaySection(html).split('<tr').at(-1);
+assert.match(unmeasuredFind, /Example<small>find<\/small>/);
+assert.match(unmeasuredFind, /<td class="measurement"><\/td><td class="measurement"><\/td><td class="measurement"><span class="scan-result na" title="Not measured yet: these results were collected before the find operation.">not measured yet<\/span><\/td><td class="measurement delta"><\/td>/);
+const measuredFind = everydaySection(renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [...data.rows, { ...reused, id: "find", operation: "reusedFind" }] } })));
+assert.doesNotMatch(measuredFind, /not measured yet/);
+assert.match(measuredFind, /Example<small>find<\/small>.*2.00× faster/s);
 assert.doesNotMatch(html, /<h2>Pattern construction/);
 assert.ok(downloadData(data).rows.some(entry => entry.operation === 'compile'));
 assert.doesNotMatch(html, /row-evidence-body/);

@@ -95,6 +95,26 @@ pub unsafe extern "C" fn language_rust_regex_is_match(regex: *const Regex, data:
     (*regex).is_match(text(data, length))
 }
 
+/// Finds the first match with the crate's `find` and writes its byte offsets through `start` and `end`.
+/// Returns false, writing nothing, when nothing matches.
+#[no_mangle]
+pub unsafe extern "C" fn language_rust_regex_find(
+    regex: *const Regex,
+    data: *const u8,
+    length: usize,
+    start: *mut usize,
+    end: *mut usize,
+) -> bool {
+    match (*regex).find(text(data, length)) {
+        Some(found) => {
+            *start = found.start();
+            *end = found.end();
+            true
+        }
+        None => false,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn language_rust_regex_count(regex: *const Regex, data: *const u8, length: usize) -> u64 {
     (*regex).find_iter(text(data, length)).count() as u64

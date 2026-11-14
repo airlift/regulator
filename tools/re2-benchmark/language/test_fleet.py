@@ -213,8 +213,8 @@ class TestFleet(unittest.TestCase):
         self.assertEqual({"case-0000-java": {row: 17.1}}, self.operation_seconds)
         self.assertEqual(fleet.validate(self.directory), plan)
         # Beside its units, prepare prints how many of each language's observations the evidence covers.
-        self.assertEqual("duration evidence covers java 1 of 195 rows, re2 0 of 195 rows, rust 0 of 195 rows, "
-                         "trino 0 of 195 rows", fleet.duration_coverage(plan, units.values()))
+        self.assertEqual("duration evidence covers java 1 of 234 rows, re2 0 of 234 rows, rust 0 of 234 rows, "
+                         "trino 0 of 234 rows", fleet.duration_coverage(plan, units.values()))
         with self.assertRaisesRegex(ValueError, "invalid operation duration"):
             fleet.prepare(self.source, self.root / "nan", duration_evidence=report(float("nan")))
         # Evidence that gives none of the plan's observations an operation time, here a report of only a platform
@@ -251,9 +251,9 @@ class TestFleet(unittest.TestCase):
 
     @staticmethod
     def write_partition_results(partition, result, inputs, platform, instance_type, instance_id, jdk="JDK25",
-                                source_commit="commit", traced="61", classes_archive_sha256="c" * 64):
+                                source_commit="commit", traced="61", classes_archive_sha256="c" * 64, first_match="0"):
         """Write one partition's synthetic verification and measurements, and export them with the inputs of the
-        plan's store."""
+        plan's store. Each matching source's first match is empty, at the bounds first_match packs."""
         result.mkdir(parents=True, exist_ok=True)
         manifest = collection.load(partition / "manifest.json")
         runners = {"fixture": "JVM"}
@@ -262,11 +262,14 @@ class TestFleet(unittest.TestCase):
         receipts, observations = {}, {}
         for identity, case, language, engine, mode in collection.observations(manifest):
             trace = "".join(str(source["expected_count"]) + ":" +
-                            ",".join([traced] * source["expected_count"]) + "\n" for source in case["sources"])
+                            ",".join([""] + [traced] * (source["expected_count"] - 1)) + "\n"
+                            if source["expected_count"] else "0:\n" for source in case["sources"])
+            find_trace = "".join((first_match if source["expected_count"] else "-1") + "\n" for source in case["sources"])
             receipt = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
                        "command": ["verify", "workload.tsv"], "operations": {}}
             for operation in collection.OPERATIONS:
-                operation_trace = collection.expected_operation_trace(case, operation)
+                operation_trace = (find_trace if operation == "reusedFind" else
+                                   collection.expected_operation_trace(case, operation))
                 receipt["operations"][operation] = {"outcome": "completed", "trace": operation_trace,
                                                      "trace_sha256": collection.digest(operation_trace.encode())}
                 if operation not in collection.case_operations(manifest, case):
@@ -622,10 +625,10 @@ class TestFleet(unittest.TestCase):
         output = self.root / "export.json"
         fleet.aggregate(self.directory, result_root, output)
         data = collection.load(output)
-        # Two comparisons of five operations, three observations and two memory-mode comparisons each,
+        # Two comparisons of six operations, three observations and two memory-mode comparisons each,
         # on three hosts of each platform.
-        self.assertEqual(len(data["observations"]), 2 * 5 * 3 * 6)
-        self.assertEqual(len(data["comparisons"]), 2 * 5 * 2 * 6)
+        self.assertEqual(len(data["observations"]), 2 * 6 * 3 * 6)
+        self.assertEqual(len(data["comparisons"]), 2 * 6 * 2 * 6)
         self.assertEqual([host["receipt"] for host in data["hosts"]], receipts)
         self.assertEqual(before, evidence())
         with self.assertRaisesRegex(ValueError, "overwrite"):
@@ -656,7 +659,7 @@ class TestFleet(unittest.TestCase):
 
         data = collection.load(partial)
         dropped = comparison(receipts[0])
-        self.assertEqual(len(data["observations"]), 5 * 3 * 6)
+        self.assertEqual(len(data["observations"]), 6 * 3 * 6)
         self.assertEqual([host["receipt"] for host in data["hosts"]],
                          [receipt for receipt in receipts if comparison(receipt) != dropped])
         row = {"case_id": dropped[0], "language": dropped[1], "platform": receipts[0]["platform"],
@@ -679,6 +682,13 @@ class TestFleet(unittest.TestCase):
         result_root, _ = self.run_campaign(
             lambda platform, partition: {"traced": "62"} if partition.endswith("java") else {})
         with self.assertRaisesRegex(ValueError, "partitions disagree"):
+            fleet.aggregate(self.directory, result_root, self.root / "export.json")
+
+    def test_aggregate_requires_agreeing_first_matches(self):
+        # Java's empty first matches one byte later agree with its own match traces, not with the other languages.
+        result_root, _ = self.run_campaign(
+            lambda platform, partition: {"first_match": str(1 << 32 | 1)} if partition.endswith("java") else {})
+        with self.assertRaisesRegex(ValueError, "partitions disagree about first matches"):
             fleet.aggregate(self.directory, result_root, self.root / "export.json")
 
     def test_aggregate_requires_one_candidate(self):

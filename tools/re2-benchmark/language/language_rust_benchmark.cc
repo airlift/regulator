@@ -37,6 +37,12 @@ struct RustEngine {
         return language_rust_regex_is_match(pattern.get(), input.data(), input.size());
     }
 
+    static int64_t find(const RustRegex& pattern, std::string_view input) {
+        size_t start, end;
+        if (!language_rust_regex_find(pattern.get(), input.data(), input.size(), &start, &end)) return kNoMatch;
+        return match_bounds(start, end);
+    }
+
     static int64_t count(const RustRegex& pattern, std::string_view input, std::vector<std::string>* matches = nullptr) {
         if (matches == nullptr) return language_rust_regex_count(pattern.get(), input.data(), input.size());
         struct Trace {

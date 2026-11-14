@@ -61,8 +61,8 @@ Its match rates, value sizes, and pattern mix are design choices, not claims
 about Trino deployments. Production telemetry may later supply weights without
 changing the underlying cases.
 
-The shared everyday suite measures contains and count against each regex
-language's comparator, using a common logical workload and an explicit input
+The shared everyday suite measures contains, count, and the first match's
+bounds (find) against each regex language's comparator, using a common logical workload and an explicit input
 and output-consumption contract. Regulator receives Slice inputs; JDK `Pattern`
 receives prepared Java strings with input conversion outside timing.
 
@@ -274,7 +274,8 @@ host disagreement do not invalidate otherwise comparable measurements, so
 those row ratios remain eligible. Individual report rows retain their warnings;
 the aggregate is not a claim that every workload wins on every host.
 
-Everyday regex summaries use reused contains and count. The LIKE summary uses
+Everyday regex summaries use reused contains and count; the everyday section
+also shows find, which no summary includes. The LIKE summary uses
 warmed matches, including both measured DFA settings where applicable, but
 excludes the dense-false stress case. DFA-enabled and disabled rows each
 contribute one ratio, just like other eligible rows.

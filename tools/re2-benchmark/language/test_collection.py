@@ -126,14 +126,24 @@ class TestCollection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             collection.validate_manifest(self.manifest, self.directory)
 
+    @staticmethod
+    def find_trace(case, lines=None):
+        """A reusedFind trace with the given line for each source index, and otherwise the fixture's empty first match
+        at the start of every source that matches."""
+        lines = lines or {}
+        return "".join(lines.get(index, "0" if source["expected_count"] else "-1") + "\n"
+                       for index, source in enumerate(case["sources"]))
+
     def receipts(self):
         receipts = {}
         for identity, case, *_ in collection.observations(self.manifest):
-            trace = "".join(str(source["expected_count"]) + ":" + ",".join(["61"] * source["expected_count"]) + "\n"
-                            for source in case["sources"])
+            # Each source's first match is empty, at its start.
+            trace = "".join(str(source["expected_count"]) + ":" + ",".join([""] + ["61"] * (source["expected_count"] - 1)) + "\n"
+                            if source["expected_count"] else "0:\n" for source in case["sources"])
             operations = {}
             for operation in collection.OPERATIONS:
-                operation_trace = collection.expected_operation_trace(case, operation)
+                operation_trace = (self.find_trace(case) if operation == "reusedFind" else
+                                   collection.expected_operation_trace(case, operation))
                 operations[operation] = {"outcome": "completed", "trace": operation_trace,
                                          "trace_sha256": collection.digest(operation_trace.encode())}
             receipts[identity] = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
@@ -326,8 +336,8 @@ class TestCollection(unittest.TestCase):
         results, receipts, observations = self.write_measurements()
         collection.export(self.directory, results)
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(exported["comparisons"]), 13 * 4 * 2 * 5)
-        self.assertEqual(len(exported["observations"]), 13 * 12 * 5)
+        self.assertEqual(len(exported["comparisons"]), 13 * 4 * 2 * 6)
+        self.assertEqual(len(exported["observations"]), 13 * 12 * 6)
         compilation = next(row for row in exported["comparisons"] if row["operation"] == "compile")
         self.assertIsNone(compilation["input_bytes_per_operation"])
         self.assertEqual(exported["manifest"], collection.load(self.directory / "manifest.json"))
@@ -366,7 +376,7 @@ class TestCollection(unittest.TestCase):
         self.manifest = collection.load(self.directory / "manifest.json")
         results, *_ = self.write_measurements()
         exported = collection.export(self.directory, results, write=False)
-        self.assertEqual(len(exported["comparisons"]), 13 * 3 * 2 * 5)
+        self.assertEqual(len(exported["comparisons"]), 13 * 3 * 2 * 6)
         with self.assertRaisesRegex(ValueError, "language or memory-mode coverage"):
             collection.verify(self.directory, self.root / "fresh", "java", "classes", {"native-re2": "native"})
 
@@ -386,6 +396,17 @@ class TestCollection(unittest.TestCase):
         receipts[first]["operations"]["compile"] = {**attempt, "attempts": [attempt, attempt]}
         with self.assertRaisesRegex(ValueError, "invalid operation timeout phase"):
             collection.validate_receipts(self.manifest, receipts)
+        # The inputs record counts but no expected first-match bounds, so find's bounds must agree across engines and
+        # hold the match trace's first match, here an empty one at the start of the source.
+        case = self.manifest["cases"][0]
+        matching = next(index for index, source in enumerate(case["sources"]) if source["expected_count"])
+        for line, error in ((str(1 << 32 | 1), "engines disagree about first matches"),
+                            ("1", "disagree with the match trace"), ("-1", "misses an expected match")):
+            receipts = copy.deepcopy(original)
+            trace = self.find_trace(case, {matching: line})
+            receipts[first]["operations"]["reusedFind"].update(trace=trace, trace_sha256=collection.digest(trace.encode()))
+            with self.subTest(line=line), self.assertRaisesRegex(collection.SemanticFailure, error):
+                collection.validate_receipts(self.manifest, receipts)
 
     def test_relative_measurement_exports_only_operation_specific_timeouts(self):
         results = self.root / "results"
@@ -483,7 +504,7 @@ class TestCollection(unittest.TestCase):
             (results / "provenance.json").unlink()
             measure()
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(measured), 780 - 2)
+        self.assertEqual(len(measured), 13 * 12 * 6 - 2)
         # Each measurement process may run for the budget its row's frozen operation seconds give it, and a row
         # without them for the protocol's limit.
         protocol = collection.protocol_for(self.manifest)

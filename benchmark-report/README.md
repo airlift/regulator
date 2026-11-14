@@ -41,7 +41,7 @@ using R9g native-access measurements for release campaigns or C9g for
 historical captures. It takes a geometric mean of the eligible row time ratios,
 with each row weighted equally. Each row retains its existing
 aggregation of paired-host measurements; raw repetitions are not pooled.
-Everyday regex results use reused contains/count operations. LIKE uses warmed
+Everyday regex results use reused contains/count operations, not find. LIKE uses warmed
 matches, excludes `ORDERED_DENSE_FALSE`, and includes both measured DFA settings
 where applicable. Text processing follows the visible text-processing section;
 LIKE has no separate text-processing summary. Non-comparable, incompatible,
@@ -252,6 +252,11 @@ measured, pattern lifecycle, Trino-specific operations where available, text
 processing, literal-probe distributions, then collapsed adversarial and
 synthetic stress groups. Compile-only measurements remain in the public JSON
 download, without a separate construction or compiler-stress table.
+
+The everyday operations table shows each workload's contains, count, and find.
+Results collected before the find operation have no find rows; the page lists
+each workload's find as not measured yet, with no times or ratio, and the
+download holds no find rows for them.
 
 The compiled patterns table has one row per pattern and operation. The
 comparator a specialized-pattern catalog row names selects its page: RE2 for

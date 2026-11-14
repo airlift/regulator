@@ -13,8 +13,9 @@
 #pragma once
 
 // Lifecycle harness shared by the native comparators. An engine adapter supplies
-// compile (returning a pattern with ok() and error()), contains, count with an
-// optional match trace, and check, which rejects inputs the engine cannot accept.
+// compile (returning a pattern with ok() and error()), contains, find, which returns
+// the first match's match_bounds or kNoMatch, count with an optional match trace,
+// and check, which rejects inputs the engine cannot accept.
 //
 // For the baseline's specialized-pattern comparators an adapter also supplies the
 // nearest public form of each specialized operation: extract, the given group of
@@ -72,6 +73,24 @@ struct Inputs {
     std::vector<Source> sources;
 };
 
+// What find returns when the input has no match.
+constexpr int64_t kNoMatch = -1;
+
+// A match's start and end byte offsets in one value, the start in the high 32 bits and the end in
+// the low, as BenchmarkLanguageComparison.bounds packs them.
+int64_t match_bounds(size_t start, size_t end) {
+    return static_cast<int64_t>(start) << 32 | static_cast<int64_t>(end);
+}
+
+// Whether find's bounds hold the bytes of the first of the trace's matches, or no match when it has none.
+bool holds_first_match(std::string_view input, int64_t bounds, const std::vector<std::string>& matches) {
+    if (bounds == kNoMatch) return matches.empty();
+    size_t start = static_cast<size_t>(bounds >> 32);
+    size_t end = static_cast<size_t>(bounds & 0xffffffff);
+    return !matches.empty() && start <= end && end <= input.size() &&
+            encode_hex(input.substr(start, end - start)) == matches.front();
+}
+
 Inputs read_inputs(const std::string& path) {
     std::ifstream input(path);
     if (!input) throw std::runtime_error("cannot open workload");
@@ -103,7 +122,8 @@ void verify(const Inputs& inputs) {
     for (const Source& source : inputs.sources) {
         std::vector<std::string> matches;
         int64_t result = Engine::count(pattern, source.bytes(), &matches);
-        if (result != source.expected || Engine::contains(pattern, source.bytes()) != (result != 0)) {
+        if (result != source.expected || Engine::contains(pattern, source.bytes()) != (result != 0) ||
+                !holds_first_match(source.bytes(), Engine::find(pattern, source.bytes()), matches)) {
             throw std::runtime_error("native verification failed");
         }
         std::cout << result << ':';
@@ -115,14 +135,16 @@ void verify(const Inputs& inputs) {
     }
 }
 
-enum class Operation { Compile, SingleContains, SingleCount, ReusedContains, ReusedCount };
+enum class Operation { Compile, SingleContains, SingleCount, ReusedContains, ReusedCount, ReusedFind };
+
+bool is_operation(const std::string& operation) {
+    return operation == "compile" || operation == "singleUseContains" || operation == "singleUseCount" ||
+            operation == "reusedContains" || operation == "reusedCount" || operation == "reusedFind";
+}
 
 template <typename Engine>
 void verify_operation(const Inputs& inputs, const std::string& operation) {
-    if (operation != "compile" && operation != "singleUseContains" && operation != "singleUseCount" &&
-            operation != "reusedContains" && operation != "reusedCount") {
-        throw std::runtime_error("unknown operation");
-    }
+    if (!is_operation(operation)) throw std::runtime_error("unknown operation");
     std::cerr << "phase=compile\n";
     auto pattern = Engine::compile(inputs.pattern);
     if (!pattern.ok()) throw std::runtime_error(pattern.error());
@@ -132,21 +154,34 @@ void verify_operation(const Inputs& inputs, const std::string& operation) {
     }
     std::cerr << "phase=execution\n";
     bool is_contains = operation == "singleUseContains" || operation == "reusedContains";
+    std::vector<int64_t> first_pass(inputs.sources.size());
     for (int pass = 0; pass < 2; ++pass) {
-        for (const Source& source : inputs.sources) {
+        for (size_t index = 0; index < inputs.sources.size(); ++index) {
+            const Source& source = inputs.sources[index];
             int64_t result;
             if (operation == "singleUseContains" || operation == "singleUseCount") {
                 auto compiled = Engine::compile(inputs.pattern);
                 if (!compiled.ok()) throw std::runtime_error(compiled.error());
                 result = is_contains ? Engine::contains(compiled, source.bytes()) : Engine::count(compiled, source.bytes());
             }
+            else if (operation == "reusedFind") {
+                result = Engine::find(pattern, source.bytes());
+            }
             else {
                 result = is_contains ? Engine::contains(pattern, source.bytes()) : Engine::count(pattern, source.bytes());
             }
-            if (result != (is_contains ? (source.expected != 0) : source.expected)) {
+            // The inputs record counts but no expected first-match bounds, so collection compares the first pass's
+            // bounds across engines and with the trace. The second pass must repeat the first exactly, so reused state
+            // that goes wrong once the rotation wraps is rejected too.
+            bool verified = operation == "reusedFind" ? (result == kNoMatch) == (source.expected == 0)
+                    : result == (is_contains ? (source.expected != 0) : source.expected);
+            if (!verified || (pass > 0 && result != first_pass[index])) {
                 throw std::runtime_error("native operation verification failed");
             }
-            if (pass == 0) std::cout << result << '\n';
+            if (pass == 0) {
+                first_pass[index] = result;
+                std::cout << result << '\n';
+            }
         }
     }
 }
@@ -177,6 +212,9 @@ void measure(benchmark::State& state, const Inputs& inputs) {
             }
             else if constexpr (operation == Operation::ReusedCount) {
                 benchmark::DoNotOptimize(Engine::count(pattern, source));
+            }
+            else if constexpr (operation == Operation::ReusedFind) {
+                benchmark::DoNotOptimize(Engine::find(pattern, source));
             }
         }
     }
@@ -324,10 +362,7 @@ int run(int argc, char** argv, const std::string& program) {
         Inputs inputs = read_inputs(argv[1]);
         Engine::check(inputs);
         std::string operation = argv[2];
-        if (operation != "compile" && operation != "singleUseContains" && operation != "singleUseCount" &&
-                operation != "reusedContains" && operation != "reusedCount") {
-            throw std::runtime_error("unknown operation");
-        }
+        if (!is_operation(operation)) throw std::runtime_error("unknown operation");
         // Check only the selected operation here; full match traces are collected separately.
         verify_operation<Engine>(inputs, operation);
         if (operation == "compile") register_operation<Engine, Operation::Compile>(operation, inputs);
@@ -335,6 +370,7 @@ int run(int argc, char** argv, const std::string& program) {
         if (operation == "singleUseCount") register_operation<Engine, Operation::SingleCount>(operation, inputs);
         if (operation == "reusedContains") register_operation<Engine, Operation::ReusedContains>(operation, inputs);
         if (operation == "reusedCount") register_operation<Engine, Operation::ReusedCount>(operation, inputs);
+        if (operation == "reusedFind") register_operation<Engine, Operation::ReusedFind>(operation, inputs);
         for (int i = 3; i < argc; ++i) argv[i - 2] = argv[i];
         argc -= 2;
         benchmark::Initialize(&argc, argv);

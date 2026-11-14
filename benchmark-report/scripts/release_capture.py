@@ -20,6 +20,7 @@ BASELINE = ROOT / 'tools/re2-benchmark/baseline'
 RELEASE_METADATA = {'release_version', 'release_artifact_sha256', 'regulator_release_version'}
 sys.path.insert(0, str(BASELINE))
 sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
+import collection
 import fleet
 import released_artifact
 import unit_session
@@ -179,6 +180,16 @@ def validate_reduced_attempts(reduction, receipts):
         raise ValueError('baseline reduction changed the accepted unit attempts')
 
 
+def validate_inventory(manifests):
+    """Require every bulk case and every lifecycle case with every lifecycle operation, so a capture that drops a
+    case or find fails."""
+    if (sorted((manifest['suite'], len(manifest['cases'])) for manifest in manifests) !=
+            [('language-bulk', 238), ('language-lifecycle', 13)] or
+            any(tuple(manifest['operations']) != collection.OPERATIONS
+                for manifest in manifests if manifest['suite'] == 'language-lifecycle')):
+        raise ValueError('release import requires all 238 bulk and 13 lifecycle cases and every lifecycle operation')
+
+
 def language_receipts(items, plans):
     """Each imported plan's accepted unit attempts: its shard's receipts in the ledger beside its export, once that
     ledger holds one complete campaign of the imported plans sharing it. plans holds each validated plan by its
@@ -237,8 +248,7 @@ def build(plan_path):
             combined[key].extend(normalized[key])
         manifests.append(manifest)
         exports.append(digest(item['export']))
-    if sorted((manifest['suite'], len(manifest['cases'])) for manifest in manifests) != [('language-bulk', 238), ('language-lifecycle', 13)]:
-        raise ValueError('release import requires all 238 bulk and 13 lifecycle cases')
+    validate_inventory(manifests)
     baseline = plan['baseline']
     # A candidate build's measured tree is its baseline collector's own.
     collector = candidate if release is None else load_collector(baseline, plan, engine_tree)

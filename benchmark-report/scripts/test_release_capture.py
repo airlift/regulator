@@ -271,6 +271,16 @@ class TestReleaseCapture(unittest.TestCase):
                 with self.subTest(version=version, proven=proven), self.assertRaisesRegex(ValueError, message):
                     release_capture.build(plan)
 
+    def test_import_requires_every_case_and_lifecycle_operation(self):
+        bulk = {'suite': 'language-bulk', 'cases': [{'id': f'bulk-{index}'} for index in range(238)]}
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = collection.prepare(Path(directory) / 'lifecycle')
+        release_capture.validate_inventory([bulk, lifecycle])
+        for name, changed in (('missing a case', {**lifecycle, 'cases': lifecycle['cases'][1:]}),
+                              ('missing find', {**lifecycle, 'operations': list(collection.OPERATIONS[:-1])})):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, 'all 238 bulk and 13 lifecycle cases'):
+                release_capture.validate_inventory([bulk, changed])
+
     def test_language_imports_exactly_each_plans_share_of_one_accepted_campaign(self):
         fixture = test_fleet.TestFleet()
         fixture.setUp()
