@@ -73,7 +73,9 @@ Trino benchmark cases may be translated into this suite when Regulator and
 Joni implement equivalent semantics. The manifest records the exact Trino
 commit and source case. A case that cannot be translated without changing its
 meaning is excluded with a reason; it is not converted into a performance
-failure.
+failure. The `googlebotLine` workload's inputs are lines 24 to 31 of the
+`apache_logs` sample in elastic/examples at commit 6d86454e, the eight lines
+ending at the first one that holds Googlebot, used under the Apache-2.0 license.
 
 The additional Trino operations compare only against Joni. Native RE2 has no
 identical Slice-list, SQL-position, split, or lambda-replacement API. The shared

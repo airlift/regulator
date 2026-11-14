@@ -41,7 +41,7 @@ class TestFleet(unittest.TestCase):
     def test_complete_matrix_keeps_comparator_with_both_memory_modes(self):
         (self.source / "unrelated.txt").write_text("not part of the workload")
         plan = fleet.prepare(self.source, self.directory)
-        self.assertEqual(len(plan["partitions"]), 52)
+        self.assertEqual(len(plan["partitions"]), 56)
         self.assertEqual(plan["platform_allocations"], {
             "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8},
             "r8i": {"instance_type": "r8i.large", "vcpus": 2},
@@ -72,7 +72,7 @@ class TestFleet(unittest.TestCase):
 
     def test_units_pack_comparisons_within_fifteen_minutes(self):
         fleet.prepare(self.source, self.directory)
-        units = self.assert_units_keep_comparisons_whole(52)
+        units = self.assert_units_keep_comparisons_whole(56)
         self.assertTrue(all(float(unit["estimated_seconds"]) <= 900 for unit in units.values()))
         self.assertTrue(any(len(unit["owned"]) > 3 for unit in units.values()))
         table = self.directory / "unit-rows.tsv"
@@ -194,7 +194,7 @@ class TestFleet(unittest.TestCase):
         plan = fleet.prepare(self.source, self.directory, duration_evidence=evidence)
         self.assertEqual({"schema_version": 2, "source_sha256": collection.digest(evidence.read_bytes()),
                           "operation_seconds": {row: 17.1}}, plan["duration_policy"])
-        units = self.assert_units_keep_comparisons_whole(52)
+        units = self.assert_units_keep_comparisons_whole(56)
         # Each JMH iteration of the slow comparator lasts one operation, its processes verifying the case and each
         # operation first; the candidate's observations keep their one-second iterations.
         verification = (1 + len(collection.OPERATIONS)) * fleet.unit_cost.JMH_STARTUP_SECONDS
@@ -213,8 +213,8 @@ class TestFleet(unittest.TestCase):
         self.assertEqual({"case-0000-java": {row: 17.1}}, self.operation_seconds)
         self.assertEqual(fleet.validate(self.directory), plan)
         # Beside its units, prepare prints how many of each language's observations the evidence covers.
-        self.assertEqual("duration evidence covers java 1 of 234 rows, re2 0 of 234 rows, rust 0 of 234 rows, "
-                         "trino 0 of 234 rows", fleet.duration_coverage(plan, units.values()))
+        self.assertEqual("duration evidence covers java 1 of 252 rows, re2 0 of 252 rows, rust 0 of 252 rows, "
+                         "trino 0 of 252 rows", fleet.duration_coverage(plan, units.values()))
         with self.assertRaisesRegex(ValueError, "invalid operation duration"):
             fleet.prepare(self.source, self.root / "nan", duration_evidence=report(float("nan")))
         # Evidence that gives none of the plan's observations an operation time, here a report of only a platform

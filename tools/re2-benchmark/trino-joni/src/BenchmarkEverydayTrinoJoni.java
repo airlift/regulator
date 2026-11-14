@@ -58,7 +58,8 @@ public class BenchmarkEverydayTrinoJoni
                 "unicodeLetters",
                 "trinoPhone",
                 "trinoLiteral",
-                "trinoDotStarLiteral"})
+                "trinoDotStarLiteral",
+                "googlebotLine"})
         String workload;
 
         private JoniRegexp regexp;

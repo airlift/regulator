@@ -199,6 +199,9 @@ python3 benchmark-report/scripts/report_data.py import /tmp/publication.json
 
 The public and complete outputs must differ. The complete output is evidence to
 archive and index; it is never an input to `report_data.py import`.
+Rebuild a campaign from a checkout of its collector commit: the import checks
+the baseline against that checkout's rows, shards, platforms, and units, and the
+platform manifest's digest against the collector's.
 The paths file identifies `release_version`, `candidate_provenance`, both
 `language` plan/export pairs, and `baseline` primary, optional confirmation,
 reduction, and campaign ID. LIKE lifecycle comes from accepted baseline units.

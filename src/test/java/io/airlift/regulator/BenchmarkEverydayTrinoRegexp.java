@@ -63,6 +63,7 @@ public class BenchmarkEverydayTrinoRegexp
                 "trinoPhone",
                 "trinoLiteral",
                 "trinoDotStarLiteral",
+                "googlebotLine",
         })
         String workload;
 

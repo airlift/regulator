@@ -30,7 +30,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 public final class EverydayTrinoJoniVerifier
 {
-    private static final String EXPECTED_RESULT_SHA256 = "42269e1c0de0bde84b47ef4770b40b71831eac7fb811edf7ecadb9fef99de3bd";
+    private static final String EXPECTED_RESULT_SHA256 = "a2ef5a8425dc6fcfb1541f976835a91ace58385394907e9f17e8b34c21e5167d";
 
     private EverydayTrinoJoniVerifier() {}
 

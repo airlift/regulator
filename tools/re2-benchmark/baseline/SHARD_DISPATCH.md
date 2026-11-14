@@ -42,7 +42,7 @@ iteration counts while avoiding a new forked JVM for every row:
   sharing the Regulator host JVM. The three primary replicas therefore provide
   three isolated Joni JVMs on three hosts for every row, each with ten warmup
   and ten measurement iterations. Five forks on every one of the three hosts
-  would provide 15 redundant JVMs per row and make the 104-row Trino operations
+  would provide 15 redundant JVMs per row and make the 112-row Trino operations
   comparator spend most of its time starting JVMs rather than measuring rows.
   A Joni row therefore has ten samples on each host, not the 50 samples used by
   the bounded Regulator process set. Rows over the 5% relative standard-error

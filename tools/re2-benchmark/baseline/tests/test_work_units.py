@@ -33,7 +33,7 @@ class TestWorkUnits(unittest.TestCase):
             self.assertEqual(sorted(work_units.TABLES), sorted(path.name for path in Path(temporary).iterdir()))
         # Each shard's unit minutes, by their smallest, median and largest unit, and its measured groups.
         self.assertIn("like-dfa-single-use\t1\t10.6\t10.6\t10.6\t10.6\t1\n", result.stdout)
-        self.assertIn("trino-operations\t3\t13.1\t13.2\t13.2\t39.5\t6\n", result.stdout)
+        self.assertIn("trino-operations\t3\t13.7\t13.8\t13.9\t41.3\t6\n", result.stdout)
 
     def test_groups_partition_each_unit_and_keep_what_is_measured_together(self):
         by_id = {row["row_id"]: row for row in self.manifest_rows}

@@ -62,8 +62,8 @@ class TestCollection(unittest.TestCase):
         self.manifest = collection.prepare(self.directory)
 
     def test_shared_corpus_has_all_languages_modes_and_lifecycle_operations(self):
-        self.assertEqual(len(self.manifest["cases"]), 13)
-        self.assertEqual(len(list(collection.observations(self.manifest))), 13 * 12)
+        self.assertEqual(len(self.manifest["cases"]), 14)
+        self.assertEqual(len(list(collection.observations(self.manifest))), 14 * 12)
         case = self.manifest["cases"][0]
         self.assertEqual(case["id"], "everyday/logLevel")
         self.assertEqual(len(case["sources"]), 8)
@@ -336,8 +336,8 @@ class TestCollection(unittest.TestCase):
         results, receipts, observations = self.write_measurements()
         collection.export(self.directory, results)
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(exported["comparisons"]), 13 * 4 * 2 * 6)
-        self.assertEqual(len(exported["observations"]), 13 * 12 * 6)
+        self.assertEqual(len(exported["comparisons"]), 14 * 4 * 2 * 6)
+        self.assertEqual(len(exported["observations"]), 14 * 12 * 6)
         compilation = next(row for row in exported["comparisons"] if row["operation"] == "compile")
         self.assertIsNone(compilation["input_bytes_per_operation"])
         self.assertEqual(exported["manifest"], collection.load(self.directory / "manifest.json"))
@@ -376,7 +376,7 @@ class TestCollection(unittest.TestCase):
         self.manifest = collection.load(self.directory / "manifest.json")
         results, *_ = self.write_measurements()
         exported = collection.export(self.directory, results, write=False)
-        self.assertEqual(len(exported["comparisons"]), 13 * 3 * 2 * 6)
+        self.assertEqual(len(exported["comparisons"]), 14 * 3 * 2 * 6)
         with self.assertRaisesRegex(ValueError, "language or memory-mode coverage"):
             collection.verify(self.directory, self.root / "fresh", "java", "classes", {"native-re2": "native"})
 
@@ -504,7 +504,7 @@ class TestCollection(unittest.TestCase):
             (results / "provenance.json").unlink()
             measure()
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(measured), 13 * 12 * 6 - 2)
+        self.assertEqual(len(measured), 14 * 12 * 6 - 2)
         # Each measurement process may run for the budget its row's frozen operation seconds give it, and a row
         # without them for the protocol's limit.
         protocol = collection.protocol_for(self.manifest)

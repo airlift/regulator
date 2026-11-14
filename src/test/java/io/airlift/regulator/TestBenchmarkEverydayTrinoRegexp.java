@@ -33,12 +33,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkEverydayTrinoRegexp
 {
-    private static final String EXPECTED_MANIFEST_SHA256 = "f93c4cc31ef23efa29ee1addfc6709a1bc45bdf8805742bd014e5f120982aaff";
+    private static final String EXPECTED_MANIFEST_SHA256 = "841473799ca64450e3ef95a478985f0148e9be1bc47df786a8ff1c6d3ad583b2";
 
     @Test
     public void testManifestShape()
     {
-        assertThat(TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()).hasSize(13);
+        assertThat(TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()).hasSize(14);
         for (String workloadId : TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()) {
             TestingEverydayTrinoRegexpBenchmarkInputs.Input input =
                     TestingEverydayTrinoRegexpBenchmarkInputs.create(workloadId);
@@ -71,7 +71,7 @@ public class TestBenchmarkEverydayTrinoRegexp
         List<TestingEverydayTrinoRegexpBenchmarkInputs.Source> sources = inputs.stream()
                 .flatMap(input -> input.sources().stream())
                 .toList();
-        assertThat(sources).hasSize(104);
+        assertThat(sources).hasSize(112);
         assertThat(sources).anyMatch(source -> source.value().length() <= 8);
         assertThat(sources).anyMatch(source -> source.value().length() >= 64);
         assertThat(sources).anyMatch(source -> source.value().length() > source.value().toStringUtf8().length());
@@ -152,8 +152,10 @@ public class TestBenchmarkEverydayTrinoRegexp
         assertThat(TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds())
                 .extracting(TestingEverydayTrinoRegexpBenchmarkInputs::create)
                 .extracting(TestingEverydayTrinoRegexpBenchmarkInputs.Input::origin)
-                .allMatch(origin -> origin.equals("designed-control") || origin.startsWith("trino-c7503d170344-"));
-        assertThat(new HashSet<>(TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds())).hasSize(13);
+                .allMatch(origin -> origin.equals("designed-control")
+                        || origin.startsWith("trino-c7503d170344-")
+                        || origin.startsWith("elastic-examples-6d86454ebb7a-"));
+        assertThat(new HashSet<>(TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds())).hasSize(14);
     }
 
     @Test

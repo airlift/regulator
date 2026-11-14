@@ -57,13 +57,14 @@ Regulator.
 to avoid downloading objects. The source repository is read only; the pinned
 commit is archived and extracted beneath Regulator's `target/` directory.
 
-`BenchmarkEverydayTrinoJoni`, the application-shaped comparator, checks 13
+`BenchmarkEverydayTrinoJoni`, the application-shaped comparator, checks 14
 patterns against eight rotating short or medium Slice values apiece, including
 nonzero Slice offsets. Three cases are translated from the pinned Trino
 `BenchmarkRegexpFunctions`; its two synthetic single-character dot-star probes
-remain diagnostic-only and are recorded in the translation ledger. Every other
-origin is recorded as a designed control. The baseline's `trino-operations`
-shard runs it from [`run-shard.sh`](../baseline/run-shard.sh).
+remain diagnostic-only and are recorded in the translation ledger. The
+`googlebotLine` workload takes its inputs from the elastic/examples Apache log
+sample. Every other origin is recorded as a designed control. The baseline's
+`trino-operations` shard runs it from [`run-shard.sh`](../baseline/run-shard.sh).
 
 `BenchmarkSpecializedTrinoJoni` is the Joni twin of
 `BenchmarkSpecializedTrinoRegexp`, the specialized-pattern workloads described
