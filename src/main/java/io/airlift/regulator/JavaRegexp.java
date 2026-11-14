@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
@@ -319,6 +320,14 @@ public sealed class JavaRegexp
         return hash;
     }
 
+    @Override
+    final long compileInputsRetainedSize(Slice compiledPattern)
+    {
+        return RetainedSizes.COMPILE_INPUTS_INSTANCE_SIZE +
+                (compileInputs.pattern() == compiledPattern ? 0 : compileInputs.pattern().getRetainedSize()) +
+                compileInputs.byteFrequencies().estimatedRetainedSize();
+    }
+
     /// Returns the number of non-overlapping matches, including empty matches.
     /// Empty matches advance by one UTF-8 code point as in [RegexpMatcher#find()].
     /// No capture values are returned.
@@ -456,6 +465,12 @@ public sealed class JavaRegexp
         {
             super(analysis, compileInputs);
             this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
+        }
+
+        @Override
+        long shapeRetainedSize()
+        {
+            return extendingLiterals.estimatedRetainedSize();
         }
 
         @Override
@@ -684,5 +699,14 @@ public sealed class JavaRegexp
         {
             return false;
         }
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int COMPILE_INPUTS_INSTANCE_SIZE = SizeOf.instanceSize(CompileInputs.class);
+
+        private RetainedSizes() {}
     }
 }

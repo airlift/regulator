@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 
@@ -381,6 +382,49 @@ public sealed class TrinoRegexp
         return compileInputs.pattern().copy();
     }
 
+    /// Returns an estimate of the heap bytes this pattern retains now, plus the native memory of
+    /// its live DFA pointer tables, as Trino's and Airlift's `getRetainedSizeInBytes` estimates:
+    /// the pattern bytes, the inputs of its compile, its programs and planned matchers, the DFA
+    /// caches its searches have built so far, and its cached replacement, each counted once however
+    /// many routes share it. It reads the DFAs without locking, while other threads search. Rarely,
+    /// when concurrent growth or resets replace a DFA's tables throughout a read, the read reports
+    /// that DFA's whole state budget in place of what its cache holds: a conservative over-report,
+    /// not a leak. It counts what [Re2#retainedSizeInBytes()] counts and leaves out what that
+    /// leaves out, including the metaspace of a class [Options#setGenerateBytecode(boolean)]
+    /// generates.
+    public long retainedSizeInBytes()
+    {
+        long size = RetainedSizeSupport.instanceSize(getClass()) +
+                RetainedSizes.COMPILE_INPUTS_INSTANCE_SIZE +
+                compileInputs.byteFrequencies().estimatedRetainedSize() +
+                shapeRetainedSize();
+        // The compiled engine counts the pattern bytes it shares with the inputs.
+        size += re2 == null ? compileInputs.pattern().getRetainedSize() : re2.estimatedRetainedSize();
+        SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher;
+        if (repeatMatcher != null) {
+            size += repeatMatcher.estimatedRetainedSize();
+        }
+        TrinoReplacementPlan.CachedTemplate template = replacementTemplate;
+        if (template != null) {
+            size += template.estimatedRetainedSize();
+        }
+        return size;
+    }
+
+    /// Returns the memory budget this pattern was compiled with, in bytes: the value of
+    /// [Options#setMaxMemory(long)], and the budget a memory-limit exception for this compile
+    /// reports as its `maxMemoryBytes()`.
+    public long maxMemoryBytes()
+    {
+        return compileInputs.maxMemory();
+    }
+
+    /// The bytes a subclass retains beyond the fields of this class and its compiled engine.
+    long shapeRetainedSize()
+    {
+        return 0;
+    }
+
     /// Returns the number of capturing groups, excluding group zero (the whole match).
     public int capturingGroupCount()
     {
@@ -456,6 +500,12 @@ public sealed class TrinoRegexp
 
         @Override
         long orderedLiteralMatcherRetainedSizeForDiagnostics()
+        {
+            return matcher.estimatedRetainedSize();
+        }
+
+        @Override
+        long shapeRetainedSize()
         {
             return matcher.estimatedRetainedSize();
         }
@@ -1029,6 +1079,13 @@ public sealed class TrinoRegexp
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
+        // The engine counts the matcher it retained, which this shares.
+        @Override
+        long shapeRetainedSize()
+        {
+            return re2().hasRetainedFixedWidthByteSpanMatcher() ? 0 : spanMatcher.estimatedRetainedSize();
+        }
+
         @Override
         public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
         {
@@ -1200,6 +1257,12 @@ public sealed class TrinoRegexp
         {
             super(compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
+        }
+
+        @Override
+        long shapeRetainedSize()
+        {
+            return spanMatcher.estimatedRetainedSize();
         }
 
         @Override
@@ -1392,6 +1455,12 @@ public sealed class TrinoRegexp
         {
             super(compileInputs);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
+        }
+
+        @Override
+        long shapeRetainedSize()
+        {
+            return spanMatcher.estimatedRetainedSize();
         }
 
         @Override
@@ -2055,5 +2124,14 @@ public sealed class TrinoRegexp
             singleByteRepeatMatcher = repeatMatcher;
         }
         return repeatMatcher;
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int COMPILE_INPUTS_INSTANCE_SIZE = SizeOf.instanceSize(CompileInputs.class);
+
+        private RetainedSizes() {}
     }
 }

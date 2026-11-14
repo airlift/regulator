@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -320,6 +321,23 @@ final class UnicodeGroups
         characterClass = supplier.get();
         CharClass previous = CACHE.putIfAbsent(identity, characterClass);
         return previous != null ? previous : characterClass;
+    }
+
+    /// Removes from `ranges`, an identity set, every range object a cached class holds. The
+    /// cache holds those ranges for every pattern, and a parser that copies a cached class into a
+    /// pattern's class shares them, so a size estimate does not count them as the pattern's. It
+    /// reads the cache without a lock or a copy, and stops once `ranges` is empty; a class cached
+    /// meanwhile is simply not counted as shared.
+    static void removeCachedRanges(Set<RuneRange> ranges)
+    {
+        for (CharClass cached : CACHE.values()) {
+            for (int index = 0; index < cached.rangeCount() && !ranges.isEmpty(); index++) {
+                ranges.remove(cached.range(index));
+            }
+            if (ranges.isEmpty()) {
+                return;
+            }
+        }
     }
 
     static CharClass union(CharClass... classes)

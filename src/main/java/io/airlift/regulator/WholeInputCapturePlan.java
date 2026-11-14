@@ -22,6 +22,8 @@ import java.util.Arrays;
 /// every byte.
 final class WholeInputCapturePlan
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(WholeInputCapturePlan.class);
+
     private final boolean[] atEnd;
     private final boolean acceptsEveryByte;
 
@@ -53,7 +55,7 @@ final class WholeInputCapturePlan
 
     long estimatedRetainedSize()
     {
-        return SizeOf.instanceSize(WholeInputCapturePlan.class) + SizeOf.sizeOf(atEnd);
+        return INSTANCE_SIZE + SizeOf.sizeOf(atEnd);
     }
 
     void materialize(int length, int[] groups)

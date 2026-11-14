@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
@@ -27,6 +28,8 @@ import static java.util.Objects.requireNonNull;
 public sealed class TrinoRegexpMatcher
         permits TrinoRegexpMatcher.CompiledScanMatcher, TrinoRegexpMatcher.LiteralSetMatcher
 {
+    private static final int CURSOR_INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.Cursor.class);
+
     private final RegexpMatcher matcher;
     private final LiteralAlternationSpanMatcher literalAlternation;
     private final LiteralAlternationSpanMatcher.Cursor literalAlternationCursor;
@@ -209,6 +212,18 @@ public sealed class TrinoRegexpMatcher
         }
     }
 
+    /// Returns an estimate of the heap bytes this matcher retains beyond its pattern: what the
+    /// [RegexpMatcher] it runs retains, as [RegexpMatcher#retainedSizeInBytes()] counts it, and
+    /// its own state. The pattern counts once in its own `retainedSizeInBytes()`, however many
+    /// matchers share it. Like the other methods, it is called by the thread that uses the
+    /// matcher.
+    public long retainedSizeInBytes()
+    {
+        return RetainedSizeSupport.instanceSize(getClass()) +
+                (matcher == null ? 0 : matcher.retainedSizeInBytes()) +
+                (literalAlternationCursor == null ? 0 : CURSOR_INSTANCE_SIZE);
+    }
+
     /// A matcher whose finds run the generated class of a pattern, with the results and
     /// exceptions of the interpreted matcher it replaces. A scan plan never matches empty, so each
     /// find resumes at the previous match end.
@@ -227,6 +242,12 @@ public sealed class TrinoRegexpMatcher
             this.pattern = requireNonNull(pattern, "pattern is null");
             this.groups = new int[2 * (retainedCapturingGroupCount + 1)];
             reset(input);
+        }
+
+        @Override
+        public long retainedSizeInBytes()
+        {
+            return super.retainedSizeInBytes() + SizeOf.sizeOf(groups);
         }
 
         /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this

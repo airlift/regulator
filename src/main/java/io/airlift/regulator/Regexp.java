@@ -658,6 +658,22 @@ final class Regexp
     /// slice but not the pattern bytes it views.
     long estimatedRetainedSize(long limit)
     {
+        return estimatedRetainedSize(limit, null);
+    }
+
+    /// Returns the bytes this expression retains beyond what it shares, counting each object once
+    /// as [#estimatedRetainedSize(long)] does. A class counts its own array and each range not
+    /// held by a cached Unicode class, which every pattern shares; a capture name counts the
+    /// bytes it holds unless it views `pattern`'s.
+    long retainedSize(Slice pattern)
+    {
+        return estimatedRetainedSize(Long.MAX_VALUE, requireNonNull(pattern, "pattern is null"));
+    }
+
+    // Counts what a compile charges when `pattern` is null, and what the expression retains
+    // beyond what it shares otherwise.
+    private long estimatedRetainedSize(long limit, Slice pattern)
+    {
         Set<Object> counted = Collections.newSetFromMap(new IdentityHashMap<>());
         ArrayDeque<Regexp> pending = new ArrayDeque<>();
         counted.add(this);
@@ -665,6 +681,9 @@ final class Regexp
         // A node is counted when it is queued, so the queue holds no more nodes than the limit
         // pays for, however many children one node has.
         long size = RetainedSizes.INSTANCE_SIZE;
+        // The ranges of the classes met, each once, of which those the Unicode cache also holds
+        // are dropped at the end.
+        Set<RuneRange> ranges = null;
         while (!pending.isEmpty() && size <= limit) {
             Regexp regexp = pending.removeLast();
             if (regexp.children.length != 0 && counted.add(regexp.children)) {
@@ -675,10 +694,25 @@ final class Regexp
             }
             if (regexp.charClass != null && counted.add(regexp.charClass)) {
                 int rangeCount = regexp.charClass.rangeCount();
-                size += RetainedSizes.CHAR_CLASS_INSTANCE_SIZE + SizeOf.sizeOfObjectArray(rangeCount) + (long) rangeCount * RetainedSizes.RUNE_RANGE_INSTANCE_SIZE;
+                size += RetainedSizes.CHAR_CLASS_INSTANCE_SIZE + SizeOf.sizeOfObjectArray(rangeCount);
+                if (pattern == null) {
+                    size += (long) rangeCount * RetainedSizes.RUNE_RANGE_INSTANCE_SIZE;
+                }
+                else {
+                    if (ranges == null) {
+                        ranges = Collections.newSetFromMap(new IdentityHashMap<>(rangeCount));
+                    }
+                    for (int index = 0; index < rangeCount; index++) {
+                        ranges.add(regexp.charClass.range(index));
+                    }
+                }
             }
             if (regexp.name != null) {
                 size += RetainedSizes.SLICE_INSTANCE_SIZE;
+                byte[] nameBytes = regexp.name.byteArray();
+                if (pattern != null && nameBytes != pattern.byteArray() && counted.add(nameBytes)) {
+                    size += SizeOf.sizeOf(nameBytes);
+                }
             }
             for (int index = 0; index < regexp.children.length && size <= limit; index++) {
                 Regexp child = regexp.children[index];
@@ -687,6 +721,10 @@ final class Regexp
                     pending.add(child);
                 }
             }
+        }
+        if (ranges != null) {
+            UnicodeGroups.removeCachedRanges(ranges);
+            size += (long) ranges.size() * RetainedSizes.RUNE_RANGE_INSTANCE_SIZE;
         }
         return size;
     }

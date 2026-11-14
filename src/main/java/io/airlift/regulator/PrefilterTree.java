@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.regulator.Prefilter.PrefilterOp;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.ArrayDeque;
@@ -50,6 +51,10 @@ final class PrefilterTree
             this.childIndexes = List.copyOf(childIndexes);
         }
     }
+
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(PrefilterTree.class);
+    private static final int KEY_INSTANCE_SIZE = SizeOf.instanceSize(PrefilterKey.class);
+    private static final int ENTRY_INSTANCE_SIZE = SizeOf.instanceSize(PrefilterEntry.class);
 
     private final List<PrefilterEntry> entries;
     private final Map<PrefilterKey, Integer> entriesByKey;
@@ -259,6 +264,40 @@ final class PrefilterTree
         atoms.stream()
                 .map(Slice::copy)
                 .forEach(outputAtoms::add);
+    }
+
+    /// The bytes this tree retains: its lists, maps, atoms, and boxed indexes. It fills each list
+    /// and map one element at a time from empty, and does not change once compiled.
+    long estimatedRetainedSize()
+    {
+        long size = INSTANCE_SIZE;
+        for (PrefilterEntry entry : entries) {
+            size += ENTRY_INSTANCE_SIZE + copiedListSize(entry.childIndexes) + RetainedSizeSupport.arrayListSize(entry.parentIndexes);
+        }
+        size += RetainedSizeSupport.arrayListSize(entries);
+        // A key's atom is the one the atom list holds.
+        size += RetainedSizeSupport.hashMapSize(entriesByKey, key -> KEY_INSTANCE_SIZE + copiedListSize(key.childEntryIndexes()));
+        size += RetainedSizeSupport.arrayListSize(regexpRootIndexes);
+        size += RetainedSizeSupport.arrayListSize(atoms);
+        for (Slice atom : atoms) {
+            size += atom.getRetainedSize();
+        }
+        size += RetainedSizeSupport.hashMapSize(atomIndexes, _ -> 0);
+        size += RetainedSizeSupport.arrayListSize(entryIndexesByAtom);
+        for (List<Integer> indexes : entryIndexesByAtom) {
+            size += RetainedSizeSupport.arrayListSize(indexes);
+        }
+        return size;
+    }
+
+    // A list from `List.copyOf` and its boxed indexes.
+    private static long copiedListSize(List<Integer> list)
+    {
+        long size = RetainedSizeSupport.unmodifiableListSize(list);
+        for (int index : list) {
+            size += RetainedSizeSupport.boxSize(index);
+        }
+        return size;
     }
 
     /// Finds every regular expression whose prefilter accepts the matched atoms.

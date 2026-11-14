@@ -49,6 +49,14 @@ sealed class TrinoCompiledPattern
         };
     }
 
+    /// Returns 0: the [TrinoRegexp] that holds this pattern keeps the inputs of its compile, and
+    /// counts them.
+    @Override
+    final long compileInputsRetainedSize(Slice compiledPattern)
+    {
+        return 0;
+    }
+
     /// Returns `false`. A Trino pattern's generated class belongs to its [TrinoRegexp]; see
     /// [TrinoRegexp#usesGeneratedBytecode()].
     @Override

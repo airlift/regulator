@@ -14,11 +14,15 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -30,10 +34,13 @@ import static java.util.Objects.requireNonNull;
 public final class FilteredRe2
 {
     private static final int DEFAULT_MINIMUM_ATOM_LENGTH = 3;
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(FilteredRe2.class);
 
     private final int minimumAtomLength;
     private final List<Re2> patterns;
     private final PrefilterTree prefilterTree;
+    // What the prefilter tree retains, which never changes after the collection compiles.
+    private final long prefilterTreeRetainedSize;
     private final List<Slice> atoms;
     private final Re2.Options.Encoding encoding;
     // The hash of the minimum atom length and the patterns, which decide equality, computed when
@@ -50,6 +57,7 @@ public final class FilteredRe2
         this.minimumAtomLength = minimumAtomLength;
         this.patterns = List.copyOf(patterns);
         this.prefilterTree = requireNonNull(prefilterTree, "prefilterTree is null");
+        this.prefilterTreeRetainedSize = prefilterTree.estimatedRetainedSize();
         this.atoms = atoms.stream()
                 .map(Slice::copy)
                 .toList();
@@ -88,6 +96,42 @@ public final class FilteredRe2
         return atoms.stream()
                 .map(Slice::copy)
                 .toList();
+    }
+
+    /// Returns an estimate of the heap bytes this collection retains now, plus the native memory of
+    /// its live DFA pointer tables: each pattern's [Re2#retainedSizeInBytes()], with a byte
+    /// distribution several patterns share counted once, the prefilter tree, and the atoms. Each
+    /// pattern keeps its own memory budget, which [Re2#maxMemoryBytes()] returns. Rarely, when
+    /// concurrent growth or resets replace a DFA's tables throughout a read, the read reports that
+    /// DFA's whole state budget in place of what its cache holds: a conservative over-report, not a
+    /// leak.
+    public long retainedSizeInBytes()
+    {
+        long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(patterns) + prefilterTreeRetainedSize;
+        // Each pattern counts its custom byte distribution, which patterns added with the same
+        // one share, so a shared distribution is counted once.
+        Set<ByteFrequencies> countedFrequencies = null;
+        for (Re2 pattern : patterns) {
+            size += pattern.retainedSizeInBytes();
+            ByteFrequencies frequencies = pattern.byteFrequencies();
+            long frequenciesSize = frequencies.estimatedRetainedSize();
+            if (frequenciesSize != 0) {
+                if (countedFrequencies == null) {
+                    countedFrequencies = Collections.newSetFromMap(new IdentityHashMap<>());
+                }
+                if (!countedFrequencies.add(frequencies)) {
+                    size -= frequenciesSize;
+                }
+            }
+        }
+        // The atoms are a list from Stream.toList, which holds an array of exactly their count.
+        if (!atoms.isEmpty()) {
+            size += RetainedSizeSupport.instanceSize(atoms.getClass()) + SizeOf.sizeOfObjectArray(atoms.size());
+        }
+        for (Slice atom : atoms) {
+            size += atom.getRetainedSize();
+        }
+        return size;
     }
 
     /// Returns the encoding shared by every pattern in this collection.

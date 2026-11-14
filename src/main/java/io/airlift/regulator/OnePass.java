@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -635,8 +636,15 @@ final class OnePass
 
     static final class Workspace
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Workspace.class);
+
         private int[] captures;
         private int[] matchCaptures;
+
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(captures) + SizeOf.sizeOf(matchCaptures);
+        }
 
         private void prepare(int captureSlotCount)
         {

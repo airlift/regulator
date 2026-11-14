@@ -21,6 +21,8 @@ import io.airlift.slice.Slices;
 /// as in RE2's Latin-1 mode and Rust's byte mode, reads one byte per character.
 final class DisjointSuffixRepeatMatcher
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(DisjointSuffixRepeatMatcher.class);
+
     private final long prefixLowMask;
     private final long prefixHighMask;
     private final int[] repeatedRanges;
@@ -90,7 +92,7 @@ final class DisjointSuffixRepeatMatcher
 
     long estimatedRetainedSize()
     {
-        return SizeOf.instanceSize(DisjointSuffixRepeatMatcher.class) + SizeOf.sizeOf(repeatedRanges) + suffix.getRetainedSize();
+        return INSTANCE_SIZE + SizeOf.sizeOf(repeatedRanges) + suffix.getRetainedSize();
     }
 
     long count(Slice input)

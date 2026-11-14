@@ -903,6 +903,23 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - An optional plan or fact, which only saves work, reserves memory only when the
   allowance covers it; otherwise the pattern compiles without it, with the same
   results, and never throws.
+- A pattern's `retainedSizeInBytes()` is a `SizeOf` estimate of what it
+  reaches, not its budget charge. The charge for programs and plans bounds a
+  compile's peak, and came to 2.5 to 4.9 times a fresh program's heap size, so
+  the estimate sizes each program's arrays and takes from each DFA only what
+  its state budget has charged, plus the parts the budget leaves out. It leaves
+  out shared static tables, old DFA tables that searches in flight still read,
+  superseded native pointer tables, and generated classes' metaspace. Against
+  a JOL walk of the same objects it read 1.000 to 1.063 over 7,488 readings of
+  patterns, sets, LIKE patterns and matchers, fresh and after matching, with
+  and without native access and compressed oops.
+- The estimate reads each DFA without a lock. The DFA charges growth before it
+  publishes the tables that hold it, and lowers the charge only after it
+  publishes the tables that replace them, behind a store-store fence. A read
+  loads the tables, the charge, and, behind a load-load fence, the tables
+  again, and retries a few times if they changed: when both loads see the same
+  tables, the charge read is at least theirs. A read that loses that race on
+  every try takes the whole state budget as the charge, which is never low.
 
 `maxMemory` is a planning budget, not an eager allocation or a byte-exact JVM
 heap limit. The default is demand-driven, so simple patterns retain only the

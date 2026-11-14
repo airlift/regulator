@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 
@@ -26,6 +27,8 @@ import static java.util.Objects.requireNonNull;
 final class SingleByteRepeatMatcher
 {
     private static final SingleByteRepeatMatcher UNSUPPORTED = new SingleByteRepeatMatcher();
+
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(SingleByteRepeatMatcher.class);
 
     private final byte[] matches;
     private final boolean latin1;
@@ -45,6 +48,12 @@ final class SingleByteRepeatMatcher
             }
         }
         this.latin1 = latin1;
+    }
+
+    /// The matcher and its table, or nothing for the shared unsupported matcher.
+    long estimatedRetainedSize()
+    {
+        return this == UNSUPPORTED ? 0 : INSTANCE_SIZE + SizeOf.sizeOf(matches);
     }
 
     /// Returns the one-byte members and encoding of `regexp`, a greedy zero-or-more repeat of one
@@ -70,9 +79,17 @@ final class SingleByteRepeatMatcher
 
     record Repeat(SingleByteMatcher.Analysis members, boolean latin1)
     {
+        private static final long INSTANCE_SIZE = (long) SizeOf.instanceSize(Repeat.class) + SizeOf.instanceSize(SingleByteMatcher.Analysis.class);
+
         Repeat
         {
             requireNonNull(members, "members is null");
+        }
+
+        /// The record and its members.
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE;
         }
     }
 

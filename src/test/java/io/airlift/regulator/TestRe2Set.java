@@ -383,8 +383,10 @@ public class TestRe2Set
         builder.add(Slices.utf8Slice("0[01]{18}$"));
         Re2Set set = builder.build();
 
+        assertThat(set.maxMemoryBytes()).isEqualTo(64L << 10);
         assertThatThrownBy(() -> set.matchesAny(input))
-                .isInstanceOf(RegexpMatchMemoryLimitException.class);
+                .isInstanceOfSatisfying(RegexpMatchMemoryLimitException.class, exception ->
+                        assertThat(exception.maxMemoryBytes()).isEqualTo(set.maxMemoryBytes()));
         assertThat(set.matchingPatternIds(input)).containsExactly(0);
         assertThat(set.dfaForDiagnostics().resetCount()).isPositive();
         assertThat(set.matchingPatternIds(input)).containsExactly(0);

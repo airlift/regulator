@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
@@ -82,6 +83,8 @@ final class ExpressionAnalysis
 
     static final class LiteralSequence
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSequence.class);
+
         private final List<byte[]> literals;
         private final List<Gap> gaps;
         private final boolean anchoredAtStart;
@@ -99,6 +102,25 @@ final class ExpressionAnalysis
             this.anchoredAtStart = anchoredAtStart;
             this.anchoredAtEnd = anchoredAtEnd;
             this.finalLineEnd = finalLineEnd;
+        }
+
+        long estimatedRetainedSize(Prog program)
+        {
+            long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(literals) + RetainedSizeSupport.unmodifiableListSize(gaps);
+            for (byte[] literal : literals) {
+                size += program.sharesPrefix(literal) ? 0 : SizeOf.sizeOf(literal);
+            }
+            return size;
+        }
+
+        boolean holdsLiteral(byte[] bytes)
+        {
+            for (byte[] literal : literals) {
+                if (literal == bytes) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         int literalCount()
@@ -182,6 +204,9 @@ final class ExpressionAnalysis
         }
     }
 
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(ExpressionAnalysis.class);
+    private static final int LENGTH_INSTANCE_SIZE = SizeOf.instanceSize(Length.class);
+
     private final CaseFolding caseFolding;
     private final Length length;
     private final int maximumSpanLength;
@@ -209,6 +234,20 @@ final class ExpressionAnalysis
         this.literalSequence = node.elements == null
                 ? null
                 : buildLiteralSequence(node.elements);
+    }
+
+    /// The analysis and its literal sequence, without a literal `program` holds as its prefix,
+    /// which the program counts.
+    long estimatedRetainedSize(Prog program)
+    {
+        return INSTANCE_SIZE + LENGTH_INSTANCE_SIZE + (literalSequence == null ? 0 : literalSequence.estimatedRetainedSize(program));
+    }
+
+    /// Whether `bytes` is one of the literal sequence's arrays, which a required prefix or an exact
+    /// literal's slice can share.
+    boolean holdsLiteral(byte[] bytes)
+    {
+        return literalSequence != null && literalSequence.holdsLiteral(bytes);
     }
 
     static ExpressionAnalysis analyzeNormalized(Regexp normalizedRegexp, CaseFolding caseFolding)

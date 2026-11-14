@@ -914,6 +914,58 @@ final class Prog
         return memory;
     }
 
+    /// The heap bytes this program retains now, plus the native memory of its live DFA pointer
+    /// tables: its instruction words and tables, its OnePass tables, prefix scan, start literal
+    /// search and position automaton, and each DFA and NFA table it has built so far. Unlike
+    /// [Compiler#estimatedProgramMemory], which bounds the memory a compile may use, this sizes
+    /// the arrays the program keeps. Each DFA is read without locking; see
+    /// [Dfa.DfaInstance#estimatedRetainedSize()].
+    long estimatedRetainedSize()
+    {
+        long size = RetainedSizes.INSTANCE_SIZE +
+                SizeOf.sizeOf(words) +
+                SizeOf.sizeOf(instCount) +
+                SizeOf.sizeOf(bytemap) +
+                SizeOf.sizeOf(outputLists) +
+                SizeOf.sizeOf(onePassMatchCond) +
+                SizeOf.sizeOf(onePassStep) +
+                SizeOf.sizeOf(onePassMatchCapture) +
+                SizeOf.sizeOf(onePassActionCapture) +
+                SizeOf.sizeOf(onePassMatchAssertions) +
+                SizeOf.sizeOf(onePassActionAssertions) +
+                SizeOf.sizeOf(anchoredStartBytes) +
+                SizeOf.sizeOf(prefix) +
+                LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts) +
+                prefixLiteralSetMemory() +
+                SizeOf.sizeOf(transparentStartLiteral) +
+                (transparentStartLiteralSearch == null ? 0 : transparentStartLiteralSearch.estimatedRetainedSize()) +
+                (positionNfa == null ? 0 : positionNfa.estimatedRetainedSize()) +
+                SizeOf.sizeOf(requiredPrefix) +
+                4L * RetainedSizeSupport.ATOMIC_REFERENCE_INSTANCE_SIZE +
+                RetainedSizeSupport.ATOMIC_LONG_ARRAY_INSTANCE_SIZE +
+                SizeOf.sizeOfLongArray(failedDfaBudgets.length());
+        size += estimatedRetainedSize(dfaFirstMatch.get());
+        size += estimatedRetainedSize(dfaLongestMatch.get());
+        size += estimatedRetainedSize(dfaManyMatch.get());
+        NoSubmatchTables noSubmatchTables = noSubmatchNfaTables.get();
+        if (noSubmatchTables != null) {
+            size += noSubmatchTables.estimatedRetainedSize();
+        }
+        return size;
+    }
+
+    private static long estimatedRetainedSize(Dfa.DfaInstance dfa)
+    {
+        return dfa == null ? 0 : dfa.estimatedRetainedSize();
+    }
+
+    /// Whether this program's prefix is `bytes`, which an exact literal's program shares with its
+    /// analysis.
+    boolean sharesPrefix(byte[] bytes)
+    {
+        return prefix == bytes;
+    }
+
     long onePassMemory()
     {
         if (!isOnePass()) {
@@ -3276,6 +3328,21 @@ final class Prog
             this.altMatchGreedy = altMatchGreedy;
             this.hasCaptureOps = hasCaptureOps;
             this.addStackSize = addStackSize;
+        }
+
+        long estimatedRetainedSize()
+        {
+            return RetainedSizes.NO_SUBMATCH_TABLES_INSTANCE_SIZE +
+                    SizeOf.sizeOf(op) +
+                    SizeOf.sizeOf(out) +
+                    SizeOf.sizeOf(out1) +
+                    SizeOf.sizeOf(hint) +
+                    SizeOf.sizeOf(lo) +
+                    SizeOf.sizeOf(hi) +
+                    SizeOf.sizeOf(empty) +
+                    SizeOf.sizeOf(outLast) +
+                    SizeOf.sizeOf(foldCase) +
+                    SizeOf.sizeOf(altMatchGreedy);
         }
 
         private static NoSubmatchTables build(Prog prog)
@@ -5894,5 +5961,14 @@ final class Prog
         if (id != 0) {
             queue.insert(id);
         }
+    }
+
+    // Loaded only when a size is estimated: parsing never sizes objects, and TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Prog.class);
+        private static final int NO_SUBMATCH_TABLES_INSTANCE_SIZE = SizeOf.instanceSize(NoSubmatchTables.class);
+
+        private RetainedSizes() {}
     }
 }

@@ -1931,6 +1931,106 @@ abstract sealed class CompiledPattern
         return pattern.copy();
     }
 
+    /// Returns an estimate of the heap bytes this pattern retains now, plus the native memory of
+    /// its live DFA pointer tables, as Trino's and Airlift's `getRetainedSizeInBytes` estimates:
+    /// the pattern bytes, the inputs of its compile, its programs and planned matchers, and the DFA
+    /// caches its searches have built so far, each counted once however many routes share it. It
+    /// reads the DFAs without locking, while other threads search; [#maxMemoryBytes()] bounds what
+    /// the caches can grow to. Rarely, when concurrent growth or resets replace a DFA's tables
+    /// throughout a read, the read reports that DFA's whole state budget in place of what its cache
+    /// holds: a conservative over-report, not a leak.
+    ///
+    /// The estimate leaves out static tables every pattern shares, such as the Unicode data; the
+    /// matchers a caller creates, which report their own size; and memory the pattern no longer
+    /// reaches. A search still running when a DFA cache resets keeps the old tables until it
+    /// returns, up to that DFA's budget for each such search, and the native pointer tables a reset
+    /// or growth replaced stay allocated until the JDK's cleaner frees them. The classes that
+    /// [Re2.Options#setGenerateBytecode(boolean)] and the other languages' options generate, off by
+    /// default, take metaspace, which the estimate leaves out: about 134 KB for one measured
+    /// pattern.
+    public final long retainedSizeInBytes()
+    {
+        return estimatedRetainedSize();
+    }
+
+    /// Returns the memory budget this pattern was compiled with, in bytes: the value of the
+    /// options' `setMaxMemory`, and the budget a memory-limit exception for this compile reports
+    /// as its `maxMemoryBytes()`.
+    public final long maxMemoryBytes()
+    {
+        return maxMemory;
+    }
+
+    /// The bytes [#retainedSizeInBytes()] reports. A Trino pattern adds the pattern that holds
+    /// this one.
+    @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC", justification = "The reverse input is immutable and only released, so a read without the lock counts it, the program that replaced it, or during the replacement neither")
+    final long estimatedRetainedSize()
+    {
+        long size = RetainedSizeSupport.instanceSize(getClass()) +
+                pattern.getRetainedSize() +
+                compileInputsRetainedSize(pattern) +
+                shapeRetainedSize() +
+                expressionAnalysis.estimatedRetainedSize(partialProg) +
+                partialProg.estimatedRetainedSize() +
+                (foldedStartRun == null ? 0 : foldedStartRun.estimatedRetainedSize()) +
+                (singleByteRepeat == null ? 0 : singleByteRepeat.estimatedRetainedSize()) +
+                (classRepeat == null ? 0 : classRepeat.estimatedRetainedSize()) +
+                (requiredPrefix == partialProg.getRequiredPrefix() || expressionAnalysis.holdsLiteral(requiredPrefix) ? 0 : SizeOf.sizeOf(requiredPrefix)) +
+                booleanPlans.estimatedRetainedSize(partialProg, expressionAnalysis, singleByteMatcher) +
+                (singleByteMatcher == null ? 0 : SingleByteMatcher.estimatedRetainedSize()) +
+                (requiredBytes == null ? 0 : requiredBytes.estimatedRetainedSize());
+        // Each group name is a string the parse built, and each group number its own box unless
+        // the JDK caches boxes of that value. The inverse map holds the same strings and boxes,
+        // except that a name several groups share maps to a box of the smallest group's number.
+        // Both maps are public, so their key and value views count whether or not a caller has
+        // made them, and the maps are read with forEach, which makes neither.
+        if (!capturingGroupNames.isEmpty()) {
+            long[] namesSize = {RetainedSizeSupport.unmodifiableMapSize(capturingGroupNames) + RetainedSizeSupport.MAP_VIEWS_SIZE};
+            capturingGroupNames.forEach((group, name) -> namesSize[0] += RetainedSizeSupport.boxSize(group) + RetainedSizeSupport.stringSize(name));
+            size += namesSize[0];
+        }
+        Map<String, Integer> names = namedCapturingGroups;
+        if (names != null && !names.isEmpty()) {
+            long[] groupsSize = {RetainedSizeSupport.unmodifiableMapSize(names) + RetainedSizeSupport.MAP_VIEWS_SIZE};
+            if (names.size() != capturingGroupNames.size()) {
+                names.forEach((_, group) -> groupsSize[0] += RetainedSizeSupport.boxSize(group));
+            }
+            size += groupsSize[0];
+        }
+        // Count shares a class repeat's matcher counter, and builds any other counter lazily or
+        // records the shared unsupported counter.
+        if (matcherClassCounter != null) {
+            size += matcherClassCounter.estimatedRetainedSize();
+        }
+        BoundedCharacterClassCounter counter = boundedCharacterClassCounter;
+        if (counter != null && counter != matcherClassCounter && counter != BoundedCharacterClassCounter.unsupported()) {
+            size += counter.estimatedRetainedSize();
+        }
+        // The reverse program's input is kept until the program compiles, which releases it under
+        // this pattern's lock after it publishes the program.
+        Regexp reverseRegexp = reverseProgComputed ? null : normalizedReverseRegexp;
+        if (reverseRegexp != null) {
+            size += reverseRegexp.retainedSize(pattern);
+        }
+        else {
+            Prog reverse = reverseProg;
+            if (reverse != null) {
+                size += reverse.estimatedRetainedSize();
+            }
+        }
+        return size;
+    }
+
+    /// The bytes of the inputs of this pattern's compile beyond `compiledPattern`, the pattern
+    /// bytes it shares with them.
+    abstract long compileInputsRetainedSize(Slice compiledPattern);
+
+    /// The bytes a shape class retains beyond the fields of this class.
+    long shapeRetainedSize()
+    {
+        return 0;
+    }
+
     /// Returns the number of capturing groups, excluding group zero (the whole match).
     public int capturingGroupCount()
     {
@@ -5470,6 +5570,70 @@ abstract sealed class CompiledPattern
             // the inner literal search; null for every other plan.
             LiteralNeighborMatcher literalNeighborMatcher)
     {
+        /// What these plans retain beyond what the pattern holds itself: the forward program
+        /// `partialProg` and the single-byte table `singleByteMatcher`, which a byte run shares.
+        long estimatedRetainedSize(Prog partialProg, ExpressionAnalysis expressionAnalysis, SingleByteMatcher singleByteMatcher)
+        {
+            long size = RetainedSizes.BOOLEAN_PLANS_INSTANCE_SIZE;
+            // An exact literal's slice wraps the analysis's literal bytes.
+            if (literal != null) {
+                size += expressionAnalysis.holdsLiteral(literal.byteArray()) ? literal.getRetainedSize() - SizeOf.sizeOf(literal.byteArray()) : literal.getRetainedSize();
+            }
+            if (loweredProgram != null && loweredProgram != partialProg) {
+                size += loweredProgram.estimatedRetainedSize();
+            }
+            if (taggedAlternationProgram != null) {
+                size += taggedAlternationProgram.estimatedRetainedSize();
+            }
+            if (wordRunMatcher != null) {
+                size += wordRunMatcher.estimatedRetainedSize();
+            }
+            if (wholeInputCapturePlan != null) {
+                size += wholeInputCapturePlan.estimatedRetainedSize();
+            }
+            if (disjointSuffixRepeatMatcher != null) {
+                size += disjointSuffixRepeatMatcher.estimatedRetainedSize();
+            }
+            // The scan plan counts its boolean plan.
+            if (scanPlan != null) {
+                size += scanPlan.estimatedRetainedSize();
+            }
+            if (literalSearch != null) {
+                size += literalSearch.estimatedRetainedSize();
+            }
+            if (literalSet != null) {
+                size += literalSet.estimatedRetainedSize();
+            }
+            if (innerLiteralSearch != null) {
+                size += innerLiteralSearch.currentRetainedSize();
+            }
+            if (windowLiteralSearch != null) {
+                size += windowLiteralSearch.estimatedRetainedSize();
+            }
+            if (literalAlternationMatcher != null) {
+                size += literalAlternationMatcher.estimatedRetainedSize();
+            }
+            if (fixedWidthByteMatcher != null) {
+                size += fixedWidthByteMatcher.estimatedRetainedSize();
+            }
+            if (shortFixedWidthByteMatcher != null && shortFixedWidthByteMatcher != fixedWidthByteMatcher) {
+                size += shortFixedWidthByteMatcher.estimatedRetainedSize();
+            }
+            if (byteRunMatcher != null && byteRunMatcher != singleByteMatcher) {
+                size += SingleByteMatcher.estimatedRetainedSize();
+            }
+            if (dotStarLiteralMatcher != null) {
+                size += dotStarLiteralMatcher.estimatedRetainedSize();
+            }
+            if (orderedLiteralMatcher != null) {
+                size += orderedLiteralMatcher.estimatedRetainedSize();
+            }
+            if (literalNeighborMatcher != null) {
+                size += literalNeighborMatcher.estimatedRetainedSize();
+            }
+            return size;
+        }
+
         private BooleanPlans withScanPlan(ScanPlan scanPlan)
         {
             ScanPlan scanBooleanPlan = scanPlan == null ? null : scanPlan.booleanPlan();
@@ -5994,5 +6158,14 @@ abstract sealed class CompiledPattern
             throw new IllegalArgumentException("groupOffsets length must be even: " + groupOffsets.length);
         }
         return true;
+    }
+
+    // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and
+    // TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int BOOLEAN_PLANS_INSTANCE_SIZE = SizeOf.instanceSize(BooleanPlans.class);
+
+        private RetainedSizes() {}
     }
 }

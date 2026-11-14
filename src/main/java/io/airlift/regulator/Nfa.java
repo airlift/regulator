@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -667,6 +668,8 @@ final class Nfa
     // and validated against dense ids to keep clear() O(1) without clearing backing arrays.
     private static final class NfaThreadQueue
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(NfaThreadQueue.class);
+
         private int size;
         private final int[] sparsePos;
         private final int[] denseId;
@@ -679,6 +682,11 @@ final class Nfa
             this.denseId = new int[maxId];
             this.denseThread = new int[maxId];
             this.size = 0;
+        }
+
+        private long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(sparsePos) + SizeOf.sizeOf(denseId) + SizeOf.sizeOf(denseThread);
         }
 
         private void clear()
@@ -1230,6 +1238,8 @@ final class Nfa
 
     private static final class CaptureThreadQueue
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(CaptureThreadQueue.class);
+
         private int size;
         private final int[] sparsePosition;
         private final int[] denseInstructionId;
@@ -1240,6 +1250,11 @@ final class Nfa
             sparsePosition = new int[programSize];
             denseInstructionId = new int[programSize];
             denseThread = new int[programSize];
+        }
+
+        private long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(sparsePosition) + SizeOf.sizeOf(denseInstructionId) + SizeOf.sizeOf(denseThread);
         }
 
         private void clear()
@@ -1290,6 +1305,8 @@ final class Nfa
 
     static final class Workspace
     {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Workspace.class);
+
         private Prog program;
         private int captureSlotCount;
         private CaptureThreadQueue firstQueue;
@@ -1350,6 +1367,26 @@ final class Nfa
             this.match = match;
             this.threadCount = 0;
             this.freeList = 0;
+        }
+
+        /// The queues, stacks, and thread arena this workspace holds now, each live thread with
+        /// its row of capture slots. The program belongs to the pattern.
+        long estimatedRetainedSize()
+        {
+            int[][] threadCaptures = this.threadCaptures;
+            return INSTANCE_SIZE +
+                    (firstQueue == null ? 0 : firstQueue.estimatedRetainedSize()) +
+                    (secondQueue == null ? 0 : secondQueue.estimatedRetainedSize()) +
+                    SizeOf.sizeOf(addInstructionIdStack) +
+                    SizeOf.sizeOf(addRestoreThreadStack) +
+                    SizeOf.sizeOf(threadReferences) +
+                    SizeOf.sizeOf(threadNext) +
+                    (threadCaptures == null ? 0 : SizeOf.sizeOf(threadCaptures) + (long) Math.min(threadCount, threadCaptures.length) * SizeOf.sizeOfIntArray(captureSlotCount)) +
+                    SizeOf.sizeOf(match) +
+                    (firstGroupZeroQueue == null ? 0 : firstGroupZeroQueue.estimatedRetainedSize()) +
+                    (secondGroupZeroQueue == null ? 0 : secondGroupZeroQueue.estimatedRetainedSize()) +
+                    SizeOf.sizeOf(groupZeroAddInstructionIdStack) +
+                    SizeOf.sizeOf(passInstructionWords);
         }
 
         private void updateArena(NfaImpl nfa)
