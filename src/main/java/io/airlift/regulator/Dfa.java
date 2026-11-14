@@ -8038,27 +8038,39 @@ final class Dfa
             int stateIndex = stateIndex(nextFreeOffset);
             newStateData[stateIndex] = state;
             newStateRefArrays[stateIndex] = stateReferences;
-            if (releasePairedTransitions) {
-                availableStateMemory += pairedTransitionMemory;
-                pairedTransitionMemory = 0;
-                pairedContentVersion = -1;
-                pairedRowReleaseCount++;
-            }
+            long pointerMemoryDelta = 0;
             if (absolutePointerGrowth != null) {
                 absolutePointerTransitionCount = absolutePointerGrowth.transitionCount();
-                availableStateMemory -= absolutePointerGrowth.memoryDelta();
+                pointerMemoryDelta = absolutePointerGrowth.memoryDelta();
                 if (absolutePointerGrowth.transitions() == null) {
                     absolutePointerTransitionsWithheld = true;
                     absolutePointerTransitionAllocationFailed |= absolutePointerGrowth.allocationFailed();
                 }
             }
+            // A lock-free size read pairs the tables it sees with the charge it reads, so the
+            // charge must never be below that of any tables a reader can see. Growth, an enlarged
+            // pointer table included, is charged before the volatile publish of the tables that
+            // hold it. A refund, of released paired rows or a withheld pointer table, belongs to
+            // the tables it replaces, so it follows the publish behind a store-store fence: a plain
+            // write after a volatile one may otherwise become visible before it. Every refund here
+            // comes with new tables.
+            availableStateMemory -= stateMemory + Math.max(pointerMemoryDelta, 0);
+            retainedStateMemory += stateMemory;
             if (newTables != tables) {
                 this.tables = newTables;
             }
+            if (releasePairedTransitions || pointerMemoryDelta < 0) {
+                VarHandle.storeStoreFence();
+                availableStateMemory -= Math.min(pointerMemoryDelta, 0);
+                if (releasePairedTransitions) {
+                    availableStateMemory += pairedTransitionMemory;
+                    pairedTransitionMemory = 0;
+                    pairedContentVersion = -1;
+                    pairedRowReleaseCount++;
+                }
+            }
             nextFreeOffset += nextSize;
             stateCount++;
-            availableStateMemory -= stateMemory;
-            retainedStateMemory += stateMemory;
             cache.commit(cacheInsertion);
             cacheContentVersion++;
             return state;
@@ -9011,6 +9023,9 @@ final class Dfa
             CacheTables tables = this.tables;
             if (tables.hasPairedRows()) {
                 this.tables = tables.withPairedRows(null, null, null);
+                // The rows' refund follows the tables without them, as in `allocateCachedState`.
+                // Only tables with paired rows carry their charge.
+                VarHandle.storeStoreFence();
             }
             availableStateMemory += pairedTransitionMemory;
             pairedTransitionMemory = 0;
@@ -9793,8 +9808,6 @@ final class Dfa
                 supersedeAbsolutePointerTransitions(supersededPointers);
             }
 
-            // The reset tables have no paired rows; the available memory is recomputed below.
-            pairedTransitionMemory = 0;
             pairedContentVersion = -1;
             pairedTransitionsRejected = false;
             shortPairedSearchCount = 0;
@@ -9810,6 +9823,11 @@ final class Dfa
             }
             pairedTransitionsDisabled = absolutePointers != null || absolutePointerTransitionsWithheld || absolutePointerTransitionsReleased;
             tables = resetTables;
+            // The charge falls only after the reset tables are published, behind a store-store
+            // fence, as in `allocateCachedState`: the reset tables have no paired rows, and the
+            // available memory is recomputed below.
+            VarHandle.storeStoreFence();
+            pairedTransitionMemory = 0;
             absolutePointerTransitionCount = 0;
             nextFreeOffset = nextSize;
             statesAtLastReset = stateCount;
