@@ -482,6 +482,16 @@ public class TestHotMethodSize
                     .isPositive()
                     .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
         }
+        // The route loops count each search's filter stops in their own state, which keeps them
+        // just within C2's inline size; their callers inline them.
+        for (Class<?> matcher : List.of(ExactMatcher.class, FoldedMatcher.class)) {
+            for (String method : List.of("count", "findSpan")) {
+                assertThat(codeLength(matcher, method))
+                        .as("LiteralAlternationSpanMatcher.%s.%s bytecode bytes", matcher.getSimpleName(), method)
+                        .isPositive()
+                        .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+            }
+        }
     }
 
     /// Keeps the literal-neighbor matcher's find, which a full-Slice find of its pattern runs on

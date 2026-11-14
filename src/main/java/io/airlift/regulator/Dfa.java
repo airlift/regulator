@@ -167,8 +167,9 @@ final class Dfa
     // check which one a search chose. Only tests set `io.airlift.regulator.dfa.route-counts`;
     // production never counts, because every thread searching a compiled pattern shares its DFAs,
     // and concurrent searches storing to the same counters would move their cache lines between
-    // cores. C2 folds this constant, so with it off each countRoute call compiles to nothing.
-    private static final boolean COUNTS_ROUTES = Boolean.getBoolean("io.airlift.regulator.dfa.route-counts");
+    // cores. C2 folds this constant, so with it off each countRoute call compiles to nothing. The
+    // literal-alternation span matcher counts its filter stops under the same switch.
+    static final boolean COUNTS_ROUTES = Boolean.getBoolean("io.airlift.regulator.dfa.route-counts");
     // The routes countRoute counts, each an index into a DFA's route counts.
     private static final int BYTE_SCAN_FALLBACK_ROUTE = 0;
     private static final int SMALL_BYTE_SET_SCAN_ROUTE = 1;
