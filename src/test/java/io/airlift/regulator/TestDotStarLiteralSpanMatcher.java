@@ -106,9 +106,12 @@ public class TestDotStarLiteralSpanMatcher
                 "C2",
                 "C3",
                 "E282",
+                "E280",
                 "F09F92",
                 // Overlong three- and four-byte forms, an encoded surrogate, and values above
-                // U+10FFFF, which the UTF-8 dot accepts.
+                // U+10FFFF, which the UTF-8 dot of `[^\n]` or `[^\r\n]` accepts, and Java's
+                // default dot, whose class leaves out non-ASCII characters, accepts only the
+                // surrogate.
                 "E08080",
                 "F0808080",
                 "EDA080",
@@ -244,27 +247,31 @@ public class TestDotStarLiteralSpanMatcher
     {
         // Count and a group-zero matcher's find run the dot-star literal matcher, never a DFA, in
         // RE2, also with longest-match semantics, under which this pattern's spans are the same,
-        // Java with UNIX_LINES, whose dot is `[^\n]`, and Rust in UTF-8 and bytes mode. So do
-        // RE2's replaceFirst, replaceAll, and extract of group zero, which agree with the pattern
-        // with the dots inside a capture, which keeps the program. A start-anchored search keeps
-        // the program: from the start of `before`, the dots stop at the line feed, past which
-        // the matcher would search on for the literal.
+        // Java, and Rust in UTF-8 and bytes mode. So do RE2's replaceFirst, replaceAll, and
+        // extract of group zero, which agree with the pattern with the dots inside a capture,
+        // which keeps the program. A start-anchored search keeps the program: from the start of
+        // `before`, the dots stop at the line feed, past which the matcher would search on for
+        // the literal. Dots of exactly `[^\n]`, as in RE2, Rust, and Java with UNIX_LINES, take
+        // the matcher class itself, and dots that also stop at other characters, as Java's
+        // default dot and Rust's CRLF dot also stop at a carriage return, take MultipleStops.
         Slice source = utf8Slice("before\nxxcoolfunctionnameyy\nafter\ncoolfunctionname!");
         Re2 captured = Re2.compile(utf8Slice("(.*coolfunctionname.*)"));
         assertThat(captured.createDotStarLiteralSpanMatcher()).isNull();
 
-        record ModeRow(CompiledPattern pattern, boolean longestMatch) {}
+        record ModeRow(CompiledPattern pattern, boolean longestMatch, Class<?> matcherClass) {}
 
         for (ModeRow row : List.of(
-                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*")), false),
-                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*"), Re2.Options.defaults().setLongestMatch(true)), true),
-                new ModeRow(JavaRegexp.compile(utf8Slice("(?d).*coolfunctionname.*")), false),
-                new ModeRow(RustRegexp.compile(utf8Slice(".*coolfunctionname.*")), false),
-                new ModeRow(RustRegexp.compile(utf8Slice("(?-u).*coolfunctionname.*"), RustRegexp.Options.bytes()), false))) {
+                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*")), false, DotStarLiteralSpanMatcher.class),
+                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*"), Re2.Options.defaults().setLongestMatch(true)), true, DotStarLiteralSpanMatcher.class),
+                new ModeRow(JavaRegexp.compile(utf8Slice("(?d).*coolfunctionname.*")), false, DotStarLiteralSpanMatcher.class),
+                new ModeRow(JavaRegexp.compile(utf8Slice(".*coolfunctionname.*")), false, DotStarLiteralSpanMatcher.MultipleStops.class),
+                new ModeRow(RustRegexp.compile(utf8Slice(".*coolfunctionname.*")), false, DotStarLiteralSpanMatcher.class),
+                new ModeRow(RustRegexp.compile(utf8Slice("(?R).*coolfunctionname.*")), false, DotStarLiteralSpanMatcher.MultipleStops.class),
+                new ModeRow(RustRegexp.compile(utf8Slice("(?-u).*coolfunctionname.*"), RustRegexp.Options.bytes()), false, DotStarLiteralSpanMatcher.class))) {
             CompiledPattern pattern = row.pattern();
             String label = label(pattern) + (row.longestMatch() ? " longest-match" : "");
             DotStarLiteralSpanMatcher spanMatcher = pattern.createDotStarLiteralSpanMatcher();
-            assertThat(spanMatcher).as(label).isNotNull();
+            assertThat(spanMatcher).as(label).isExactlyInstanceOf(row.matcherClass());
             assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.LITERAL_KERNEL);
             assertThat(pattern.count(source)).as(label).isEqualTo(2);
             assertNoProgramSearch(pattern, label);
@@ -291,22 +298,21 @@ public class TestDotStarLiteralSpanMatcher
             assertProgramSearch(pattern, label);
         }
 
-        // Java's default dot also stops at `\r`, U+0085, U+2028, and U+2029, and Rust's Unicode
-        // dot in bytes mode at the surrogates, so neither pattern is a dot-star literal.
-        for (CompiledPattern pattern : List.of(
-                JavaRegexp.compile(utf8Slice(".*coolfunctionname.*")),
-                RustRegexp.compile(utf8Slice(".*coolfunctionname.*"), RustRegexp.Options.bytes()))) {
-            String label = label(pattern);
-            assertThat(pattern.createDotStarLiteralSpanMatcher()).as(label).isNull();
-            assertThat(pattern.matcher(source).spanSearchForDiagnostics()).as(label).isNull();
-            assertThat(pattern.count(source)).as(label).isEqualTo(2);
-        }
+        // Rust's Unicode dot in bytes mode is a class of characters, which also leaves out the
+        // surrogates, in a pattern that reads bytes, so it is not a dot-star literal.
+        CompiledPattern rustBytes = RustRegexp.compile(utf8Slice(".*coolfunctionname.*"), RustRegexp.Options.bytes());
+        assertThat(rustBytes.createDotStarLiteralSpanMatcher()).isNull();
+        assertThat(rustBytes.matcher(source).spanSearchForDiagnostics()).isNull();
+        assertThat(rustBytes.count(source)).isEqualTo(2);
     }
 
     @Test
     public void testEligibility()
     {
         assertThat(matcher(".*literal.*")).isNotNull();
+        // Dots may stop at eight characters, three of them ASCII.
+        assertThat(matcher("[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}]*literal[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}]*"))
+                .isExactlyInstanceOf(DotStarLiteralSpanMatcher.MultipleStops.class);
         assertThat(optionalMatcher("(?s:.*literal.*)")).isNull();
         assertThat(optionalMatcher("(.*literal.*)")).isNull();
         assertThat(optionalMatcher("^.*literal.*")).isNull();
@@ -318,17 +324,19 @@ public class TestDotStarLiteralSpanMatcher
         assertThat(optionalMatcher(".*?literal.*")).isNull();
         assertThat(optionalMatcher(".*literal.*?")).isNull();
 
-        // Only a dot of exactly `[^\n]` takes the matcher, so only a line feed and, in UTF-8, a
-        // byte that leads no character end its run of dots: a dot that matches every character,
-        // or one that also stops at a carriage return, as Rust's CRLF mode does, keeps the
-        // engine.
+        // A dot that matches every character keeps the engine, as do dots with more than eight
+        // stops or more ASCII stops than the vector scans take, a literal holding one of the
+        // stops, and two gaps that stop at different characters.
         for (CompiledPattern pattern : List.of(
                 Re2.compile(utf8Slice("(?s).*literal.*"), Re2.Options.latin1()),
+                JavaRegexp.compile(utf8Slice("(?s).*literal.*")),
                 JavaRegexp.compile(utf8Slice("(?ds).*literal.*")),
                 RustRegexp.compile(utf8Slice("(?s).*literal.*")),
-                RustRegexp.compile(utf8Slice("(?R).*literal.*")),
-                RustRegexp.compile(utf8Slice("(?R-u).*literal.*"), RustRegexp.Options.bytes()),
-                RustRegexp.compile(utf8Slice("(?s-u).*literal.*"), RustRegexp.Options.bytes()))) {
+                RustRegexp.compile(utf8Slice("(?s-u).*literal.*"), RustRegexp.Options.bytes()),
+                Re2.compile(utf8Slice("[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}\\x{FEFF}]*literal[^\\t\\n\\r\\x{85}\\x{A0}\\x{2028}\\x{2029}\\x{3000}\\x{FEFF}]*")),
+                Re2.compile(utf8Slice("[^\\t\\n\\v\\r]*literal[^\\t\\n\\v\\r]*")),
+                JavaRegexp.compile(utf8Slice(".*lit\\reral.*")),
+                Re2.compile(utf8Slice("[^\\r\\n]*literal[^\\t\\n]*")))) {
             assertThat(pattern.createDotStarLiteralSpanMatcher()).as(label(pattern)).isNull();
         }
     }
@@ -360,6 +368,7 @@ public class TestDotStarLiteralSpanMatcher
                 budget -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(budget)),
                 budget -> Re2.compile(pattern, Re2.Options.latin1().setMaxMemory(budget)),
                 budget -> JavaRegexp.compile(utf8Slice("(?d).*coolfunctionname.*"), JavaRegexp.Options.defaults().setMaxMemory(budget)),
+                budget -> JavaRegexp.compile(pattern, JavaRegexp.Options.defaults().setMaxMemory(budget)),
                 budget -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(budget)),
                 budget -> RustRegexp.compile(utf8Slice("(?-u).*coolfunctionname.*"), RustRegexp.Options.bytes().setMaxMemory(budget)),
                 budget -> TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(budget)).re2());
@@ -409,6 +418,7 @@ public class TestDotStarLiteralSpanMatcher
         // Spans share the pattern's contains search, so this checks the call-free scan's spans.
         TrinoCompiledPattern trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
         DotStarLiteralSpanMatcher trinoMatcher = trinoPattern.createDotStarLiteralSpanMatcher();
+        assertThat(trinoMatcher).isExactlyInstanceOf(DotStarLiteralSpanMatcher.class);
         assertThat(trinoMatcher.searchForDiagnostics())
                 .isNotNull()
                 .isSameAs(trinoPattern.literalSearchForDiagnostics());
@@ -467,16 +477,19 @@ public class TestDotStarLiteralSpanMatcher
         }
     }
 
-    /// Returns `.*literal.*` in every language and encoding that takes the matcher, each with the
-    /// same pattern with its dots inside a capture.
+    /// Returns `.*literal.*` in every language, encoding, and set of dot stops that takes the
+    /// matcher, each with the same pattern with its dots inside a capture.
     private static List<Row> everyLanguage()
     {
         return List.of(
                 new Row(Re2.compile(utf8Slice(".*literal.*")), Re2.compile(utf8Slice("(.*literal.*)"))),
                 new Row(Re2.compile(utf8Slice(".*literal.*"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*literal.*)"), Re2.Options.latin1())),
                 new Row(JavaRegexp.compile(utf8Slice("(?d).*literal.*")), JavaRegexp.compile(utf8Slice("(?d)(.*literal.*)"))),
+                new Row(JavaRegexp.compile(utf8Slice(".*literal.*")), JavaRegexp.compile(utf8Slice("(.*literal.*)"))),
                 new Row(RustRegexp.compile(utf8Slice(".*literal.*")), RustRegexp.compile(utf8Slice("(.*literal.*)"))),
+                new Row(RustRegexp.compile(utf8Slice("(?R).*literal.*")), RustRegexp.compile(utf8Slice("(?R)(.*literal.*)"))),
                 new Row(RustRegexp.compile(utf8Slice("(?-u).*literal.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?-u)(.*literal.*)"), RustRegexp.Options.bytes())),
+                new Row(RustRegexp.compile(utf8Slice("(?R-u).*literal.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?R-u)(.*literal.*)"), RustRegexp.Options.bytes())),
                 new Row(TrinoRegexp.compile(utf8Slice(".*literal.*")).re2(), TrinoRegexp.compile(utf8Slice("(.*literal.*)")).re2()));
     }
 
