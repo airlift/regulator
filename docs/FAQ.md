@@ -207,6 +207,27 @@ reads, both engines finish that search without the DFA. The costs:
 - Regulator's capture searches each take their own allowance from the
   budget, so their working memory, unlike the DFA cache, grows with threads.
 
+Measured with `BenchmarkSharedPatternThreads` on 16-vCPU Graviton and Intel
+hosts, against the same pattern compiled once for each thread:
+
+- Warm searches scale with threads. At 8 and 50 threads, finds and counts on a
+  shared pattern ran 0.79 to 1.16 times as long as on a pattern per thread: a
+  search of a warm cache takes no lock, and most store nothing to it. A count
+  that updates a shared route hint as it goes, such as one of `\b\w+n\b`,
+  ran 1.06 to 1.33 times as long.
+- A cold cache fills one search at a time. Workers counting distinct 16 KiB
+  rows on a freshly compiled pattern with a large DFA graph,
+  `(?i)[a-q][^u-z]{80}x`, finished about 23 rows a second together, the rate
+  of a single worker, 7 to 14 times slower than workers with patterns of their
+  own. Workers counting the same row share the work: 50 of them finished as
+  fast as one, 3.5 to 6 times faster than with patterns of their own.
+- One thread's resets slow the others on the same pattern. Beside one thread
+  counting a row that resets the cache too often, seven threads counting short
+  rows that fit it ran 8.6 to 11 times slower than on patterns of their own.
+  Beside six such threads, 44 ran 31 to 55 times slower on hosts where they
+  did not stall, and stalled for long stretches on others. Without the
+  resetting thread, sharing cost the short counts nothing measurable.
+
 The Rust `regex` crate gives each search its own cache. A search shares no
 mutable cache state while it runs, so no search waits on another's state
 building or loses states to another's reset, and each cache holds only the
