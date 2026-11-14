@@ -213,7 +213,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>--add-modules jdk.incubator.vector ${regulator.nativeAccessJvmArgument} ${regulator.vectorJvmArgument}</argLine>
+                    <argLine>--add-modules jdk.incubator.vector -Dio.airlift.regulator.dfa.route-counts=true ${regulator.nativeAccessJvmArgument} ${regulator.vectorJvmArgument}</argLine>
                     <systemPropertyVariables>
                         <!-- TestRetainedSize: JOL finds record field offsets itself and does not attach the serviceability agent. -->
                         <jol.magicFieldOffset>true</jol.magicFieldOffset>

@@ -700,8 +700,7 @@ abstract sealed class LiteralAlternationSpanMatcher
         // Null without the Vector API, or when the literals admit no selective filter.
         private final StartLiteralFilter startLiteralFilter;
         // Counts filter stops for the diagnostics and for the held-route check, updated without
-        // synchronization like the DFA's scan counters, so it is approximate when searches share the
-        // matcher.
+        // synchronization, so it is approximate when searches share the matcher.
         private long filterStopCount;
 
         private ExactMatcher(

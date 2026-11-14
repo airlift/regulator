@@ -12,6 +12,11 @@ This is a single-module Maven project. Use the checked-in wrapper:
 Maven Daemon is optional for local iteration; the wrapper pins the Maven
 version used by CI.
 
+Tests that check which scan a DFA search took read route counts, which the DFA
+keeps only when `-Dio.airlift.regulator.dfa.route-counts=true` is set. The
+Maven test configuration sets it; a test run outside Maven, such as from an
+IDE, needs it too.
+
 ## Tooling
 
 Use JUnit Jupiter for unit and integration tests, with AssertJ assertions.

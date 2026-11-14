@@ -31,10 +31,12 @@ class TestSemanticIdentity(unittest.TestCase):
                 probe_arguments = (root / "probe.log").read_text().splitlines()
                 expected = "true" if route == "native-access" else "false"
                 self.assertIn("-Dio.airlift.regulator.dfa.pointer-reader-probe=true", probe_arguments)
+                self.assertIn("-Dio.airlift.regulator.dfa.route-counts=true", probe_arguments)
                 self.assertEqual(["io.airlift.regulator.DfaAbsolutePointerProbe", expected], probe_arguments[-2:])
                 measurement_arguments = result.stdout.splitlines()[len(probe_arguments):]
                 self.assertTrue(measurement_arguments)
                 self.assertFalse(any("pointer-reader-probe" in argument for argument in measurement_arguments))
+                self.assertFalse(any("route-counts" in argument for argument in measurement_arguments))
 
 
 if __name__ == "__main__":

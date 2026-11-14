@@ -72,6 +72,7 @@ public class TestDfaAbsolutePointerTransitions
         // The probe's checks depend on whether vectors are available.
         command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.add("-Dio.airlift.regulator.dfa.pointer-reader-probe=true");
+        command.add("-Dio.airlift.regulator.dfa.route-counts=true");
         command.add("-Dio.airlift.regulator.dfa.flat-paired-rows=" + flatPairedRows);
         command.add("--illegal-native-access=deny");
         command.add("--add-modules");
