@@ -367,8 +367,16 @@ abstract sealed class LiteralAlternationSpanMatcher
     /// The start literal filter built from the literals, or `null` when the matcher has none.
     abstract StartLiteralFilter startLiteralFilterForDiagnostics();
 
-    /// The positions where the start literal filter's scan stopped to compare the literals.
+    /// The positions where the start literal filter's scan stopped to compare the literals, in
+    /// every search of this matcher. Only tests count them, under the DFA's route count switch.
     abstract long filterStopCountForDiagnostics();
+
+    private static void checkFilterStopsCounted()
+    {
+        if (!Dfa.COUNTS_ROUTES) {
+            throw new IllegalStateException("Filter stop counting is off; set -Dio.airlift.regulator.dfa.route-counts=true");
+        }
+    }
 
     /// Expands `expression` into the literals of a large set for [LiteralSetSpanMatcher], in
     /// leftmost-first priority order. Returns `null` where it has no literal expansion within the
@@ -699,8 +707,9 @@ abstract sealed class LiteralAlternationSpanMatcher
         private final byte[][][] literalsByLeadingByte;
         // Null without the Vector API, or when the literals admit no selective filter.
         private final StartLiteralFilter startLiteralFilter;
-        // Counts filter stops for the diagnostics and for the held-route check, updated without
-        // synchronization, so it is approximate when searches share the matcher.
+        // Counts filter stops for the diagnostics, only when tests turn on route counts: every
+        // thread searching a compiled pattern shares this matcher. The held-route check counts
+        // each search's own stops instead.
         private long filterStopCount;
 
         private ExactMatcher(
@@ -752,7 +761,16 @@ abstract sealed class LiteralAlternationSpanMatcher
         @Override
         long filterStopCountForDiagnostics()
         {
+            checkFilterStopsCounted();
             return filterStopCount;
+        }
+
+        // A call site is smaller bytecode than a field increment, so counting grows no caller.
+        private void countFilterStop()
+        {
+            if (Dfa.COUNTS_ROUTES) {
+                filterStopCount++;
+            }
         }
 
         // A null `diagnostics`, as every production search passes, counts nothing.
@@ -778,21 +796,29 @@ abstract sealed class LiteralAlternationSpanMatcher
             }
             int routeEnd = position;
             boolean readsRootTable = false;
-            long filterStopCountAtRouteStart = 0;
+            int routeStopCount = 0;
             while (position < inputEnd) {
                 if (position >= routeEnd) {
-                    if (position == inputOffset || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
+                    if (position == inputOffset || !holdsFilterRoute(readsRootTable, routeStopCount)) {
                         readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                     }
                     if (declinesDenseStart && position == inputOffset && readsRootTable && startLiteralFilter != null) {
                         return DECLINED;
                     }
                     routeEnd = routeEnd(position, inputEnd);
-                    filterStopCountAtRouteStart = filterStopCount;
+                    routeStopCount = 0;
                 }
                 long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
-                if (span < 0) {
+                if (span == Dfa.SEARCH_NO_MATCH) {
                     position = routeEnd;
+                    continue;
+                }
+                // Every other return made a filter stop, except a root-table match, which counts
+                // too but decides nothing: a root-table route never holds, and a filter route reads
+                // the root table only in the input's last 64 bytes, where no later route samples.
+                routeStopCount++;
+                if (span < 0) {
+                    position = ~(int) span;
                     continue;
                 }
                 count++;
@@ -826,46 +852,52 @@ abstract sealed class LiteralAlternationSpanMatcher
             }
             int position = firstPosition;
             int routeEnd = cursor == null ? position : inputOffset + cursor.routeEnd;
-            boolean readsRootTable = cursor != null && cursor.readsRootTable;
-            long filterStopCountAtRouteStart = cursor == null ? 0 : cursor.filterStopCountAtRouteStart;
-            boolean routeChosen = cursor != null && cursor.routeEnd != 0;
+            boolean readsRootTable = cursor == null || cursor.readsRootTable;
+            int routeStopCount = cursor == null ? 0 : cursor.routeStopCount;
             long span = Dfa.SEARCH_NO_MATCH;
             while (position < inputEnd) {
                 if (position >= routeEnd) {
-                    if (!routeChosen || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
+                    if (!holdsFilterRoute(readsRootTable, routeStopCount)) {
                         readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                     }
                     if (declinesDenseStart && position == firstPosition && readsRootTable && startLiteralFilter != null) {
                         return DECLINED;
                     }
                     routeEnd = routeEnd(position, inputEnd);
-                    filterStopCountAtRouteStart = filterStopCount;
-                    routeChosen = true;
+                    routeStopCount = 0;
                 }
                 span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
+                if (span == Dfa.SEARCH_NO_MATCH) {
+                    position = routeEnd;
+                    continue;
+                }
+                // Counted as in count.
+                routeStopCount++;
                 if (span >= 0) {
                     break;
                 }
-                position = routeEnd;
+                position = ~(int) span;
+                // A search that ends after a stop without a match reports none.
+                span = Dfa.SEARCH_NO_MATCH;
             }
             if (cursor != null) {
                 cursor.routeEnd = routeEnd - inputOffset;
                 cursor.readsRootTable = readsRootTable;
-                cursor.filterStopCountAtRouteStart = filterStopCountAtRouteStart;
+                cursor.routeStopCount = routeStopCount;
             }
             return span;
         }
 
         // A filter route whose stops stayed sparse keeps the filter for the next route instead of
         // sampling again. Each sample reads windows spread across the rest of the input, often cold,
-        // and a long input paid one every recheck distance. The stops are read from the matcher's
-        // shared, unsynchronized counter, so searches running at once make the count approximate:
-        // their stops can add up and send a sparse route back to sampling, or lost updates can hide a
-        // dense route's stops and keep it on the filter. Only speed changes, never a result.
-        private boolean holdsFilterRoute(boolean readsRootTable, long filterStopCountAtRouteStart)
+        // and a long input paid one every recheck distance. `routeStopCount` is the stops the route
+        // made in this search, or in the searches of the cursor that carries it, never those of
+        // other searches sharing the matcher. A search with no route yet starts as if on the root
+        // table, which never holds, so its first route samples; reusing that flag rather than
+        // adding one keeps findSpan within C2's FreqInlineSize of 325 bytecode bytes.
+        private static boolean holdsFilterRoute(boolean readsRootTable, int routeStopCount)
         {
-            return !readsRootTable &&
-                    (filterStopCount - filterStopCountAtRouteStart) * HELD_ROUTE_MINIMUM_BYTES_PER_STOP < Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
+            return !readsRootTable && routeStopCount * HELD_ROUTE_MINIMUM_BYTES_PER_STOP < Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
         }
 
         // True when the route from `position` reads every byte through the root table rather than
@@ -897,44 +929,38 @@ abstract sealed class LiteralAlternationSpanMatcher
                     Dfa.BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
         }
 
-        // Returns the span of the first match that starts in `[position, routeEnd)`, or
-        // Dfa.SEARCH_NO_MATCH; checking a match may read to the input end. Each pass searches either
-        // one filter stop, comparing its literals, or the rest of the route through the root table,
-        // which keeps the root-table trie walk at this one call site: C2 inlined a copy at each of two
-        // sites, which grew this method past its inline size limit, and its callers then called it
-        // rather than inlining it.
+        // Searches the route from `position`, which lies before `routeEnd`, either to its next filter
+        // stop, comparing the stop's literals, or through the root table to the route end. Returns
+        // the span of the match found, Dfa.SEARCH_NO_MATCH when the route holds no further stop or
+        // match, or, for a stop whose literals do not match, the complement of the position after it,
+        // at most the route end, which is below Dfa.SEARCH_NO_MATCH. Checking a match may read to the
+        // input end. Returning at each stop lets the caller count the stops in its own state, since
+        // every thread searching the pattern shares this matcher. The root-table trie walk keeps this
+        // one call site: C2 inlined a copy at each of two sites, which grew this method past its
+        // inline size limit, and its callers then called it rather than inlining it.
         private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd, RouteDiagnostics diagnostics)
         {
             // The filter accepts every position where a literal starts, so the positions it skips
             // hold no match, and comparing the literals at each stop decides it. Every literal reaches
             // the filter's last position, so a scan that reads that far past the route end finds
             // every stop before the route end.
-            int scanEnd = readsRootTable ? routeEnd : Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset());
-            while (true) {
-                boolean filterStop = !readsRootTable && position < routeEnd && usesStartLiteralFilter(inputEnd - position);
-                if (filterStop) {
-                    position = VectorByteSetScanner.findLiteralSet(bytes, position, scanEnd - position, startLiteralFilter);
-                    if (position < 0) {
-                        return Dfa.SEARCH_NO_MATCH;
-                    }
-                    filterStopCount++;
+            if (!readsRootTable && usesStartLiteralFilter(inputEnd - position)) {
+                position = VectorByteSetScanner.findLiteralSet(bytes, position, Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset()) - position, startLiteralFilter);
+                if (position < 0) {
+                    return Dfa.SEARCH_NO_MATCH;
                 }
-                long span = filterStop
-                        ? findSpanAtStop(bytes, position, inputOffset, inputEnd)
-                        : findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
-                if (!filterStop) {
-                    if (diagnostics != null) {
-                        // The filter's scan can stop past the route end, leaving the root table nothing to read.
-                        int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
-                        diagnostics.rootTablePositionCount += readEnd - position;
-                    }
-                    return span;
-                }
-                if (span >= 0) {
-                    return span;
-                }
-                position++;
+                countFilterStop();
+                long span = findSpanAtStop(bytes, position, inputOffset, inputEnd);
+                // The filter's scan can stop past the route end, after which the next route starts
+                // at the route end, as when the scan finds no stop.
+                return span >= 0 ? span : ~(long) Math.min(position + 1, routeEnd);
             }
+            long span = findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
+            if (diagnostics != null) {
+                int readEnd = span < 0 ? routeEnd : inputOffset + (int) (span >>> 32) + 1;
+                diagnostics.rootTablePositionCount += readEnd - position;
+            }
+            return span;
         }
 
         // Returns the span of the match that starts at `position`, or Dfa.SEARCH_NO_MATCH: the first
@@ -1029,7 +1055,7 @@ abstract sealed class LiteralAlternationSpanMatcher
         // when, with its mask's bits set, it equals the literal's byte.
         private final byte[][][] literalMasksByLeadingByte;
         private final StartLiteralFilter startLiteralFilter;
-        // Counts filter stops as the exact matcher's counter does.
+        // Counts filter stops for the diagnostics as the exact matcher's counter does.
         private long filterStopCount;
 
         private FoldedMatcher(byte[][][] literalsByLeadingByte, byte[][][] literalMasksByLeadingByte, StartLiteralFilter startLiteralFilter)
@@ -1063,12 +1089,21 @@ abstract sealed class LiteralAlternationSpanMatcher
         @Override
         long filterStopCountForDiagnostics()
         {
+            checkFilterStopsCounted();
             return filterStopCount;
         }
 
+        // A call site is smaller bytecode than a field increment, so counting grows no caller.
+        private void countFilterStop()
+        {
+            if (Dfa.COUNTS_ROUTES) {
+                filterStopCount++;
+            }
+        }
+
         // The route methods from here through findSpanInRoute copy ExactMatcher's, whose comments
-        // explain them, including the shared stop counter, the short search that leaves the cursor
-        // alone, and the filter scan past the route end. They drop its checks for a missing filter,
+        // explain them, including the stop counts, the short search that leaves the cursor alone,
+        // and the filter scan past the route end. They drop its checks for a missing filter,
         // since this matcher always has one, and call this matcher's compares.
         private long count(Slice input, boolean declinesDenseStart, RouteDiagnostics diagnostics)
         {
@@ -1091,21 +1126,26 @@ abstract sealed class LiteralAlternationSpanMatcher
             }
             int routeEnd = position;
             boolean readsRootTable = false;
-            long filterStopCountAtRouteStart = 0;
+            int routeStopCount = 0;
             while (position < inputEnd) {
                 if (position >= routeEnd) {
-                    if (position == inputOffset || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
+                    if (position == inputOffset || !holdsFilterRoute(readsRootTable, routeStopCount)) {
                         readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                     }
                     if (declinesDenseStart && position == inputOffset && readsRootTable) {
                         return DECLINED;
                     }
                     routeEnd = routeEnd(position, inputEnd);
-                    filterStopCountAtRouteStart = filterStopCount;
+                    routeStopCount = 0;
                 }
                 long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
-                if (span < 0) {
+                if (span == Dfa.SEARCH_NO_MATCH) {
                     position = routeEnd;
+                    continue;
+                }
+                routeStopCount++;
+                if (span < 0) {
+                    position = ~(int) span;
                     continue;
                 }
                 count++;
@@ -1130,40 +1170,43 @@ abstract sealed class LiteralAlternationSpanMatcher
             }
             int position = firstPosition;
             int routeEnd = cursor == null ? position : inputOffset + cursor.routeEnd;
-            boolean readsRootTable = cursor != null && cursor.readsRootTable;
-            long filterStopCountAtRouteStart = cursor == null ? 0 : cursor.filterStopCountAtRouteStart;
-            boolean routeChosen = cursor != null && cursor.routeEnd != 0;
+            boolean readsRootTable = cursor == null || cursor.readsRootTable;
+            int routeStopCount = cursor == null ? 0 : cursor.routeStopCount;
             long span = Dfa.SEARCH_NO_MATCH;
             while (position < inputEnd) {
                 if (position >= routeEnd) {
-                    if (!routeChosen || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
+                    if (!holdsFilterRoute(readsRootTable, routeStopCount)) {
                         readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                     }
                     if (declinesDenseStart && position == firstPosition && readsRootTable) {
                         return DECLINED;
                     }
                     routeEnd = routeEnd(position, inputEnd);
-                    filterStopCountAtRouteStart = filterStopCount;
-                    routeChosen = true;
+                    routeStopCount = 0;
                 }
                 span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
+                if (span == Dfa.SEARCH_NO_MATCH) {
+                    position = routeEnd;
+                    continue;
+                }
+                routeStopCount++;
                 if (span >= 0) {
                     break;
                 }
-                position = routeEnd;
+                position = ~(int) span;
+                span = Dfa.SEARCH_NO_MATCH;
             }
             if (cursor != null) {
                 cursor.routeEnd = routeEnd - inputOffset;
                 cursor.readsRootTable = readsRootTable;
-                cursor.filterStopCountAtRouteStart = filterStopCountAtRouteStart;
+                cursor.routeStopCount = routeStopCount;
             }
             return span;
         }
 
-        private boolean holdsFilterRoute(boolean readsRootTable, long filterStopCountAtRouteStart)
+        private static boolean holdsFilterRoute(boolean readsRootTable, int routeStopCount)
         {
-            return !readsRootTable &&
-                    (filterStopCount - filterStopCountAtRouteStart) * HELD_ROUTE_MINIMUM_BYTES_PER_STOP < Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
+            return !readsRootTable && routeStopCount * HELD_ROUTE_MINIMUM_BYTES_PER_STOP < Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
         }
 
         private boolean readsRootTable(byte[] bytes, int position, int inputEnd, RouteDiagnostics diagnostics)
@@ -1187,31 +1230,21 @@ abstract sealed class LiteralAlternationSpanMatcher
 
         private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd, RouteDiagnostics diagnostics)
         {
-            int scanEnd = readsRootTable ? routeEnd : Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset());
-            while (true) {
-                boolean filterStop = !readsRootTable && position < routeEnd && usesStartLiteralFilter(inputEnd - position);
-                if (filterStop) {
-                    position = VectorByteSetScanner.findLiteralSet(bytes, position, scanEnd - position, startLiteralFilter);
-                    if (position < 0) {
-                        return Dfa.SEARCH_NO_MATCH;
-                    }
-                    filterStopCount++;
+            if (!readsRootTable && usesStartLiteralFilter(inputEnd - position)) {
+                position = VectorByteSetScanner.findLiteralSet(bytes, position, Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset()) - position, startLiteralFilter);
+                if (position < 0) {
+                    return Dfa.SEARCH_NO_MATCH;
                 }
-                long span = filterStop
-                        ? findSpanAtStop(bytes, position, inputOffset, inputEnd)
-                        : findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
-                if (!filterStop) {
-                    if (diagnostics != null) {
-                        int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
-                        diagnostics.rootTablePositionCount += readEnd - position;
-                    }
-                    return span;
-                }
-                if (span >= 0) {
-                    return span;
-                }
-                position++;
+                countFilterStop();
+                long span = findSpanAtStop(bytes, position, inputOffset, inputEnd);
+                return span >= 0 ? span : ~(long) Math.min(position + 1, routeEnd);
             }
+            long span = findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
+            if (diagnostics != null) {
+                int readEnd = span < 0 ? routeEnd : inputOffset + (int) (span >>> 32) + 1;
+                diagnostics.rootTablePositionCount += readEnd - position;
+            }
+            return span;
         }
 
         // Returns the span of the match that starts at `position`, or Dfa.SEARCH_NO_MATCH: the
@@ -1895,8 +1928,9 @@ abstract sealed class LiteralAlternationSpanMatcher
 
     /// The route one search of an input chose and the position it holds to, which the next
     /// search of the same input continues instead of sampling the filter again, as the DFA's
-    /// group-zero cursor keeps its scan rejection. It also carries the filter stop count when the
-    /// route began, which decides whether the next route keeps the filter without sampling.
+    /// group-zero cursor keeps its scan rejection. It also carries the filter stops its searches
+    /// made on the route, which decide whether the next route keeps the filter without sampling;
+    /// a cursor without a route reads as on the root table, so its next search samples.
     /// Positions are relative to the input. Its callers search whole inputs: Trino's matcher
     /// across its finds, and Trino's operations that find repeatedly within one call. A new cursor
     /// is reset; a caller must [#reset()] it before searching a different input, since a route end
@@ -1905,15 +1939,15 @@ abstract sealed class LiteralAlternationSpanMatcher
     static final class Cursor
     {
         private int routeEnd;
-        private boolean readsRootTable;
-        private long filterStopCountAtRouteStart;
+        private boolean readsRootTable = true;
+        private int routeStopCount;
 
         /// Forgets the route, so the next search chooses one from its start position.
         void reset()
         {
             routeEnd = 0;
-            readsRootTable = false;
-            filterStopCountAtRouteStart = 0;
+            readsRootTable = true;
+            routeStopCount = 0;
         }
     }
 }

@@ -1478,6 +1478,44 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     @Test
+    public void testCursorCountsOnlyItsOwnFilterStops()
+    {
+        // A cursor's finds over sparse log lines hold the filter after sampling their first route.
+        // After the first find, a count on the same matcher, which every thread searching the
+        // compiled pattern shares, makes more filter stops than a held route allows: its near
+        // misses are shorter than 64 KiB, so it keeps the filter without sampling. The finds still
+        // hold, since they count only their own stops. Without the Vector API there is no filter,
+        // and nothing samples.
+        Slice logInput = utf8Slice(logLines(2 * RECHECK_BYTES + 1024));
+        long expectedCount = generalEngineCount(Re2.compile(utf8Slice("ERROR|WARN|FATAL")), logInput);
+        assertFindsHoldAcrossOtherStops(scanner("ERROR|WARN|FATAL"), logInput, expectedCount, utf8Slice(nearMissText(RECHECK_BYTES / 2)));
+        // Folded literals count their stops the same way. Their filter rejects ERxO and passes
+        // ERR#R. Without the Vector API there is no folded matcher.
+        if (VectorSupport.isAvailable()) {
+            LiteralAlternationSpanMatcher folded = Re2.compile(utf8Slice("(?i)ERROR|WARN|FATAL")).literalAlternationSpanMatcherForDiagnostics();
+            assertThat(folded).isInstanceOf(FoldedMatcher.class);
+            assertFindsHoldAcrossOtherStops(folded, logInput, expectedCount, utf8Slice(nearMissText("ERR#R ", RECHECK_BYTES / 2)));
+        }
+    }
+
+    private static void assertFindsHoldAcrossOtherStops(LiteralAlternationSpanMatcher scanner, Slice logInput, long expectedCount, Slice nearMisses)
+    {
+        LiteralAlternationSpanMatcher.RouteDiagnostics diagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
+        long span = scanner.findSpanForDiagnostics(logInput, 0, cursor, diagnostics);
+        long stopsBeforeCount = scanner.filterStopCountForDiagnostics();
+        assertThat(scanner.count(nearMisses)).isZero();
+        // A route holds with fewer than one stop per 16 bytes.
+        assertThat(scanner.filterStopCountForDiagnostics() - stopsBeforeCount > RECHECK_BYTES / 16).isEqualTo(VectorSupport.isAvailable());
+        long finds = 0;
+        for (; span >= 0; span = scanner.findSpanForDiagnostics(logInput, (int) span, cursor, diagnostics)) {
+            finds++;
+        }
+        assertThat(finds).isEqualTo(expectedCount);
+        assertThat(diagnostics.sampledPositionCount()).isEqualTo(VectorSupport.isAvailable() ? Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
+    }
+
+    @Test
     public void testMatchAcrossTheRecheck()
     {
         // Spaces keep the filter for the first 64 KiB route, and WARN starts two bytes before its

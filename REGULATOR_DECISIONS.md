@@ -4645,7 +4645,9 @@ the route from one match to the next, so they sample at most once per 64 KiB
 rather than once per match, and only once when the first sample keeps the
 filter and every route's stops stay below one per 16 bytes. A Trino matcher
 carries the route in a route cursor of its own, reset with the matcher, since
-the compiled pattern and its span matcher are shared between threads. An RE2,
+the compiled pattern and its span matcher are shared between threads. For the
+same reason a route's stops are counted by the count or find that made them, or
+in the cursor that carries the route, never in the span matcher. An RE2,
 Java, or Rust matcher never takes the filter: a find with at least 64 bytes
 left hands off to the program's search, as the [literal-alternation
 matcher](#boolean-partial-match-specializations) records, and a shorter one
