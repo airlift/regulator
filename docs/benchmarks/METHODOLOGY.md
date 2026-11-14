@@ -193,6 +193,7 @@ Representative JMH classes include:
 | `BenchmarkRe2Practical` | Practical patterns and compile cost |
 | `BenchmarkRe2CompileFocused` | Parser, compiler, and cold-DFA costs |
 | `BenchmarkDfaCache` | Cache sharing, construction, and reset behavior |
+| `BenchmarkSharedPatternThreads` | One compiled pattern searched by many threads, with warm, cold, and thrashing DFA caches, against a pattern compiled for each thread |
 | `BenchmarkDfaSelfLoopExitScan` | Small exit-set and stay-range self-loop scanning |
 | `BenchmarkBoundedCharacterClassCounter` | Specialized counting versus repeated matching |
 | `BenchmarkRe2PublicApi` | Boolean, caller-buffer, result, and matcher APIs |
