@@ -4,7 +4,7 @@ This suite measures ordinary regex operations and pattern lifecycles across
 the four regex languages. Run it alongside the baseline Trino-operation,
 specialized-pattern, and LIKE shards, not instead of them.
 
-The current corpus is the 13 workloads in `everyday-trino-workloads.tsv`, with
+The current corpus is the 14 workloads in `everyday-trino-workloads.tsv`, with
 eight rotating inputs each. Each workload runs through:
 
 | Language | Regulator API | Comparator |
@@ -17,7 +17,7 @@ eight rotating inputs each. Each workload runs through:
 Regulator runs with native access enabled and disabled. The comparator runs
 once per language and host, and supplies the comparison for both modes.
 Each engine measures compilation, single-use contains and count, and reused
-contains, count, and find. That produces 936 engine observations and 624 paired
+contains, count, and find. That produces 1008 engine observations and 672 paired
 rows per architecture. These counts describe this additional suite, not the full
 qualification campaign.
 
@@ -316,7 +316,7 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
-52 partitions, each measured on R9g and R8i in three independent replicas.
+56 partitions, each measured on R9g and R8i in three independent replicas.
 
 The plan keeps the source manifest in `source/` and each partition's manifest
 in `partitions/<partition>`. Its `inputs/` store holds each input file once, at

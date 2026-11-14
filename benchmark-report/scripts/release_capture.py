@@ -184,10 +184,10 @@ def validate_inventory(manifests):
     """Require every bulk case and every lifecycle case with every lifecycle operation, so a capture that drops a
     case or find fails."""
     if (sorted((manifest['suite'], len(manifest['cases'])) for manifest in manifests) !=
-            [('language-bulk', 238), ('language-lifecycle', 13)] or
+            [('language-bulk', 238), ('language-lifecycle', 14)] or
             any(tuple(manifest['operations']) != collection.OPERATIONS
                 for manifest in manifests if manifest['suite'] == 'language-lifecycle')):
-        raise ValueError('release import requires all 238 bulk and 13 lifecycle cases and every lifecycle operation')
+        raise ValueError('release import requires all 238 bulk and 14 lifecycle cases and every lifecycle operation')
 
 
 def language_receipts(items, plans):

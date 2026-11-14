@@ -865,9 +865,9 @@ class TestShardResults(unittest.TestCase):
             "regulator-regular-engine-native-access",
             "regulator-regular-engine-object-row")
         self.assertEqual({
-            ("trino-everyday-operations", "joni"): 104,
-            ("trino-everyday-operations", "regulator-native-access"): 104,
-            ("trino-everyday-operations", "regulator-object-row"): 104,
+            ("trino-everyday-operations", "joni"): 112,
+            ("trino-everyday-operations", "regulator-native-access"): 112,
+            ("trino-everyday-operations", "regulator-object-row"): 112,
             **{(suite, system): 5
                for suite, comparator in (("trino-specialized-patterns", "joni"), ("re2-specialized-patterns", "native-re2"),
                                          ("java-specialized-patterns", "jdk"), ("rust-specialized-patterns", "rust-regex"))
