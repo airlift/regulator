@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
@@ -1267,6 +1268,62 @@ public class TestDfaCountMatches
                 .isEqualTo(41);
         assertThat(dfa.pairedTransitionsDisabled()).isTrue();
         assertThat(dfa.pairedTransitionMemory()).isZero();
+    }
+
+    @Test
+    public void testCountKeepsShortPairedSearchStreakUntilItEnds()
+    {
+        // Each search of `\b\w+n\b` ends at the next match, so over these words its paired searches
+        // alternate between ending within 16 bytes, at `an`, and after, at the long word, then end
+        // ten short searches in a row. The padding gives every search enough text for paired rows.
+        // A count keeps the DFA's streak of short paired searches, which every thread searching the
+        // pattern shares, to itself, and stores it once when it ends, so the hint holds its value
+        // at every match end. The streak it stores, and the paired rejection it publishes on
+        // reaching the limit, are those of storing the hint at each search.
+        Prog program = compile("\\b\\w+n\\b");
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        String padding = " ".repeat(300);
+        Slice alternating = utf8Slice("an; abcdefghijklmnopqrstun; ".repeat(20) + "an; ".repeat(10) + padding);
+        assertThat(Dfa.countMatches(program, alternating, Prog.MatchKind.FIRST_MATCH)).isEqualTo(50);
+        assertThat(dfa.pairedTransitionMemory()).isPositive();
+
+        // A reset after the fourth of the last ten short searches clears the streak, as one by
+        // another thread would, and the count keeps the six that follow it.
+        List<Integer> streaks = new ArrayList<>();
+        List<Boolean> pairedDisabled = new ArrayList<>();
+        assertThat(countObservingPairedStreak(program, alternating, 44, streaks, pairedDisabled)).isEqualTo(50);
+        assertThat(streaks).isEqualTo(Collections.nCopies(50, 0));
+        assertThat(dfa.shortPairedSearchCount()).isEqualTo(6);
+
+        // The first count after the reset builds paired rows again and makes no paired search.
+        // The next one goes on from the six: its tenth search reaches the limit and rejects the
+        // paired rows, and its next search releases them.
+        Slice shortRun = utf8Slice("an; ".repeat(12) + padding);
+        assertThat(Dfa.countMatches(program, shortRun, Prog.MatchKind.FIRST_MATCH)).isEqualTo(12);
+        assertThat(dfa.shortPairedSearchCount()).isEqualTo(6);
+        streaks.clear();
+        pairedDisabled.clear();
+        assertThat(countObservingPairedStreak(program, shortRun, -1, streaks, pairedDisabled)).isEqualTo(12);
+        assertThat(streaks).isEqualTo(Collections.nCopies(12, 6));
+        assertThat(pairedDisabled.indexOf(true)).isEqualTo(10);
+        assertThat(dfa.shortPairedSearchCount()).isEqualTo(16);
+    }
+
+    // Counts every match of `text`, recording at each match end the DFA's short paired search
+    // streak and whether its paired transitions are disabled, and resets the DFA's cache at the
+    // end of match `resetAfter`.
+    private static long countObservingPairedStreak(Prog program, Slice text, int resetAfter, List<Integer> streaks, List<Boolean> pairedDisabled)
+    {
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        long counted = Dfa.countMatches(program, text, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
+            streaks.add(dfa.shortPairedSearchCount());
+            pairedDisabled.add(dfa.pairedTransitionsDisabled());
+            if (streaks.size() == resetAfter) {
+                dfa.resetCacheExternal();
+            }
+            return true;
+        }, null);
+        return Dfa.countStopCount(counted);
     }
 
     @Test

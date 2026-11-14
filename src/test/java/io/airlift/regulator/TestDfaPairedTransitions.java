@@ -70,8 +70,8 @@ public class TestDfaPairedTransitions
         Dfa.StateData start = dfa.analyzeStart(tables, matchingInput, textBegin, textEnd, false, true);
         byte[] bytes = matchingInput.byteArray();
         assertThat(Dfa.FLAT_PAIRED_ROWS
-                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false)
-                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false))
+                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false)
+                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false))
                 .isEqualTo(matchingInput.length());
 
         assertThat(Dfa.search(program, matchingInput, false, Prog.MatchKind.FIRST_MATCH, true))

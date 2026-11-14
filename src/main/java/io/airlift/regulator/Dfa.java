@@ -235,6 +235,9 @@ final class Dfa
     private static final long QUIT_CANDIDATE_RESULT_BASE = -2;
     private static final long COUNT_SCAN_REJECTED_MATCH_FLAG = 1L << Integer.SIZE;
     private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
+    // A count's search that ended at a first match found through paired rows, which the count
+    // records in its own short paired search streak rather than the search in the DFA's.
+    private static final long COUNT_PAIRED_MATCH_FLAG = 1L << (Integer.SIZE + 2);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
     private static final long COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE = Long.MIN_VALUE + 2;
     // Unproductive searches of one count in a row, after which the count's remaining searches take
@@ -907,8 +910,8 @@ final class Dfa
                     tables = dfa.requestPairedTransitions(tables);
                     if (dfa.hasPairedTransitions(tables, startOffset)) {
                         return FLAT_PAIRED_ROWS
-                                ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch)
-                                : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch);
+                                ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false)
+                                : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false);
                     }
                 }
                 return searchForward(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch);
@@ -1079,105 +1082,128 @@ final class Dfa
         if (dfa.countSelfLoopUnproductiveCount != selfLoopUnproductiveCount) {
             dfa.countSelfLoopUnproductiveCount = selfLoopUnproductiveCount;
         }
+        // The count keeps the DFA's short paired search streak to itself: it reads the shared hint
+        // here, records each of its searches that ends at a paired first match, and stores the
+        // streak back once when it ends, so concurrent counts do not store to the hint at every
+        // match. A reset clears the hint, so the first paired match after one reads it again; a
+        // count with no paired match after a reset drops the streak it kept from before it.
+        int shortPairedSearchResetCount = dfa.resetCount();
+        int storedShortPairedSearchCount = dfa.shortPairedSearchCount;
+        int shortPairedSearchCount = storedShortPairedSearchCount;
         long count = 0;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         // The reset count a lock-free count began with when it handed resets it saw to the lock,
         // or -1.
         int handedOffResetCount = -1;
-        while (true) {
-            boolean exclusiveSearch = requiresExclusiveSearch;
-            if (!exclusiveSearch) {
-                observedCacheVersion = dfa.cacheVersion();
-            }
-            CacheTables tables = dfa.beginSearch(exclusiveSearch);
-            if (exclusiveSearch) {
-                if (handedOffResetCount >= 0) {
-                    // The cache changed with the resets handed over, so they are judged under
-                    // the lock rather than forgiven. Giving the table back changes no tables, so
-                    // the count searches again on the ones it just read.
-                    if (dfa.countResetsTooOften(handedOffResetCount, true)) {
-                        dfa.cancelExclusiveSearch();
-                        return COUNT_BAILED;
-                    }
+        try {
+            while (true) {
+                boolean exclusiveSearch = requiresExclusiveSearch;
+                if (!exclusiveSearch) {
+                    observedCacheVersion = dfa.cacheVersion();
                 }
-                else if (dfa.cacheVersion() != observedCacheVersion) {
-                    dfa.cancelExclusiveSearch();
-                    requiresExclusiveSearch = false;
-                    continue;
-                }
-            }
-            try {
-                // A locked count that took over resets goes on counting from the same start.
-                int initialResetCount = handedOffResetCount >= 0 ? handedOffResetCount : dfa.resetCount();
-                while (textBegin <= contextEnd) {
-                    long matchEnd = searchForwardForCount(
-                            dfa,
-                            tables,
-                            prog,
-                            bytes,
-                            contextBegin,
-                            contextEnd,
-                            textBegin,
-                            fixedDistanceCandidates,
-                            startByteScanSet,
-                            resampleStartByteScanSet,
-                            searchSampling);
-                    if (sampling != null) {
-                        sampling.selfLoopUnproductiveCount = dfa.countSelfLoopUnproductiveCount;
-                    }
-                    // Reload, so a long exclusive count does not keep superseded tables reachable.
-                    tables = dfa.tablesAfterWrite(tables);
-                    if (matchEnd == SEARCH_FAILED) {
-                        return COUNT_BAILED;
-                    }
-                    if (matchEnd == SEARCH_NO_MATCH) {
-                        return countStopResult(count, end);
-                    }
-                    if (matchEnd <= 0) {
-                        return COUNT_UNSUPPORTED;
-                    }
-                    boolean byteScanRejected = (matchEnd & COUNT_SCAN_REJECTED_MATCH_FLAG) != 0;
-                    if ((matchEnd & COUNT_START_BYTE_SCAN_PROMOTED_FLAG) != 0) {
-                        startByteScanSet = dfa.startByteScanSet;
-                        resampleStartByteScanSet = false;
-                    }
-                    matchEnd &= COUNT_MATCH_LENGTH_MASK;
-                    if (byteScanRejected && dfa.countResetsTooOften(initialResetCount, exclusiveSearch)) {
-                        // A lock-free count cannot reset, so the resets it saw are other searches',
-                        // and the pointer table may have caused them. Giving the table back needs
-                        // the lock, so the count hands the decision to it, keeping the matches
-                        // already counted; the locked count searches again from the previous match's
-                        // end and finds this match again.
-                        // It hands over only while the table is held or withheld and not given
-                        // back, or when another search gave it back after these resets were judged;
-                        // a DFA that never had one, or gave it back before, gives up here as before.
-                        if (!exclusiveSearch && dfa.countHandsResetsToLock(initialResetCount)) {
-                            handedOffResetCount = initialResetCount;
-                            throw RETRY_SEARCH;
-                        }
-                        return COUNT_BAILED;
-                    }
-                    textBegin += (int) matchEnd;
-                    count++;
-                    if (!continueCounting.test(textBegin - contextBegin)) {
-                        return countStopResult(count, textBegin - contextBegin);
-                    }
-                }
-                return countStopResult(count, end);
-            }
-            catch (StartStateAllocationException | QuitSearchException ignored) {
-                return COUNT_UNSUPPORTED;
-            }
-            catch (RetrySearchException ignored) {
+                CacheTables tables = dfa.beginSearch(exclusiveSearch);
                 if (exclusiveSearch) {
-                    throw new AssertionError("exclusive DFA count requested a retry");
+                    if (handedOffResetCount >= 0) {
+                        // The cache changed with the resets handed over, so they are judged under
+                        // the lock rather than forgiven. Giving the table back changes no tables, so
+                        // the count searches again on the ones it just read.
+                        if (dfa.countResetsTooOften(handedOffResetCount, true)) {
+                            dfa.cancelExclusiveSearch();
+                            return COUNT_BAILED;
+                        }
+                    }
+                    else if (dfa.cacheVersion() != observedCacheVersion) {
+                        dfa.cancelExclusiveSearch();
+                        requiresExclusiveSearch = false;
+                        continue;
+                    }
                 }
-                requiresExclusiveSearch = true;
+                try {
+                    // A locked count that took over resets goes on counting from the same start.
+                    int initialResetCount = handedOffResetCount >= 0 ? handedOffResetCount : dfa.resetCount();
+                    while (textBegin <= contextEnd) {
+                        long matchEnd = searchForwardForCount(
+                                dfa,
+                                tables,
+                                prog,
+                                bytes,
+                                contextBegin,
+                                contextEnd,
+                                textBegin,
+                                fixedDistanceCandidates,
+                                startByteScanSet,
+                                resampleStartByteScanSet,
+                                searchSampling);
+                        if (sampling != null) {
+                            sampling.selfLoopUnproductiveCount = dfa.countSelfLoopUnproductiveCount;
+                        }
+                        // Reload, so a long exclusive count does not keep superseded tables reachable.
+                        tables = dfa.tablesAfterWrite(tables);
+                        if (matchEnd == SEARCH_FAILED) {
+                            return COUNT_BAILED;
+                        }
+                        if (matchEnd == SEARCH_NO_MATCH) {
+                            return countStopResult(count, end);
+                        }
+                        if (matchEnd <= 0) {
+                            return COUNT_UNSUPPORTED;
+                        }
+                        boolean byteScanRejected = (matchEnd & COUNT_SCAN_REJECTED_MATCH_FLAG) != 0;
+                        if ((matchEnd & COUNT_START_BYTE_SCAN_PROMOTED_FLAG) != 0) {
+                            startByteScanSet = dfa.startByteScanSet;
+                            resampleStartByteScanSet = false;
+                        }
+                        // Recorded before a hand-off to the lock, whose search finds this match
+                        // again and records it again, as a search recording it in the DFA would.
+                        if ((matchEnd & COUNT_PAIRED_MATCH_FLAG) != 0) {
+                            if (dfa.resetCount() != shortPairedSearchResetCount) {
+                                shortPairedSearchResetCount = dfa.resetCount();
+                                storedShortPairedSearchCount = dfa.shortPairedSearchCount;
+                                shortPairedSearchCount = storedShortPairedSearchCount;
+                            }
+                            shortPairedSearchCount = dfa.nextShortPairedSearchCount(shortPairedSearchCount, (int) matchEnd);
+                        }
+                        matchEnd &= COUNT_MATCH_LENGTH_MASK;
+                        if (byteScanRejected && dfa.countResetsTooOften(initialResetCount, exclusiveSearch)) {
+                            // A lock-free count cannot reset, so the resets it saw are other searches',
+                            // and the pointer table may have caused them. Giving the table back needs
+                            // the lock, so the count hands the decision to it, keeping the matches
+                            // already counted; the locked count searches again from the previous match's
+                            // end and finds this match again.
+                            // It hands over only while the table is held or withheld and not given
+                            // back, or when another search gave it back after these resets were judged;
+                            // a DFA that never had one, or gave it back before, gives up here as before.
+                            if (!exclusiveSearch && dfa.countHandsResetsToLock(initialResetCount)) {
+                                handedOffResetCount = initialResetCount;
+                                throw RETRY_SEARCH;
+                            }
+                            return COUNT_BAILED;
+                        }
+                        textBegin += (int) matchEnd;
+                        count++;
+                        if (!continueCounting.test(textBegin - contextBegin)) {
+                            return countStopResult(count, textBegin - contextBegin);
+                        }
+                    }
+                    return countStopResult(count, end);
+                }
+                catch (StartStateAllocationException | QuitSearchException ignored) {
+                    return COUNT_UNSUPPORTED;
+                }
+                catch (RetrySearchException ignored) {
+                    if (exclusiveSearch) {
+                        throw new AssertionError("exclusive DFA count requested a retry");
+                    }
+                    requiresExclusiveSearch = true;
+                }
+                finally {
+                    dfa.endSearch(exclusiveSearch);
+                }
             }
-            finally {
-                dfa.endSearch(exclusiveSearch);
-            }
+        }
+        finally {
+            dfa.storeCountShortPairedSearchCount(storedShortPairedSearchCount, shortPairedSearchResetCount, shortPairedSearchCount);
         }
     }
 
@@ -1921,8 +1947,8 @@ final class Dfa
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
                 long result = FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
+                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true)
+                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true);
                 if (selfLoopScanNotApplicable) {
                     dfa.countSelfLoopUnproductiveCount++;
                 }
@@ -2102,8 +2128,8 @@ final class Dfa
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     // Measure from the search start so the short-search hint sees the whole search.
                     long result = FLAT_PAIRED_ROWS
-                            ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false)
-                            : searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+                            ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true)
+                            : searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true);
                     recordCountSelfLoopScanProductivity(dfa, productive);
                     return result;
                 }
@@ -2375,8 +2401,8 @@ final class Dfa
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
                 return FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
+                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false)
+                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false);
             }
         }
         return searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
@@ -3377,8 +3403,11 @@ final class Dfa
     }
 
     // The result is measured from resultBegin, which precedes textBegin when the caller has
-    // already consumed part of the search. Copied as `searchForwardPairsFlat`; keep the copy in
-    // step. This object-row form and its helpers stay unchanged so x86 keeps its measured code.
+    // already consumed part of the search. A search that ends at a paired first match records it
+    // in the DFA's short paired search streak, or, when `countRecordsPairedMatch` is set, returns
+    // it with COUNT_PAIRED_MATCH_FLAG for the count to record. Copied as `searchForwardPairsFlat`;
+    // keep the copy in step. This object-row form keeps its measured decoding loop for x86; the
+    // count's flag adds one branch at the paired-match exit, outside the loop.
     static long searchForwardPairs(
             DfaInstance dfa,
             CacheTables tables,
@@ -3389,7 +3418,8 @@ final class Dfa
             int ctxEnd,
             int startOffset,
             boolean endMatch,
-            boolean wantEarliestMatch)
+            boolean wantEarliestMatch,
+            boolean countRecordsPairedMatch)
     {
         Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
         byte[] byteMap = dfa.bytemap;
@@ -3413,7 +3443,8 @@ final class Dfa
                         ctxEnd,
                         stateRefs,
                         endMatch,
-                        wantEarliestMatch);
+                        wantEarliestMatch,
+                        countRecordsPairedMatch);
             }
             stateRefs = (Object[]) nextRef;
             position += 2;
@@ -3439,7 +3470,8 @@ final class Dfa
             int ctxEnd,
             Object[] stateRefs,
             boolean endMatch,
-            boolean wantEarliestMatch)
+            boolean wantEarliestMatch,
+            boolean countRecordsPairedMatch)
     {
         int nextSize = dfa.nextSize;
         int pairedClassCount = nextSize * nextSize;
@@ -3467,6 +3499,10 @@ final class Dfa
                         endMatch,
                         wantEarliestMatch);
                 if (result >= 0) {
+                    // A count records the match in its own streak; the flag needs a nonempty match.
+                    if (countRecordsPairedMatch && result > 0) {
+                        return result | COUNT_PAIRED_MATCH_FLAG;
+                    }
                     dfa.recordPairedSearch((int) result);
                 }
                 return result;
@@ -3659,7 +3695,8 @@ final class Dfa
             int ctxEnd,
             int startOffset,
             boolean endMatch,
-            boolean wantEarliestMatch)
+            boolean wantEarliestMatch,
+            boolean countRecordsPairedMatch)
     {
         MemorySegment flatPairedRows = tables.flatPairedRows;
         byte[] byteMap = dfa.bytemap;
@@ -3683,7 +3720,8 @@ final class Dfa
                         ctxEnd,
                         rowOffset,
                         endMatch,
-                        wantEarliestMatch);
+                        wantEarliestMatch,
+                        countRecordsPairedMatch);
             }
             rowOffset = nextRowOffset;
             position += 2;
@@ -3709,7 +3747,8 @@ final class Dfa
             int ctxEnd,
             int rowOffset,
             boolean endMatch,
-            boolean wantEarliestMatch)
+            boolean wantEarliestMatch,
+            boolean countRecordsPairedMatch)
     {
         int nextSize = dfa.nextSize;
         int stateOffset = getPairedSlot(tables.flatPairedRows, rowOffset + (nextSize * nextSize * Integer.BYTES));
@@ -3736,6 +3775,10 @@ final class Dfa
                         endMatch,
                         wantEarliestMatch);
                 if (result >= 0) {
+                    // A count records the match in its own streak; the flag needs a nonempty match.
+                    if (countRecordsPairedMatch && result > 0) {
+                        return result | COUNT_PAIRED_MATCH_FLAG;
+                    }
                     dfa.recordPairedSearch((int) result);
                 }
                 return result;
@@ -6814,6 +6857,10 @@ final class Dfa
         // state or transition publication, not while unwinding a failed exclusive mutation.
         private long cacheContentVersion;
         private long pairedContentVersion = -1;
+        // The paired searches in a row that ended at a first match within SHORT_PAIRED_SEARCH_BYTES
+        // of their start, a racy hint every thread searching the pattern shares; at
+        // SHORT_PAIRED_SEARCH_LIMIT it rejects paired rows. A find records its search here; a
+        // count keeps the streak to itself and stores it when it ends.
         private int shortPairedSearchCount;
         private boolean absolutePointerTransitionsRequested;
         // A pointer table has been published to the tables. It stays set through resets and the
@@ -8136,26 +8183,42 @@ final class Dfa
 
         private void recordPairedSearch(int searchedBytes)
         {
+            int count = shortPairedSearchCount;
+            int nextCount = nextShortPairedSearchCount(count, searchedBytes);
+            // Concurrent searches share this hint; storing only a change keeps long searches
+            // from writing its cache line every time.
+            if (nextCount != count) {
+                shortPairedSearchCount = nextCount;
+            }
+        }
+
+        // Returns the short paired search streak that follows `count` after a paired search that
+        // ended at a first match `searchedBytes` from its start, and rejects paired rows when the
+        // streak reaches the limit.
+        int nextShortPairedSearchCount(int count, int searchedBytes)
+        {
             if (searchedBytes >= SHORT_PAIRED_SEARCH_BYTES) {
-                // Concurrent searches share this hint; storing only a change keeps long searches
-                // from writing its cache line every time.
-                if (shortPairedSearchCount != 0) {
-                    shortPairedSearchCount = 0;
-                }
-                return;
+                return 0;
             }
-
-            if (++shortPairedSearchCount < SHORT_PAIRED_SEARCH_LIMIT) {
-                return;
+            if (++count >= SHORT_PAIRED_SEARCH_LIMIT) {
+                // The hint is intentionally racy: concurrent readers may change when the
+                // threshold is reached, but rejection only selects the equivalent compact path.
+                // This search has already completed, and an exclusive search cannot retry, so the
+                // next paired or pointer-table request releases the table under the exclusive
+                // cache protocol.
+                pairedTransitionsRejected = true;
+                pairedTransitionsRequested = false;
             }
+            return count;
+        }
 
-            // The hint is intentionally racy: concurrent readers may change when the
-            // threshold is reached, but rejection only selects the equivalent compact path.
-            // This search has already completed, and an exclusive search cannot retry, so the
-            // next paired or pointer-table request releases the table under the exclusive
-            // cache protocol.
-            pairedTransitionsRejected = true;
-            pairedTransitionsRequested = false;
+        // Stores the streak a count kept, which began from `storedCount` read after
+        // `storedResetCount` resets, when it changed and no reset has cleared the hint since.
+        void storeCountShortPairedSearchCount(int storedCount, int storedResetCount, int count)
+        {
+            if (count != storedCount && resetCount == storedResetCount) {
+                shortPairedSearchCount = count;
+            }
         }
 
         // Returns the tables the search reads next: these, or the current ones after a release.
@@ -8434,6 +8497,11 @@ final class Dfa
         int countSelfLoopUnproductiveCount()
         {
             return countSelfLoopUnproductiveCount;
+        }
+
+        int shortPairedSearchCount()
+        {
+            return shortPairedSearchCount;
         }
 
         int selfLoopStayRangeScanCount()
