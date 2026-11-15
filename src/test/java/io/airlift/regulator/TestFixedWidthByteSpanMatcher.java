@@ -154,6 +154,65 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
+    public void testCandidateByteSearch()
+    {
+        // A search for a candidate of one byte that never bails, in a pattern whose every
+        // position reads one byte, runs a loop with no scan choice or failure count: the everyday
+        // dates, UUIDs, and phone numbers in every language, but for Rust's Unicode \d, which
+        // reads characters. Both finds search once, and both counts once from the start and once
+        // from the end of each match.
+        Map<String, String> rows = Map.of(
+                "[0-9]{4}-[0-9]{2}-[0-9]{2}", "2025-12-09 and 2024-01-31",
+                "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "id 123e4567-e89b-12d3-a456-426614174000,00112233-4455-6677-8899-AABBCCDDEEFF",
+                "\\d{3}/\\d{3}/\\d{4}", "212/555/0101 or 650/555/0142");
+        for (Map.Entry<String, String> row : rows.entrySet()) {
+            String expression = row.getKey();
+            Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
+            patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
+            patterns.put("Trino " + expression, TrinoRegexp.compile(utf8Slice(expression)).re2());
+            for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
+                boolean readsCharacters = entry.getKey().equals("Rust \\d{3}/\\d{3}/\\d{4}");
+                assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice(row.getValue()), 2, !readsCharacters);
+            }
+        }
+
+        // A candidate of several bytes, one that can bail, a pattern that reads characters, and a
+        // block search keep the shared loops, and a search of at least 1,024 candidate positions
+        // takes the vector scan where the Vector API runs.
+        assertCandidateByteSearches("[0-9]{4}", matcher("[0-9]{4}"), utf8Slice("in 2024 and 2025"), 2, false);
+        assertCandidateByteSearches("Latin-1 [a-z]{3}\\xE0", optionalMatcher("[a-z]{3}\\xE0", Re2.Options.latin1()), wrappedBuffer(bytes('a', 'b', 'c', 0xE0, ' ', 'x', 'y', 'z', 0xE0)), 2, false);
+        assertCandidateByteSearches("[a-q][^u-z]{13}x", matcher("[a-q][^u-z]{13}x"), utf8Slice("a0123456789abcx"), 1, false);
+        if (VectorSupport.isAvailable()) {
+            for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns("\\w{5}\\s\\w{6}\\s\\w{7}").entrySet()) {
+                assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice("hello planet journey"), 1, false);
+            }
+        }
+        assertCandidateByteSearches("long [0-9]{4}-[0-9]{2}-[0-9]{2}", matcher("[0-9]{4}-[0-9]{2}-[0-9]{2}"), utf8Slice("b".repeat(2_048) + "2025-12-09"), 1, !VectorSupport.isAvailable());
+    }
+
+    // Runs each entry over `input`, with a region search that ends a byte early, and checks the
+    // candidate byte searches each ran: none, or one for each find and one more than the
+    // matches for each count.
+    private static void assertCandidateByteSearches(String label, FixedWidthByteSpanMatcher matcher, Slice input, long matches, boolean searchesCandidateByte)
+    {
+        long[] searches = new long[4];
+        long before = matcher.candidateByteSearchCountForDiagnostics();
+        matcher.findSpan(input, 0);
+        searches[0] = matcher.candidateByteSearchCountForDiagnostics() - before;
+        before += searches[0];
+        matcher.findSpanOrBail(input, 0, input.length() - 1);
+        searches[1] = matcher.candidateByteSearchCountForDiagnostics() - before;
+        before += searches[1];
+        assertThat(matcher.count(input)).as(label).isEqualTo(matches);
+        searches[2] = matcher.candidateByteSearchCountForDiagnostics() - before;
+        before += searches[2];
+        assertThat(matcher.countOrBail(input)).as(label).isEqualTo(matches);
+        searches[3] = matcher.candidateByteSearchCountForDiagnostics() - before;
+        long[] expected = searchesCandidateByte ? new long[] {1, 1, matches + 1, matches + 1} : new long[4];
+        assertThat(searches).as(label).containsExactly(expected);
+    }
+
+    @Test
     public void testFalseCandidatesLogicalOffsetsAndAdjacentMatches()
     {
         FixedWidthByteSpanMatcher matcher = matcher("[0-9]{2}-[0-9]{2}");
@@ -1120,12 +1179,12 @@ public class TestFixedWidthByteSpanMatcher
         // Each pattern compiles from the least maxMemory at which the route without a program
         // fits; below it neither the matcher nor a program fits. Up to 8 KiB the inner literal
         // search of a shing pattern does not fit, so the matcher is the route. The last pattern
-        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4921 it
+        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4933 it
         // compiles only on the route without one.
         Map<String, Long> minimumMaxMemory = Map.of(
-                "[a-z]shing", 4465L,
-                "\\d{4}-\\d{2}-\\d{2}", 4561L,
-                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4921L);
+                "[a-z]shing", 4477L,
+                "\\d{4}-\\d{2}-\\d{2}", 4573L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4933L);
         for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
             Slice expression = utf8Slice(entry.getKey());
             for (long maxMemory = 256; maxMemory <= 8192; maxMemory++) {
@@ -1139,7 +1198,7 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
-        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4921));
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4933));
         assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
 
         // The repetitions of a repeated group share its positions' ranges, so the matcher charges
@@ -1150,8 +1209,8 @@ public class TestFixedWidthByteSpanMatcher
         // Where the program fits but neither the inner literal search nor the matcher fits beside
         // it, the pattern takes the route without a program, which reserves the matcher.
         Map<String, List<Long>> matcherOnlyMaxMemory = Map.of(
-                "[a-z]shing", List.of(5111L, 5125L),
-                "[a-z]{2}ing", List.of(5003L, 5028L));
+                "[a-z]shing", List.of(5123L, 5137L),
+                "[a-z]{2}ing", List.of(5015L, 5040L));
         for (Map.Entry<String, List<Long>> entry : matcherOnlyMaxMemory.entrySet()) {
             for (long maxMemory = entry.getValue().get(0); maxMemory <= entry.getValue().get(1); maxMemory++) {
                 String label = "%s at %s".formatted(entry.getKey(), maxMemory);

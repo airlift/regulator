@@ -2422,6 +2422,21 @@ position and the byte together made each load wait for the byte and take a
 range check: C2 compiled 16 aarch64 instructions for each verified position
 of `isoDate`, where it compiles 12 without the branch and 9 with it, for
 the position's own words, and 10 in 2.0.
+A search for a candidate of one byte that never bails, in a pattern whose
+every position reads one byte, as in the everyday `isoDate`, `uuid`, and
+`trinoPhone` patterns, runs a loop of its own below the vector scan's cutoff:
+`Slice.indexOf` and the check, with no scan choice, failure count, or
+resampling. In the loop the other searches share, those values stayed live
+across `Slice.indexOf` and each check, and C2 spilled them: the path from an
+`indexOf` hit of Trino `uuid` back to the next search loaded or stored the
+stack 48 times, against 2 in 2.0 and in the loop of its own, and its 8-byte
+`indexOf` loop reloaded a value on every step. A count runs that search again
+from the end of each match, which C2 compiles apart and calls once for each
+match and once more to end the count, as 2.0's count did: a count kept in the
+search's loop stayed live across `Slice.indexOf`, and a Trino `uuid` count
+stored 14 values to the stack each time it searched for a candidate. With the
+masks addressed by the byte as well, the shared loop made the reused rows of
+these patterns 1.16-1.18x their 2.0 time in every language, on both platforms.
 Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
 keeps that pattern as fast as the engine on Russian text; scanning the letter
 took 1.3-2.1x the time.

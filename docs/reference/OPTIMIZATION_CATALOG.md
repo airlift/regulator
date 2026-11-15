@@ -1892,6 +1892,8 @@ ordinary engine would.
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
   `FixedWidthByteSpanMatcher.containsByte`,
+  `FixedWidthByteSpanMatcher.searchCandidateByte`,
+  `FixedWidthByteSpanMatcher.countCandidateBytes`,
   `CompiledPattern.shortFixedWidthByteMatcher`,
   `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
 - **Applies when:** Capture-free patterns, other than exact literals, of a
@@ -1914,7 +1916,10 @@ ordinary engine would.
   with the branch and 0.96-1.05 without it. The ranges span per-row
   geomeans across languages and operations. Only Latin-1 and Rust
   byte patterns that accept bytes above ASCII retain two more words a
-  position. When
+  position. With one-byte positions and a one-byte candidate that never bails,
+  a search below the vector scan's cutoff, or any search without the Vector
+  API, runs a separate loop of `Slice.indexOf` and the check, and a count
+  repeats that search from each match end. When
   an ASCII pattern of up to 64 bytes has a position accepting exactly one byte,
   the matcher scans for the byte accepted by the first such position, as the
   [rare class scan](#fixed-width-rare-class-scan) scans a position of one first
