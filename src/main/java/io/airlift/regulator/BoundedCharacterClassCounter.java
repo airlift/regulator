@@ -118,6 +118,9 @@ final class BoundedCharacterClassCounter
     // after which it skips the rest of the run.
     private final int decidedRunLength;
     private final boolean readsBytes;
+    // Whether `count` reads only where runs start: a byte class repeated at least once with no
+    // maximum, such as `\s+`, matches each run once however long it is.
+    private final boolean countsRunStarts;
     // Every code point from this one on is a member, beyond the bitset or not: U+0080 for a class
     // holding every non-ASCII character, the low end of a last range that runs to U+10FFFF for any
     // other UTF-8 class, and `NO_TAIL` otherwise.
@@ -136,6 +139,10 @@ final class BoundedCharacterClassCounter
     // assign the field, because an initializer would make it a compile-time constant that javac
     // inlines.
     private final long lowBits;
+    // The counts that took `countRunStarts`, counted only when tests turn on the DFA's route counts:
+    // every thread counting with a compiled pattern shares this counter. With `countsRunStarts`,
+    // it adds 8 bytes to the instance, where a long would add 16.
+    private int runStartRouteCount;
 
     private BoundedCharacterClassCounter()
     {
@@ -150,6 +157,7 @@ final class BoundedCharacterClassCounter
         maximum = 0;
         decidedRunLength = 0;
         readsBytes = false;
+        countsRunStarts = false;
         firstTailMember = NO_TAIL;
         hasTail = false;
         matchesAllNonAscii = false;
@@ -198,6 +206,7 @@ final class BoundedCharacterClassCounter
         this.maximum = maximum;
         this.decidedRunLength = maximum == -1 && matchesEveryCharacter ? minimum : maximum;
         this.readsBytes = readsBytes;
+        this.countsRunStarts = readsBytes && minimum == 1 && maximum == -1;
         this.firstTailMember = firstTailMember;
         this.hasTail = firstTailMember != NO_TAIL;
         this.matchesAllNonAscii = matchesAllNonAscii;
@@ -419,6 +428,16 @@ final class BoundedCharacterClassCounter
         return decidedRunLength != maximum;
     }
 
+    /// The counts that read where runs start rather than how long they are. Only tests count
+    /// them, under the DFA's route count switch.
+    int runStartRouteCountForDiagnostics()
+    {
+        if (!Dfa.COUNTS_ROUTES) {
+            throw new IllegalStateException("Route counting is off; set -Dio.airlift.regulator.dfa.route-counts=true");
+        }
+        return runStartRouteCount;
+    }
+
     long estimatedRetainedSize()
     {
         return INSTANCE_SIZE + SizeOf.sizeOf(matchingCodePoints) + SizeOf.sizeOf(memberStartBytes) + SizeOf.sizeOf(memberStartByteNibbleTables);
@@ -531,7 +550,7 @@ final class BoundedCharacterClassCounter
     }
 
     // Decoding and bitset membership replace one complete matcher invocation per result. The
-    // loops are in `countBytes`, `countUtf8`, and `countDecoded`.
+    // loops are in `countRunStarts`, `countBytes`, `countUtf8`, and `countDecoded`.
     long count(Slice input)
     {
         if (input.length() < minimumBytes) {
@@ -541,9 +560,40 @@ final class BoundedCharacterClassCounter
         int position = input.byteArrayOffset();
         int end = position + input.length();
         if (readsBytes) {
-            return countBytes(bytes, position, end);
+            return countsRunStarts ? countRunStarts(bytes, position, end) : countBytes(bytes, position, end);
         }
         return countUtf8(bytes, position, end);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: A byte class repeated at least once with no maximum matches
+    // each run once, so the count is the number of members that begin the input or follow a
+    // nonmember. Each byte's membership depends only on that byte. The loop carries the previous
+    // membership bit and the count, with no run-length update. `countBytes`
+    // tracks each run's length instead, passing it from byte to byte with about twice the
+    // instructions per byte, and since it replaced the branch on membership, `\s+` counts of
+    // short rows got slower. Changes require focused Intel and Graviton qualification.
+    private long countRunStarts(byte[] bytes, int position, int end)
+    {
+        countRunStartRoute();
+        long[] members = matchingCodePoints;
+        int previousMember = 0;
+        // A run takes at least one byte, so the count stays within the input's length.
+        int count = 0;
+        for (; position < end; position++) {
+            int value = bytes[position] & 0xFF;
+            int member = (int) (members[value >>> 6] >>> value) & 1;
+            count += member & ~previousMember;
+            previousMember = member;
+        }
+        return count;
+    }
+
+    // A call site is smaller bytecode than a field increment, so counting grows no caller.
+    private void countRunStartRoute()
+    {
+        if (Dfa.COUNTS_ROUTES) {
+            runStartRouteCount++;
+        }
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: A run ends at every word boundary of ordinary text, too
