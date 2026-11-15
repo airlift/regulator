@@ -2402,6 +2402,26 @@ scan reads held live across a short one, made short rows up to 3.6% slower on
 Graviton and 8.5% on x86-64. The accepted shape takes Trino `isoDate`
 `reusedCount` from 21.4 to 22.1 ns on x86-64, 1.035 of its earlier time, and
 ties on Graviton.
+The following timing ratios are from B16's four-host-per-platform A/B
+against `47eaddfd9`. Ranges span language/operation cell geomeans of
+same-host ratios.
+A position checks an ASCII byte against two words of its own, its members
+below 64 and that word XOR its members from 64 to 127, both loaded by the
+position alone, so the loads can run while the byte is read. The byte's bit 6
+selects the low word or reconstructs the high word without a branch. A branch
+on it, as 2.0 took, mispredicted on prose, which mixes letters with spaces and
+punctuation, and made the
+82-position `[a-q][^u-z]{80}x` and `[a-q][^u-z]{80}[x\xE0-\xFF]` rows
+1.08-1.25x their earlier time on Graviton and up to 1.48x on x86-64, while the
+short date, UUID, and phone rows ran in 0.80-0.90 of it. Without the branch,
+the wide rows run in 0.96-1.05 of their earlier time on Graviton and 0.98-1.02
+on x86-64, and the short rows in 0.90-0.97 and 0.84-1.00. Only a Latin-1 or
+Rust byte pattern with a class above ASCII also holds two words a position for
+the bytes above ASCII, which only such a byte reads. One array addressed by the
+position and the byte together made each load wait for the byte and take a
+range check: C2 compiled 16 aarch64 instructions for each verified position
+of `isoDate`, where it compiles 12 without the branch and 9 with it, for
+the position's own words, and 10 in 2.0.
 Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
 keeps that pattern as fast as the engine on Russian text; scanning the letter
 took 1.3-2.1x the time.
