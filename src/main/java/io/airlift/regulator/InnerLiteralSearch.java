@@ -105,7 +105,14 @@ import static java.util.Objects.requireNonNull;
 /// a single ASCII byte class, alone or repeated at least once, and the byte after it is outside
 /// that class, as the `ing` of `kingdom` is for `\s[a-zA-Z]{0,12}ing\s`, or when a word boundary
 /// or non-boundary right after it rules out the ASCII byte after it, as a word byte after the `nn`
-/// of `\b\w+nn\b` does. A skipped hit is no candidate, so it never makes the search fall back.
+/// of `\b\w+nn\b` does. A skipped hit is no candidate, so it never makes the search fall back near
+/// its start or inside text a confirmation read. A dense run of them does, by a heuristic that
+/// limits repeated scan restarts and gate tests: after at least [#MINIMUM_DENSE_REJECTED_HITS]
+/// rejected hits, the search falls back to the ordinary engine when the distance from the
+/// search start to the current hit averages fewer than [#DENSE_REJECTED_HIT_SPACING] bytes per
+/// rejected hit, as the hits of `awyerinn` do for `([A-Z]awyer|[A-Z]inn)[0-9\s]`. There the
+/// ordinary engine's start-byte scan for `[A-Z]` passes the rejected run; other patterns, such
+/// as `\b\w+nn\b`, can require DFA steps over it.
 ///
 /// A [count's search][#searchForCount] skips the forward DFA where every match provably ends at its
 /// literal's end: it asks the reverse DFA only whether some start exists, and takes the literal's
@@ -123,6 +130,16 @@ final class InnerLiteralSearch
     static final int MINIMUM_LITERAL_SET_SEARCH_BYTES = 256;
     // A first candidate closer than this to the search start leaves too few bytes to skip.
     static final int MINIMUM_SKIPPED_BYTES = 64;
+    // A gated search that has rejected at least this many hits, fewer than
+    // DENSE_REJECTED_HIT_SPACING bytes apart on average since the search start, falls back. The
+    // prefix before the triggering hit is then shorter than that many bytes per rejected hit;
+    // literal verification and scanner lookahead can read beyond it. Rebar's
+    // folly/awyer-inn-busted rejects a hit about every 3.9 bytes. Once 64 were rejected, no other
+    // rebar row's search, in any language, averaged under 10.1 bytes between them, the least
+    // being lh3lh3 date counted as one text, whose grep lines hold at most 58 rejected hits; see
+    // REGULATOR_DECISIONS.md, Inner Literal Byte Gates.
+    static final int MINIMUM_DENSE_REJECTED_HITS = 64;
+    static final int DENSE_REJECTED_HIT_SPACING = 8;
 
     // The safety proofs recurse over the prefix. Past this depth each one stops with its
     // conservative answer, which keeps the proofs stack safe, as MatchLength bounds its own
@@ -820,7 +837,10 @@ final class InnerLiteralSearch
     /// literal's length, and one byte past that for the gate after a hit, and the gates before a
     /// hit read only bytes of the window. Within that read a shorter member of a set can start
     /// past the near bytes, where the search does not fall back. As in the search, a hit that
-    /// fails the byte gates is no candidate, so the check looks past it.
+    /// fails the byte gates is no candidate, so the check looks past it. It does not count such
+    /// hits, so where a [dense run][#MINIMUM_DENSE_REJECTED_HITS] of them makes the search fall
+    /// back, the check can still report no near candidate, and a count hands back to the search
+    /// at the next match end.
     boolean fallsBackNearStart(Slice text, int start, int end)
     {
         int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + maximumLiteralLength);
@@ -887,9 +907,13 @@ final class InnerLiteralSearch
     /// or, where the gate after that literal admits one byte alone, the first occurrence of the
     /// literal followed by that byte; see `CompiledPattern.findFromRequiredLiteral`. The search
     /// starts there, rather than scanning the window from `start` again, and returns what [#search]
-    /// returns. Before `literalStart` lies no hit, or, where the gate after the literal admits one
-    /// byte alone, none that passes that gate, and a hit that fails a gate changes no state of the
-    /// loop, so the loop reaches `literalStart` as [#search] does. A search without a gate falls
+    /// returns, unless hits before `literalStart` would make [#search] fall back. Before
+    /// `literalStart` lies no hit, or, where the gate after the literal admits one byte alone, none
+    /// that passes that gate, and a hit that fails a gate changes no state of the loop but its
+    /// count of [dense rejected hits][#MINIMUM_DENSE_REJECTED_HITS], so the loop reaches
+    /// `literalStart` as [#search] does. The caller's scan passed those earlier hits without
+    /// stopping at each, so they are not counted, and where [#search] would fall back on a dense
+    /// run of them, this search goes on from `literalStart`. A search without a gate falls
     /// back on a first hit near the start, as the first step of [#search] does, and otherwise
     /// continues as that loop does after its first scan.
     long searchFromCheckedHit(Slice text, int contextStart, int contextEnd, int start, int end, int literalStart)
@@ -1013,8 +1037,8 @@ final class InnerLiteralSearch
     }
 
     // The search loop of a pattern with a byte gate, from the hit at `firstLiteralStart`: as in
-    // search, with each hit first checked against the gates, so the fallbacks see only the hits
-    // that pass.
+    // search, with each hit first checked against the gates, so the near-start and reread
+    // fallbacks see only the hits that pass, and a dense run of hits that fail falls back.
     private long searchGatedFrom(Slice text, int contextStart, int contextEnd, int start, int end, int firstLiteralStart, boolean toLiteralEnd)
     {
         // The reverse search may read back to the end of the previous candidate, and a candidate
@@ -1022,6 +1046,7 @@ final class InnerLiteralSearch
         int minimumMatchStart = start;
         int minimumLiteralStart = start;
         boolean firstCandidate = true;
+        int rejectedHits = 0;
         for (int literalStart = firstLiteralStart; literalStart >= 0; literalStart = nextLiteral(text, literalStart + 1, end)) {
             if (!passesByteGates(text, start, literalStart, end)) {
                 // No match uses the literal here, which is all a rejection by the DFAs would tell
@@ -1031,7 +1056,11 @@ final class InnerLiteralSearch
                 // fall back. Nor does the hit make the search fall back: near the start, where a
                 // slash after a letter would send a window holding a date to the ordinary engine,
                 // or inside text a confirmation read, since a skipped hit runs no DFA to read that
-                // text again.
+                // text again. A dense run of rejected hits triggers the density fallback; see
+                // REGULATOR_DECISIONS.md, Inner Literal Byte Gates.
+                if (++rejectedHits >= MINIMUM_DENSE_REJECTED_HITS && (literalStart - start) / DENSE_REJECTED_HIT_SPACING < rejectedHits) {
+                    return FALLBACK;
+                }
                 continue;
             }
             if (firstCandidate && literalStart - start < MINIMUM_SKIPPED_BYTES) {

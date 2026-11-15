@@ -632,14 +632,17 @@ so the automata run only where a match can be.
   byte classes at several offsets around a literal hit in one shufti test
   ([program_runtime.c][hs-check-shufti] `CHECK_SHUFTI`); Inspired by the Rust
   regex crate ([#152]). Regulator: gates taken from the reverse prefix program,
-  with gated hits kept out of the fallbacks ([#152], [design][d-byte-gates]).
+  with gate-rejected hits kept out of the near-start and reread fallbacks
+  ([#152], [design][d-byte-gates]).
 - **Where:** `InnerLiteralSearch.searchGated`,
   `InnerLiteralSearch.passesByteGates`, `InnerLiteralSearch.suffixGate`,
   `Prog.boundaryPositionByteSets`
 - **Applies when:** Prefixes that cannot match empty, or literals followed by
   one ASCII class or a word boundary or non-boundary; the gate on the byte
   before the literal is dropped if it admits the literal's first byte, and the
-  following gate if it admits its last byte
+  following gate if it admits its last byte. A search falls back after at
+  least 64 gate-rejected hits when the bytes from the search start to the
+  current hit average fewer than 8 per rejected hit
 - **What it does:** The reverse prefix program supplies the bytes that can end
   the prefix, and those up to three bytes further back where it limits them,
   walked with assertions read as empty. A hit is skipped before either DFA
