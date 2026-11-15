@@ -66,6 +66,8 @@ public class TestInnerLiteralSearch
             "(\\s*)((?i:# noqa)(?::\\s?([A-Z]+[0-9]+))?)",
             "(\\w+)(@(\\w+))",
             "([A-Za-z]awyer|[A-Za-z]inn)\\s",
+            // rebar's folly/awyer-inn-busted, whose gate rejects every hit of awyerinn.
+            "([A-Z]awyer|[A-Z]inn)[0-9\\s]",
             "[a-z](?:inn|innk)\\s",
             "[a-z](?:aba|bab)\\s",
             "\\s(?:foo|barbaz)\\d",
@@ -982,6 +984,36 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testFallsBackOnDenseRejectedHits()
+    {
+        // In rebar's folly/awyer-inn-busted, awyerinn holds two hits of the set every eight bytes,
+        // and each fails the gate before it, which needs a capital. The literal scan skips no text
+        // there, so the search falls back, and the count and find run the ordinary engine, whose
+        // start-byte scan passes the run: the reverse prefix DFA never starts, though the Sawyer
+        // at the end passes the gate. One rejected hit fewer than the rule needs, or as many hits
+        // spread out by a byte more than its spacing, keep the search.
+        String regex = "([A-Z]awyer|[A-Z]inn)[0-9\\s]";
+        int hits = InnerLiteralSearch.MINIMUM_DENSE_REJECTED_HITS;
+        Slice dense = utf8Slice("awyerinn".repeat(hits / 2) + "Sawyer\n");
+        Slice fewer = utf8Slice("awyerinn".repeat(hits / 2 - 1) + "awyer........" + "Sawyer\n");
+        Slice spread = utf8Slice(("awyer" + ".".repeat(InnerLiteralSearch.DENSE_REJECTED_HIT_SPACING - 4)).repeat(hits) + "Sawyer\n");
+        for (Language language : Language.values()) {
+            String description = language.name();
+            InnerLiteralSearch search = language.compiledPattern(regex).innerLiteralSearchForDiagnostics();
+            assertThat(search.search(dense, 0, dense.length(), 0, dense.length())).as(description).isEqualTo(InnerLiteralSearch.FALLBACK);
+            assertThat(search.search(fewer, 0, fewer.length(), 0, fewer.length())).as(description).isNotNegative();
+            assertThat(search.search(spread, 0, spread.length(), 0, spread.length())).as(description).isNotNegative();
+
+            CompiledPattern countPattern = language.compiledPattern(regex);
+            assertThat(countPattern.count(dense)).as(description).isEqualTo(1);
+            assertThat(reversePrefixStateCount(countPattern)).as(description).isZero();
+            CompiledPattern findPattern = language.compiledPattern(regex);
+            assertThat(findPattern.find(dense)).as(description).isTrue();
+            assertThat(reversePrefixStateCount(findPattern)).as(description).isZero();
+        }
+    }
+
+    @Test
     public void testFindsGatedOneByteLiteralFirst()
     {
         // A gated one-byte search that checks short windows runs first in the ordinary engine's
@@ -1353,6 +1385,10 @@ public class TestInnerLiteralSearch
                 // Literal sets: adjacent and overlapping members, one member inside another, and
                 // a false filter hit, barb, in texts long enough for the vector scan.
                 "Sawyer inn tinn sawyerinn Xawyer\tbinnk\nainnk Jawyerinn abab babab ababa bab\n".repeat(16),
+                // Dense runs of hits the gates reject, long enough to make the search fall back,
+                // with matches at both ends and between runs, and capitals that start no match.
+                "Sawyer " + "awyerinn".repeat(40) + "Xawyerinn" + "awyerinn".repeat(40) + "Jinn\n" + "awyerinn".repeat(40) + "Finn9",
+                "awyerinn".repeat(80) + "Tinn" + "awyerinn".repeat(80) + "Sawyer\n",
                 " foo1 barbaz2 foobarbaz3\tfoo barbell4 barbaz\n ring1 moment2 king ing ment\n".repeat(16),
                 // Quotes: apostrophes inside words, a closing quote without the punctuation, a
                 // body past 30 bytes, and adjacent quotes, with matches at the start and end of

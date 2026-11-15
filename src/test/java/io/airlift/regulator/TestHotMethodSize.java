@@ -109,6 +109,18 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the gated and ungated inner literal loops within C2's hot-method inline size.
+    @Test
+    public void testInnerLiteralSearchesFitInlineSize()
+    {
+        for (String method : List.of("searchGatedFrom", "searchUngatedFrom")) {
+            assertThat(codeLength(InnerLiteralSearch.class, method))
+                    .as("InnerLiteralSearch.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps the large literal set's trie walks, window searches, and sparse transition small
     /// enough for C2 to inline into the search that picks them and, for the transition, into each
     /// walk's loop.

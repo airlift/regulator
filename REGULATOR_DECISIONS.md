@@ -2906,6 +2906,33 @@ it agrees with the search. Checked after the near-start rule, a slash after
 a letter near the start of a short line sent the line to the ordinary engine
 although no date could end there.
 
+A dense run of skipped hits does make the search fall back: once it has
+skipped at least 64 hits, averaging fewer than 8 bytes apart since the search
+start. Dense rejected hits repeatedly restart the scan and test the gates, so
+the search uses this density heuristic to hand the window to the ordinary
+engine. For `awyer-inn-busted` the ordinary engine's start-byte scan for
+`[A-Z]` passes the run; a pattern without such a scan, such as `\b\w+nn\b`,
+steps the DFA over it instead. The prefix before the triggering hit is shorter
+than 8 bytes per rejected hit; literal verification and scanner lookahead can
+read beyond it. A count's ordinary
+engine hands back to the search at the first match end whose next candidate
+is not near; that near-start check does not count skipped hits, so a later
+dense run makes the search fall back again. Rebar's `folly/awyer-inn-busted`,
+`([A-Z]awyer|[A-Z]inn)[0-9\s]` over `awyerinn` repeated 10,000 times and then
+`Sawyer\n`, has a hit about every 4 bytes, each without the capital before
+it. Its count walked all 20,000 of them; it now falls back at the 64th, and
+the ordinary count's one range scan for `[A-Z]` reaches the match.
+
+Counted over every rebar row with a gated search, in RE2's Latin-1 and UTF-8
+modes, Java, Rust with and without Unicode, and Trino, by each row's model and
+by a count of the whole text, no other search falls back by this rule. Once 64
+hits were skipped, lh3lh3 `date`, counted as one text, averaged at least 10.1
+bytes between them, and its grep lines, some of them runs of slashes, skip at
+most 58 hits each; `mariomka/email`, `lh3lh3/email`, `word-ending-nn`, and
+the reverse inner email row averaged at least 105 bytes; and no search of the
+other rows, among them the Holmes and `ing` rows and
+`tom-sawyer-huckle-fin-prefix-long`, skipped 16 hits.
+
 A gate that holds the literal's own byte at that edge, of either case for a
 case-insensitive letter, is dropped. It borders runs of its own bytes, as
 `[a-z]` does before `shing` inside a word, so it passes nearly every hit and
