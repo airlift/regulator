@@ -1,0 +1,13 @@
+{
+  "access": "Private evidence storage. Use credentials authorized to read the benchmark archive bucket.",
+  "archives": [
+    {
+      "name": "r21-20261114a/root-19735468b153f18839b056007f76f57e6ee5c9db85b57e9bde282ccb07e62121.tar.zst",
+      "campaign": "r21-20261114a",
+      "s3_uri": "s3://regulator-benchmark-archive-938463256137-us-west-2/campaigns/r21-20261114a/root-19735468b153f18839b056007f76f57e6ee5c9db85b57e9bde282ccb07e62121.tar.zst",
+      "bytes": 4098653234,
+      "archive_sha256": "516da11cbea00cfeab1538beee46c3619c80dbb3d39e704933bcb7aaa9b999d2",
+      "manifest_sha256": "19735468b153f18839b056007f76f57e6ee5c9db85b57e9bde282ccb07e62121"
+    }
+  ]
+}
