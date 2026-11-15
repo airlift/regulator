@@ -266,7 +266,7 @@ public class TestBoundedCharacterClassCounter
             Re2 re2 = Re2.compileParsed(pattern, parsed, flags, maxMemory);
             assertThat(re2.forwardProgramForDiagnostics().dfaMemory()).as(source).isEqualTo(control.dfaMemory() - re2.classMatchCounter().estimatedRetainedSize());
         }
-        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_008);
+        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_016);
     }
 
     @Test
@@ -432,11 +432,11 @@ public class TestBoundedCharacterClassCounter
                 RustRegexp::compile);
         for (Function<Slice, CompiledPattern> compiler : compilers) {
             CompiledPattern belowLimit = compiler.apply(utf8Slice("[\\p{L}\\x{3FFFF}]"));
-            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_128);
+            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_136);
             CompiledPattern atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
             assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
             CompiledPattern allNonAscii = compiler.apply(utf8Slice("[^,]+"));
-            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(616);
+            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(624);
             CompiledPattern beforeTailBelowLimit = compiler.apply(utf8Slice("[\\x{3FFFF}\\x{50000}-\\x{10FFFF}]+"));
             assertThat(beforeTailBelowLimit.classMatchCounter()).as(beforeTailBelowLimit.pattern().toStringUtf8()).isNotNull();
             CompiledPattern beforeTailAtLimit = compiler.apply(utf8Slice("[\\x{40000}\\x{50000}-\\x{10FFFF}]+"));
@@ -444,7 +444,7 @@ public class TestBoundedCharacterClassCounter
         }
         // A Rust bytes-mode class of every scalar value retains a bitset that ends at U+D7FF, below
         // the surrogates.
-        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_272);
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_280);
         List<CompiledPattern> lastPlaneClasses = List.of(
                 Re2.compile(utf8Slice("\\p{Mn}")),
                 JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)),
@@ -695,8 +695,9 @@ public class TestBoundedCharacterClassCounter
         // A UTF-8 class of two-byte members counts runs a 32- or 64-byte block at a time, so each
         // run of every length up to 70 characters, cut or unbounded, starts at every offset of a
         // block and crosses into the next block or more; a byte class, counted byte by byte, takes
-        // the same runs. A second run ends at the end of the input.
-        for (String pattern : List.of("[a-z]{2,5}", "[a-z]{3,}", "\\p{L}{2,5}", "\\p{L}{3,}")) {
+        // the same runs, and so does one whose runs count from where they start. A second run ends
+        // at the end of the input.
+        for (String pattern : List.of("[a-z]{2,5}", "[a-z]{3,}", "[a-z]+", "\\p{L}{2,5}", "\\p{L}{3,}")) {
             BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
             Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
             String member = counter.readsBytesForDiagnostics() ? "a" : "ж";
@@ -708,6 +709,109 @@ public class TestBoundedCharacterClassCounter
                             .isEqualTo(countWithGeneralMatcher(reference, input));
                 }
             }
+        }
+    }
+
+    @Test
+    public void testUnboundedRunsOfOneOrMoreCountRunStarts()
+    {
+        // A run of at least one member with no maximum is one match however long it is, so a byte
+        // class counts the members that begin runs instead of tracking each run's length. Every
+        // language's `\s+`, which the Rust benchmark spells out as its ASCII class, takes that
+        // count through its public count. A bounded repeat, a UTF-8 class, and a longer minimum
+        // keep the run-length count.
+        Slice words = utf8Slice("one two   three four");
+        Slice letters = utf8Slice("the extraordinary quickness of foxes, жукообразные");
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("\\s+"));
+        assertThat(trino.count(words)).isEqualTo(3);
+        assertRunStartRoutes(trino.re2(), 1);
+        for (CompiledPattern pattern : List.of(
+                Re2.compile(utf8Slice("\\s+")),
+                JavaRegexp.compile(utf8Slice("\\s+")),
+                RustRegexp.compile(utf8Slice("[\\t\\n\\f\\r ]+")),
+                RustRegexp.compile(utf8Slice("[\\t\\n\\f\\r ]+"), RustRegexp.Options.bytes()))) {
+            assertThat(pattern.count(words)).as(pattern.pattern().toStringUtf8()).isEqualTo(3);
+            assertRunStartRoutes(pattern, 1);
+        }
+
+        List<Function<Slice, CompiledPattern>> compilers = List.of(
+                Re2::compile,
+                JavaRegexp::compile,
+                source -> TrinoRegexp.compile(source).re2(),
+                RustRegexp::compile);
+        for (Function<Slice, CompiledPattern> compiler : compilers) {
+            for (String source : List.of("[A-Za-z]{8,13}", "\\p{L}{8,13}", "\\s{2,}")) {
+                CompiledPattern pattern = compiler.apply(utf8Slice(source));
+                CompiledPattern reference = compiler.apply(utf8Slice("(" + source + ")"));
+                for (Slice input : List.of(words, letters)) {
+                    assertThat(pattern.count(input)).as(source).isEqualTo(countWithGeneralMatcher(reference, input));
+                }
+                assertRunStartRoutes(pattern, 0);
+            }
+        }
+    }
+
+    private static void assertRunStartRoutes(CompiledPattern pattern, int expected)
+    {
+        BoundedCharacterClassCounter counter = pattern.boundedCharacterClassCounterIfComputedForDiagnostics();
+        assertThat(counter).as(pattern.pattern().toStringUtf8()).isNotNull().isNotSameAs(BoundedCharacterClassCounter.unsupported());
+        assertThat(counter.runStartRouteCountForDiagnostics()).as(pattern.pattern().toStringUtf8()).isEqualTo(expected);
+    }
+
+    @Test
+    public void testRunStartCountMatchesGeneralMatcher()
+    {
+        // Byte classes of ASCII members, as in each language's `\s+`, and of Latin-1 bytes from 0x80,
+        // in RE2's Latin-1 mode and Rust's byte mode, count from where runs start. Rows of every
+        // length up to 70 bytes hold every member, none, or alternate starting with either, so runs
+        // begin at the first byte and end at the last; UTF-8 text and every byte value follow. Each
+        // row also counts as a region of a longer array that has members on both sides.
+        record Case(CompiledPattern counted, CompiledPattern reference, byte member, byte nonmember) {}
+
+        List<Case> cases = List.of(
+                new Case(Re2.compile(utf8Slice("\\s+")), Re2.compile(utf8Slice("(\\s+)")), (byte) ' ', (byte) 'a'),
+                new Case(JavaRegexp.compile(utf8Slice("\\s+")), JavaRegexp.compile(utf8Slice("(\\s+)")), (byte) '\t', (byte) 'a'),
+                new Case(TrinoRegexp.compile(utf8Slice("\\s+")).re2(), TrinoRegexp.compile(utf8Slice("(\\s+)")).re2(), (byte) '\n', (byte) 'a'),
+                new Case(RustRegexp.compile(utf8Slice("[\\t\\n\\f\\r ]+")), RustRegexp.compile(utf8Slice("([\\t\\n\\f\\r ]+)")), (byte) '\r', (byte) 'a'),
+                new Case(Re2.compile(utf8Slice("[a-z]+")), Re2.compile(utf8Slice("([a-z]+)")), (byte) 'q', (byte) ' '),
+                new Case(Re2.compile(utf8Slice("[\\x{80}-\\x{FF}]+"), Re2.Options.latin1()), Re2.compile(utf8Slice("([\\x{80}-\\x{FF}]+)"), Re2.Options.latin1()), (byte) 0xE9, (byte) 'e'),
+                new Case(RustRegexp.compile(utf8Slice("(?-u:[\\x80-\\xFF])+"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("((?-u:[\\x80-\\xFF])+)"), RustRegexp.Options.bytes()), (byte) 0x80, (byte) 'e'));
+        for (Case testCase : cases) {
+            String description = testCase.counted().pattern().toStringUtf8();
+            BoundedCharacterClassCounter counter = testCase.counted().createBoundedCharacterClassCounter();
+            assertThat(counter.readsBytesForDiagnostics()).as(description).isTrue();
+            List<byte[]> rows = new ArrayList<>();
+            for (int length = 0; length <= 70; length++) {
+                byte[] members = new byte[length];
+                Arrays.fill(members, testCase.member());
+                byte[] nonmembers = new byte[length];
+                Arrays.fill(nonmembers, testCase.nonmember());
+                byte[] alternating = new byte[length];
+                byte[] alternatingFromNonmember = new byte[length];
+                for (int i = 0; i < length; i++) {
+                    alternating[i] = i % 2 == 0 ? testCase.member() : testCase.nonmember();
+                    alternatingFromNonmember[i] = i % 2 == 0 ? testCase.nonmember() : testCase.member();
+                }
+                rows.addAll(List.of(members, nonmembers, alternating, alternatingFromNonmember));
+            }
+            rows.add("東京 München\t\tΣοφία\r\nжук  é".getBytes(UTF_8));
+            byte[] everyByte = new byte[256];
+            for (int value = 0; value < 256; value++) {
+                everyByte[value] = (byte) value;
+            }
+            rows.add(everyByte);
+            for (byte[] row : rows) {
+                byte[] framed = new byte[row.length + 2];
+                framed[0] = testCase.member();
+                System.arraycopy(row, 0, framed, 1, row.length);
+                framed[framed.length - 1] = testCase.member();
+                for (Slice input : List.of(Slices.wrappedBuffer(row), Slices.wrappedBuffer(framed, 1, row.length))) {
+                    assertThat(counter.count(input))
+                            .as("%s on %s", description, HexFormat.of().formatHex(input.getBytes()))
+                            .isEqualTo(countWithGeneralMatcher(testCase.reference(), input));
+                }
+            }
+            assertThat(counter.runStartRouteCountForDiagnostics()).as(description).isPositive();
         }
     }
 

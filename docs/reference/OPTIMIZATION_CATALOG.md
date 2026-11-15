@@ -1588,6 +1588,7 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `BoundedCharacterClassCounter.analyzeSingleMember`,
   `BoundedCharacterClassCounter.hasSparseSingleMembers`,
   `BoundedCharacterClassCounter.create`,
+  `BoundedCharacterClassCounter.countRunStarts`,
   `BoundedCharacterClassCounter.countBytes`,
   `BoundedCharacterClassCounter.countUtf8`,
   `BoundedCharacterClassCounter.findSpan`,
@@ -1614,7 +1615,9 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text
-  decodes with a branch. UTF-8 text of ASCII and two-byte characters is
+  decodes with a branch. A byte class repeated at least once with no maximum,
+  such as `\s+`, counts instead the members that begin a run, which carries no
+  run length from byte to byte. UTF-8 text of ASCII and two-byte characters is
   checked 32 bytes at a time with SWAR masks. Span searches skip bytes that
   cannot begin a member, with a table or, for a sparse class, a vector nibble
   scan; for byte and ASCII classes, the table also reads the run. A byte run

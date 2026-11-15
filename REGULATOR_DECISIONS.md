@@ -4795,15 +4795,20 @@ members.
 The count reads runs without branching on membership, which mispredicts at
 nearly every word boundary of ordinary text. A byte class updates its run
 arithmetically, byte by byte; on Graviton that beat reading memberships into a
-block mask. UTF-8 text of ASCII and two-byte characters checks 32 bytes at a
-time and reads a 32- or 64-byte block's memberships into a mask, which is why
-such a bitset reaches U+07FF. Other text decodes character by character with
-the branching run partition, in stretches that double from 32 bytes to 1 KiB
-while checks fail, and then in a loop of its own. Checking before every 32
-decoded bytes made CJK counts 1.33x slower on r9g and 1.64x on r8i, and on Intel
-a decode loop inside the block loop and a branch-free partition each cost
-another 10 to 15%. Letter-run counts take 0.55 to 0.62 of the previous time on
-r9g and 0.47 to 0.49 on r8i.
+block mask. A byte class repeated at least once with no maximum, such as `\s+`,
+matches each run once, so it counts the members that begin the input or follow a
+nonmember instead, without tracking a run length. The run-length update made
+`\s+` counts of short rows 1.35 to 1.42 times slower on r9g and 1.13 to 1.23 on
+r8i than the branching partition before it. A longer minimum, as in `\s{2,}`,
+keeps the run-length update. UTF-8 text of ASCII and two-byte characters checks
+32 bytes at a time and reads a 32- or 64-byte block's memberships into a mask,
+which is why such a bitset reaches U+07FF. Other text decodes character by
+character with the branching run partition, in stretches that double from 32
+bytes to 1 KiB while checks fail, and then in a loop of its own. Checking before
+every 32 decoded bytes made CJK counts 1.33x slower on r9g and 1.64x on r8i, and
+on Intel a decode loop inside the block loop and a branch-free partition each
+cost another 10 to 15%. Letter-run counts take 0.55 to 0.62 of the previous time
+on r9g and 0.47 to 0.49 on r8i.
 
 Two counters are instead built at compile time and charged against the pattern's
 memory budget. The compact counter serves a large Unicode class repeated many
