@@ -636,9 +636,10 @@ lost time where that byte is common and lost cells to Joni, and the ordered
 matcher verified candidates inside its scan loop, which C2 did not unroll. The
 contains search is built once at compilation, charged to the forward-DFA
 budget, and shared with dot-star spans; a one-byte contains or dot-star literal,
-or a contains search that does not fit, keeps `Slice.indexOf`. A plain literal
-pattern such as `lit` keeps its exact-literal route and probe-byte scan for
-boolean find. On the normative rows, against the previous routes, dot-star
+a contains search that does not fit, and, as described below, a window shorter
+than 64 bytes keep `Slice.indexOf`. A plain literal pattern such as `lit` keeps
+its exact-literal route and probe-byte scan for boolean find. On the normative
+rows, against the previous routes, dot-star
 contains took 0.459x the time on r9g and 0.413x on r8i, dot-star count 0.527x
 and 0.472x, and ordered contains 0.710x and 0.791x. No win against Joni became a
 loss, and 2 r9g and 11 r8i dot-star contains cells and 12 r8i dot-star count
@@ -669,17 +670,31 @@ at up to 1.07x and LIKE `WILDCARD_CHAIN` at 1.07x. An early exit after the
 second byte removed the r9g loss but cost 1.33x on r8i gharchive, so it was not
 taken.
 
+The measurements above cover only Trino rows. Under the one engine path of
+release 2.1, every language's boolean `contains` of a contained literal of two
+or more bytes, and its dot-star spans, use the same search, but only on a window
+of at least 64 bytes; a shorter window takes `Slice.indexOf`, in Trino as well,
+whose short windows release 2.0 searched. A preliminary dispatch A/B on
+synthetic rows measured short RE2, Java, and Rust `find` with the search at
+0.69x to 0.71x the time on r9g and 0.62x to 0.71x on r8i, with `matches` and
+`lookingAt` flat. The 2.1 full run, which searched every window, found real
+short rows slower: RE2 and Rust `.*coolfunctionname.*` contains, on rows of 8 to
+46 bytes, took 1.23x to 1.24x the time of `Slice.indexOf` on r9g and 1.43x to
+1.49x on r8i, about 3 to 5 ns per row. `.*Googlebot.*` over Apache log lines of
+about 100 to 300 bytes took 0.68x to 0.69x on r9g and 0.76x to 0.78x on r8i, and
+other everyday rows were flat. Removing the search for those languages, as
+planned, would have given back the log-line win. An AWS same-host sweep of the
+window on r9g and r8i, on real Apache log lines cut to 16 to 256 bytes for
+`.*Googlebot.*` and `.*coolfunctionname.*` in all four languages, put the
+crossover between 48 and 64 bytes: at 48 bytes and below `Slice.indexOf` took
+0.70x to 0.95x the search's time on r8i and 0.84x to 1.01x on r9g; at 64 bytes
+it tied on r8i, at 0.995x to 1.04x, and took 1.11x to 1.16x on r9g; from 96
+bytes up the search won by up to 2.9x. Trino's short rows behaved as the others'
+did, so one cutoff of 64 bytes serves every language instead of a removal for
+some.
+
 Exact-literal spans on short rows, which count, position, and extract a plain
-literal, keep their first-byte search. The measurements above cover only Trino
-rows. Under the one engine path of release 2.1, RE2, Java, and Rust boolean
-`contains` of a contained literal of two or more bytes uses the same search, as
-Trino does. The 2.1 full run's real short rows decide whether it stays. A
-preliminary dispatch A/B on synthetic rows measured their short `find` at 0.69x
-to 0.71x the time on r9g and 0.62x to 0.71x on r8i, with `matches` and
-`lookingAt` flat. If the full run shows a loss on real short rows, a follow-up
-removes the contains search for that language and restores `Slice.indexOf`.
-Their dot-star spans use the same search, and the same run decides them.
-Alternatives rejected:
+literal, keep their first-byte search. Alternatives rejected:
 
 - The pair scan for short-row exact-literal spans won only 3% to 4% on r9g and
   8% to 12% on r8i, and lost 1.53x to 1.78x on short r8i Russian rows (14.0 to
@@ -2089,11 +2104,13 @@ stops, a line feed and at most seven others, a group-zero `RegexpMatcher.find()`
 of it within the matcher's region, and its unanchored one-shot searches run the
 dot-star literal matcher in RE2, Java, and Rust, as Trino's dot-star subtype
 does for its span operations: the literal's first occurrence, found with the
-pattern's contains search, widened over the characters the dots match on each
-side. The one-shot searches are `find` of a range, `findInto`, `findResult`, and
-RE2's `replaceFirst` and `extract`, which the literal-kernel classes answer from
-their one-shot `matchInto`, above the engine hook, and RE2's `replaceAll`, whose
-loop reaches the matcher through the engine hook. An anchored call keeps the
+pattern's contains search, or with `Slice.indexOf` in a window under 64 bytes
+as [Trino Regexp Literal Searches](#trino-regexp-literal-searches) describes,
+widened over the characters the dots match on each side. The one-shot searches
+are `find` of a range, `findInto`, `findResult`, and RE2's `replaceFirst` and
+`extract`, which the literal-kernel classes answer from their one-shot
+`matchInto`, above the engine hook, and RE2's `replaceAll`, whose loop reaches
+the matcher through the engine hook. An anchored call keeps the
 ordinary engine: a match from the call's start cannot cross the first line feed,
 past which the matcher would search on for the literal. An unanchored call makes
 no long-window check, which for such a pattern would never shorten the search:
@@ -2365,10 +2382,14 @@ search's read-only table and is charged nothing.
 Case-insensitive prefixes stop at nine bytes and keep their scan.
 Because `Slice.indexOf` puts no limit on the bytes its failed candidates
 compare, every language's contains of a literal of two or more bytes uses the
-contains search when it fits the forward-DFA allowance. Where release 2.0 built
-the search, in Trino and for a literal of more than 64 bytes elsewhere, it
-reserves its memory whenever it fits, as it did; any other search [yields to
-the forward DFAs](#memory-budgets-and-dfa-caching). Scan-plan leading and
+contains search when it fits the forward-DFA allowance, on a window of at least
+64 bytes. A shorter window keeps `Slice.indexOf`, whatever the literal's length:
+in a window of `n` bytes its failed candidates compare at most (n + 1)² / 4
+bytes, and a window under 64 bytes cannot hold a literal longer than the
+comparison budget. Where release 2.0 built the search, in Trino and for a
+literal of more than 64 bytes elsewhere, it reserves its memory whenever it
+fits, as it did; any other search [yields to the forward
+DFAs](#memory-budgets-and-dfa-caching). Scan-plan leading and
 required literals, capped at 256 bytes, still check every candidate; bounding
 them is a separate change.
 

@@ -41,6 +41,7 @@ import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
+import static io.airlift.regulator.TestingPatternShapes.rowsAroundMinimumSearchWindow;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.stream.Collectors.toSet;
@@ -202,6 +203,29 @@ public class TestRe2BooleanPlans
                     String label = compiledPattern.getClass().getSimpleName() + " " + contained + " " + kind;
                     assertThat(compiledPattern.literalSearchForDiagnostics() != null).as(label).isEqualTo(contained.length() > LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET);
                     assertThat(compiledPattern.find(input)).as(label).isTrue();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testContainedLiteralSearchWindowBoundary()
+    {
+        String half = "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2);
+        String literal = half + "b" + half;
+
+        // In every language, Trino included, a row of at least the search's minimum window takes
+        // the search, and a shorter row Slice.indexOf. A literal longer than the comparison budget
+        // fits only the longest row.
+        for (String contained : List.of("literal", literal)) {
+            Slice pattern = utf8("(?s:.*" + contained + ".*)");
+            for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern), TrinoRegexp.compile(pattern).re2())) {
+                assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
+                for (String row : rowsAroundMinimumSearchWindow(contained)) {
+                    String label = "%s %s %s".formatted(compiledPattern.getClass().getSimpleName(), contained.length(), row);
+                    long searches = LiteralSearchKernel.windowSearchCountForDiagnostics();
+                    assertThat(compiledPattern.find(utf8(row))).as(label).isEqualTo(row.contains(contained));
+                    assertThat(LiteralSearchKernel.windowSearchCountForDiagnostics() - searches).as(label).isEqualTo(row.length() >= LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES ? 1 : 0);
                 }
             }
         }

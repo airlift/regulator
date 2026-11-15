@@ -1095,7 +1095,9 @@ abstract sealed class CompiledPattern
         // long partial matches of a long literal do not cost the input times the literal. A Trino
         // search, and elsewhere a search for a literal longer than
         // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes, reserves its memory whenever it
-        // fits. Any other search yields to the forward DFAs; see costsDfaInitialization.
+        // fits. Any other search yields to the forward DFAs; see costsDfaInitialization. Windows
+        // shorter than LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES keep Slice.indexOf; see
+        // LiteralSearchKernel.searchesWindow.
         LiteralSearchKernel literalSearch = createLiteralSearch(booleanPlans);
         boolean reservesWheneverItFits = literalSearch != null &&
                 (compilerDialect == Compiler.Dialect.TRINO || booleanPlans.literal().length() > LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET);
@@ -3288,9 +3290,9 @@ abstract sealed class CompiledPattern
     private boolean containsBooleanPlanLiteral(Slice input, Slice literal)
     {
         LiteralSearchKernel literalSearch = booleanPlans.literalSearch();
-        return literalSearch == null
-                ? LiteralMatchKernel.contains(input, literal)
-                : literalSearch.findContains(input, 0, input.length()) >= 0;
+        return LiteralSearchKernel.searchesWindow(literalSearch, input.length())
+                ? literalSearch.findContains(input, 0, input.length()) >= 0
+                : LiteralMatchKernel.contains(input, literal);
     }
 
     private static boolean equalsFinalLineBooleanPlanLiteral(Slice input, Slice literal)
@@ -5526,7 +5528,9 @@ abstract sealed class CompiledPattern
             ScanPlan scanBooleanPlan,
             // Scans for a contained literal of two or more bytes by its first and last bytes
             // together, for boolean contains and dot-star spans, when it fits beside the forward
-            // DFAs; null leaves them on Slice.indexOf. Exact-literal spans never use it.
+            // DFAs; null, and a window shorter than
+            // LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES, leave them on Slice.indexOf.
+            // Exact-literal spans never use it.
             LiteralSearchKernel literalSearch,
             // Searches an alternation of more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES
             // literals for the RE2, Java, and Rust RegexpMatcher.find() group-zero spans, and for

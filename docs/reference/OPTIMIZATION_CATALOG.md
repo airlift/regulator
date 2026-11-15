@@ -978,7 +978,8 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   `CompiledPattern.selectBooleanPlans`,
   `ExpressionAnalysis.buildLiteralSequence`
 - **Applies when:** Contains and dot-star literals in every language whose
-  table fits the DFA budget; outside Trino, literals of up to 64 bytes also
+  table fits the DFA budget, in windows of at least 64 bytes, where shorter
+  windows take `Slice.indexOf`; outside Trino, literals of up to 64 bytes also
   yield to the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes;
   start, inner, and window literal searches take the fused vector pair scan

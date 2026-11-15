@@ -28,6 +28,7 @@ import java.util.stream.Stream;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
+import static io.airlift.regulator.TestingPatternShapes.rowsAroundMinimumSearchWindow;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -415,7 +416,8 @@ public class TestDotStarLiteralSpanMatcher
         assertThat(matcher.searchForDiagnostics()).isNull();
         assertGeneralEngineAgreement(new Row(pattern, Re2.compile(utf8Slice("(.*l.*)"))));
 
-        // Spans share the pattern's contains search, so this checks the call-free scan's spans.
+        // Spans share the pattern's contains search, so this checks the call-free scan's spans on
+        // windows of at least its minimum, and Slice.indexOf's on shorter ones.
         TrinoCompiledPattern trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
         DotStarLiteralSpanMatcher trinoMatcher = trinoPattern.createDotStarLiteralSpanMatcher();
         assertThat(trinoMatcher).isExactlyInstanceOf(DotStarLiteralSpanMatcher.class);
@@ -423,6 +425,63 @@ public class TestDotStarLiteralSpanMatcher
                 .isNotNull()
                 .isSameAs(trinoPattern.literalSearchForDiagnostics());
         assertGeneralEngineAgreement(new Row(trinoPattern, TrinoRegexp.compile(utf8Slice("(.*literal.*)")).re2()));
+    }
+
+    @Test
+    public void testSearchWindowBoundary()
+    {
+        // In every language, Trino included, a window of at least the search's minimum takes the
+        // search, and a shorter one Slice.indexOf: a range of a longer Slice, which does not start
+        // at its array's start, for a span, and each search of a count, whose windows run to the
+        // input's end. The range is followed by unrelated bytes, by the whole literal, or by the
+        // rest of a literal it ends partway through, which no search of the range may match.
+        // Spans, ranged finds, and counts agree with the general engine's, on dots that stop only
+        // at a line feed and on dots with other stops. A literal longer than the comparison budget
+        // fits only the longest window.
+        String longLiteral = "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2) + "b" + "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2);
+        List<Row> rows = new ArrayList<>(everyLanguage());
+        rows.add(new Row(Re2.compile(utf8Slice(".*" + longLiteral + ".*")), Re2.compile(utf8Slice("(.*" + longLiteral + ".*)"))));
+        rows.add(new Row(TrinoRegexp.compile(utf8Slice(".*" + longLiteral + ".*")).re2(), TrinoRegexp.compile(utf8Slice("(.*" + longLiteral + ".*)")).re2()));
+        for (Row row : rows) {
+            DotStarLiteralSpanMatcher spanMatcher = row.pattern().createDotStarLiteralSpanMatcher();
+            LiteralSearchKernel search = spanMatcher.searchForDiagnostics();
+            String literal = new String(search.literal(), ISO_8859_1);
+            List<Slice> windows = new ArrayList<>();
+            int split = literal.length() / 2;
+            for (String text : rowsAroundMinimumSearchWindow(literal)) {
+                long expectedSearches = text.length() >= LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES ? 1 : 0;
+                for (List<String> rangeAndRest : List.of(
+                        List.of(text, "yz"),
+                        List.of(text, literal + "yz"),
+                        List.of(text.substring(split) + literal.substring(0, split), literal.substring(split) + "yz"))) {
+                    String range = rangeAndRest.get(0);
+                    String label = "%s %s|%s".formatted(label(row.pattern()), range, rangeAndRest.get(1));
+                    Slice padded = utf8Slice("##ab" + range + rangeAndRest.get(1));
+                    Slice input = padded.slice(2, padded.length() - 2);
+                    int end = 2 + range.length();
+                    RegexpMatcher generalMatcher = row.captured().genericGroupZeroMatcherForDiagnostics(input.slice(0, end));
+                    boolean found = generalMatcher.find(2);
+                    long expectedSpan = found ? ((long) generalMatcher.start() << 32) | generalMatcher.end() : Dfa.SEARCH_NO_MATCH;
+                    long searches = LiteralSearchKernel.windowSearchCountForDiagnostics();
+                    long span = spanMatcher.findSpan(input, 2, end);
+                    assertThat(LiteralSearchKernel.windowSearchCountForDiagnostics() - searches).as(label).isEqualTo(expectedSearches);
+                    assertThat(span).as(label).isEqualTo(expectedSpan);
+                    assertThat(row.pattern().find(input, 2, end)).as(label).isEqualTo(found);
+                    int[] groups = new int[2];
+                    assertThat(row.pattern().findInto(input, 2, end, groups)).as(label).isEqualTo(found);
+                    if (found) {
+                        assertThat(groups).as(label).containsExactly(generalMatcher.start(), generalMatcher.end());
+                    }
+
+                    Slice window = input.slice(2, range.length());
+                    searches = LiteralSearchKernel.windowSearchCountForDiagnostics();
+                    assertThat(spanMatcher.count(window)).as(label).isEqualTo(range.contains(literal) ? 1 : 0);
+                    assertThat(LiteralSearchKernel.windowSearchCountForDiagnostics() - searches).as(label).isEqualTo(expectedSearches);
+                    windows.add(window);
+                }
+            }
+            assertGeneralEngineAgreement(row, windows);
+        }
     }
 
     private static void assertGeneralEngineAgreement(Row row)

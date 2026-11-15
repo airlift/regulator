@@ -15,6 +15,8 @@ package io.airlift.regulator;
 
 import io.airlift.regulator.CompiledPattern.Shape;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.LongFunction;
 import java.util.function.Predicate;
 
@@ -48,6 +50,23 @@ final class TestingPatternShapes
             case Re2.ScanPlanRe2 _, JavaRegexp.ScanPlanJavaRegexp _, RustRegexp.ScanPlanRustRegexp _, TrinoCompiledPattern.ScanPlanTrinoCompiledPattern _ -> SCAN_PLAN;
             case Re2 _, JavaRegexp _, RustRegexp _, TrinoCompiledPattern _ -> ENGINE;
         };
+    }
+
+    /// Returns distinct rows one byte shorter than [LiteralSearchKernel#MINIMUM_SEARCH_WINDOW_BYTES], of
+    /// that length, and one byte longer, which hold `literal` first, last, after its own prefix,
+    /// or only that prefix, each cut to the row's length.
+    static List<String> rowsAroundMinimumSearchWindow(String literal)
+    {
+        String prefix = literal.substring(0, literal.length() - 1);
+        List<String> rows = new ArrayList<>();
+        for (int length = LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES - 1; length <= LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES + 1; length++) {
+            String filler = "x".repeat(length);
+            rows.add((literal + filler).substring(0, length));
+            rows.add((filler + literal).substring(literal.length()));
+            rows.add((filler + prefix + literal).substring(prefix.length() + literal.length()));
+            rows.add((prefix + "x").repeat(length).substring(0, length));
+        }
+        return rows.stream().distinct().toList();
     }
 
     /// Compiles with `compiler` at the least maxMemory at which the forward program's DFA of

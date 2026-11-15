@@ -236,6 +236,9 @@ Within the budget, compilation and matching keep these limits:
   memory they would use, and is kept only where the first-match and
   longest-match DFAs then keep their minimum memory beside it. Other plans keep
   their memory whenever it fits.
+- In every language, boolean `contains` of a contained literal such as
+  `.*lit.*` and its dot-star literal spans search a window of fewer than 64
+  bytes with `Slice.indexOf` rather than the contains search.
 - A large literal set keeps dense transition rows for its states up to depth 3,
   at a smaller depth where the rows' entries would pass 1 MiB or the set would
   not fit its memory, and none where no depth fits.
@@ -308,10 +311,11 @@ multi-byte literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and 
 move it for a plan's leading literal led by a non-ASCII byte. Byte frequencies
 do not affect any language's contains of a contained literal such as `.*lit.*`,
 which scans for the first and last bytes of a literal of two or more bytes
-together when that search fits beside the forward DFAs and otherwise, as for a
-one-byte literal, uses `Slice.indexOf`, nor any language's dot-star literal
-spans, which share that search, nor ordered literals such as `a(?s:.*)b` in any
-language whose gaps there read any bytes, which use the same scan, nor the
+together in a window of at least 64 bytes when that search fits beside the
+forward DFAs and otherwise, as for a one-byte literal, uses `Slice.indexOf`,
+nor any language's dot-star literal spans, which share that search, nor ordered
+literals such as `a(?s:.*)b` in any language whose gaps there read any bytes,
+which use the same scan, nor the
 literal-neighbor matcher's scan for the literal of a pattern such as
 `([^ @]+)@([^ @]+)`, which scans for a one-byte literal's byte and for the first
 and last bytes of a longer one, nor the start literal filter of a pattern that
