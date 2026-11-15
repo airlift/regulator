@@ -1898,6 +1898,7 @@ ordinary engine would.
   count and an ASCII prefix.
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
+  `FixedWidthByteSpanMatcher.containsByte`,
   `CompiledPattern.shortFixedWidthByteMatcher`,
   `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
 - **Applies when:** Capture-free patterns, other than exact literals, of a
@@ -1911,7 +1912,16 @@ ordinary engine would.
   `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
 - **What it does:** In its candidate form the matcher scans for one position,
   then checks the others around each hit: a byte mask for ASCII, Latin-1, and
-  Rust byte classes, one decoded character for a UTF-8 class above ASCII. When
+  Rust byte classes, one decoded character for a UTF-8 class above ASCII.
+  ASCII membership stores the low word and low XOR high for each position,
+  addressed by the position alone. Bit 6 selects low or reconstructs high
+  without a branch: on prose, which mixes letters with spaces and punctuation,
+  a branch on that bit mispredicted. In the four-host-per-platform B16 A/B
+  against `47eaddfd9`, the 82-position rows ran in 1.08-1.48 of main's time
+  with the branch and 0.96-1.05 without it. The ranges span per-row
+  geomeans across languages and operations. Only Latin-1 and Rust
+  byte patterns that accept bytes above ASCII retain two more words a
+  position. When
   an ASCII pattern of up to 64 bytes has a position accepting exactly one byte,
   the matcher scans for the byte accepted by the first such position, as the
   [rare class scan](#fixed-width-rare-class-scan) scans a position of one first

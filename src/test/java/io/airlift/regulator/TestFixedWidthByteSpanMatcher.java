@@ -127,6 +127,33 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
+    public void testMasksAboveAscii()
+    {
+        // A position checks an ASCII byte with masks addressed by the position alone, so their
+        // load does not wait for the text byte. Only a pattern that reads a class above ASCII as
+        // bytes, in Latin-1 or Rust's byte mode, holds masks for the bytes above ASCII; any other
+        // rejects such a byte at a position that reads one byte. The everyday dates, UUIDs, and
+        // phone numbers hold none in any language.
+        for (String expression : List.of(
+                "[0-9]{4}-[0-9]{2}-[0-9]{2}",
+                "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                "\\d{3}/\\d{3}/\\d{4}")) {
+            Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
+            patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
+            patterns.put("Trino " + expression, TrinoRegexp.compile(utf8Slice(expression)).re2());
+            for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
+                FixedWidthByteSpanMatcher matcher = entry.getValue().fixedWidthByteSpanMatcherForDiagnostics();
+                assertThat(matcher).as(entry.getKey()).isNotNull();
+                assertThat(matcher.holdsMasksAboveAsciiForDiagnostics()).as(entry.getKey()).isFalse();
+            }
+        }
+        String aboveAscii = "[a-q][^u-z]{3}[x\\xE0-\\xFF]";
+        assertThat(optionalMatcher(aboveAscii, Re2.Options.latin1()).holdsMasksAboveAsciiForDiagnostics()).isTrue();
+        assertThat(RustRegexp.compile(utf8Slice("(?-u)" + aboveAscii), RustRegexp.Options.bytes()).fixedWidthByteSpanMatcherForDiagnostics().holdsMasksAboveAsciiForDiagnostics()).isTrue();
+        assertThat(matcher(aboveAscii).holdsMasksAboveAsciiForDiagnostics()).isFalse();
+    }
+
+    @Test
     public void testFalseCandidatesLogicalOffsetsAndAdjacentMatches()
     {
         FixedWidthByteSpanMatcher matcher = matcher("[0-9]{2}-[0-9]{2}");
@@ -384,16 +411,30 @@ public class TestFixedWidthByteSpanMatcher
                 utf8Slice("α12!一34💰56ж78"),
                 utf8Slice("a一bc丏da\uFFFDba\uD7FFc"),
                 utf8Slice("abαc ab一d ef💰g"),
-                wrappedBuffer("\u00E9a\u00E0bc\u00FFx\u00C0de".getBytes(ISO_8859_1))));
+                wrappedBuffer("\u00E9a\u00E0bc\u00FFx\u00C0de".getBytes(ISO_8859_1)),
+                // UUIDs at the start and the end, and bytes on either side of each ASCII word's
+                // edges and of the hex ranges: ? and @, ` and DEL.
+                utf8Slice("123e4567-e89b-12d3-a456-426614174000 or 123E4567-E89B-12D3-A456-426614174001"),
+                utf8Slice("0123456?-89ab 0123456@-89ab 0123456F-89aG 0123456`-89ab 0123456g-89a\u007F 0123456f-89aF"),
+                // Candidates at the last positions, whose matches would end past the input.
+                utf8Slice("2025-12-09 2024-12-"),
+                utf8Slice("x 2024-"),
+                utf8Slice("212/555/"),
+                // Digits of other scripts, which only Rust's Unicode \d holds.
+                utf8Slice("٢١٢/٥٥٥/٠١٠١ or 212/555/٠١٠١"),
+                // Latin-1 bytes in a date and at the edges of the two words above ASCII.
+                wrappedBuffer("2025-1\u00E9-09 ab\u00BFcd ab\u00C0cd a\u0080\u00FFbx".getBytes(ISO_8859_1)),
+                utf8Slice("2025-1é-09 ab¿cd abÀcd")));
         inputs.addAll(fragmentInputs());
 
         // Boolean find, count, and the span searches of RE2, Java, and Rust patterns run on the
         // matcher and agree with the general engine, including on malformed UTF-8 and Latin-1.
         for (String expression : List.of(
                 "[0-9]{4}-[0-9]{2}-[0-9]{2}",
-                // Not \d, because Rust's Unicode \d is not a one-byte class.
-                "[0-9]{3}/[0-9]{3}/[0-9]{4}",
+                // Rust's Unicode \d reads characters, and its byte mode's \d one byte.
+                "\\d{3}/\\d{3}/\\d{4}",
                 "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}",
+                "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
                 // Classes above ASCII, read as bytes in Latin-1 and Rust's byte mode and as
                 // characters elsewhere, as the scanned position last, first, and in the middle,
                 // and a literal, beside classes that hold every non-ASCII character.

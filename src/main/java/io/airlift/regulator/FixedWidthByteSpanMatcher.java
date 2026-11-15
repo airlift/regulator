@@ -35,16 +35,19 @@ import static java.util.Objects.requireNonNull;
 /// positions around each hit.
 ///
 /// A position whose class has only ASCII members, or any position of a Latin-1 pattern, as in
-/// RE2's Latin-1 mode and Rust's byte mode, reads one byte, which a 256-bit mask decides. When
-/// every position reads one byte, a match has as many bytes as positions and a search reads no
-/// characters. A UTF-8 position with members above ASCII reads the character there as the
-/// compiled class's byte ranges read it, malformed input included
-/// ([Utf8#re2DecodeClassCharacter]), so matches can differ in byte length. Every character
-/// such a position or an ASCII position accepts begins with a byte that is not a continuation
-/// byte, and any bytes after it are continuation bytes, so the positions of a match start at the
-/// bytes of its span that are not continuation bytes. Of two matches, the one that starts later
-/// therefore has the candidate's character later too, and one start has at most one match, so
-/// the first hit that verifies is the leftmost match and also the longest one there.
+/// RE2's Latin-1 mode and Rust's byte mode, reads one byte, which the position's masks decide:
+/// two words for the ASCII bytes, loaded by the position alone, so they load while the byte
+/// does, and only in a Latin-1 pattern with a class above ASCII, two more for the bytes above
+/// ASCII, which only such a byte reads. When every position reads one byte, a match has as
+/// many bytes as positions and a search reads no characters. A UTF-8 position with members
+/// above ASCII reads the character there as the compiled class's byte ranges read it,
+/// malformed input included ([Utf8#re2DecodeClassCharacter]), so matches can differ in byte
+/// length. Every character such a position or an ASCII position accepts begins with a byte
+/// that is not a continuation byte, and any bytes after it are continuation bytes, so the
+/// positions of a match start at the bytes of its span that are not continuation bytes. Of two
+/// matches, the one that starts later therefore has the candidate's character later too, and
+/// one start has at most one match, so the first hit that verifies is the leftmost match and
+/// also the longest one there.
 ///
 /// When neither an ASCII singleton scan nor a rare candidate applies, a pattern such as
 /// `\w{5}\s\w{6}\s\w{7}`, whose positions all read one byte, instead tests every start of a
@@ -139,11 +142,16 @@ final class FixedWidthByteSpanMatcher
     private static final byte NON_ASCII_RANGES = 2;
 
     private final int width;
-    // The bytes each position accepts, the ASCII ones of a UTF-8 position, in 1 << maskShift
-    // words: two where no position accepts a byte above ASCII, as in every UTF-8 pattern, and
-    // otherwise four. Null for the block search, which reads its classes instead.
-    private final long[] masks;
-    private final int maskShift;
+    // The ASCII bytes each position accepts, two words for each position: at 2 * index its
+    // members below 64, and at 2 * index + 1 that word XOR its members from 64 to 127, so
+    // containsByte reconstructs the membership word without a branch. Both words are addressed by
+    // the position alone, so their loads can overlap the read of the input byte. Null for block
+    // searches, which read blockClasses instead.
+    private final long[] asciiMasks;
+    // The bytes above ASCII each position accepts, two words for each position, where a
+    // position of a Latin-1 pattern accepts one, and otherwise null, as in every UTF-8 pattern,
+    // whose positions that read one byte accept only ASCII.
+    private final long[] upperMasks;
     // Each position's reading, or null when every position reads one byte.
     private final byte[] kinds;
     // Each NON_ASCII_RANGES position's inclusive rune ranges, null at every other position, or
@@ -171,7 +179,6 @@ final class FixedWidthByteSpanMatcher
     private FixedWidthByteSpanMatcher(List<Position> positions, boolean readsCharacters, boolean latin1NonAscii, int candidateOffset, boolean yieldsToEngineScans, BlockClasses blockClasses)
     {
         width = positions.size();
-        maskShift = latin1NonAscii ? 2 : 1;
         kinds = readsCharacters ? new byte[width] : null;
         runeRanges = readsCharacters ? new int[width][] : null;
         this.candidateOffset = candidateOffset;
@@ -180,7 +187,8 @@ final class FixedWidthByteSpanMatcher
         if (blockClasses != null) {
             // The block search reads its classes, not the masks, and its positions all read one
             // byte, so kinds and runeRanges are null too.
-            masks = null;
+            asciiMasks = null;
+            upperMasks = null;
             bailsOnDenseCandidates = false;
             candidate = null;
             candidateTable = null;
@@ -188,10 +196,16 @@ final class FixedWidthByteSpanMatcher
             candidateNibbleTables = null;
             return;
         }
-        masks = new long[width << maskShift];
+        asciiMasks = new long[2 * width];
+        upperMasks = latin1NonAscii ? new long[2 * width] : null;
         for (int index = 0; index < width; index++) {
             Position position = positions.get(index);
-            System.arraycopy(position.mask(), 0, masks, index << maskShift, 1 << maskShift);
+            asciiMasks[2 * index] = position.mask()[0];
+            asciiMasks[2 * index + 1] = position.mask()[0] ^ position.mask()[1];
+            if (upperMasks != null) {
+                upperMasks[2 * index] = position.mask()[2];
+                upperMasks[2 * index + 1] = position.mask()[3];
+            }
             if (readsCharacters) {
                 kinds[index] = position.kind();
                 runeRanges[index] = position.runeRanges();
@@ -391,7 +405,7 @@ final class FixedWidthByteSpanMatcher
 
     long estimatedRetainedSize()
     {
-        long size = INSTANCE_SIZE + SizeOf.sizeOf(masks);
+        long size = INSTANCE_SIZE + SizeOf.sizeOf(asciiMasks) + SizeOf.sizeOf(upperMasks);
         if (kinds != null) {
             size += SizeOf.sizeOf(kinds) + SizeOf.sizeOf(runeRanges);
             // The repetitions of a repeated position or group share its ranges, counted once.
@@ -681,6 +695,13 @@ final class FixedWidthByteSpanMatcher
     boolean searchesBlocksForDiagnostics()
     {
         return blockClasses != null;
+    }
+
+    /// Returns whether the matcher holds masks for the bytes above ASCII, as only a Latin-1
+    /// pattern with a class above ASCII does.
+    boolean holdsMasksAboveAsciiForDiagnostics()
+    {
+        return upperMasks != null;
     }
 
     /// Returns whether the search yields to the engine's scans: whether its candidate was chosen
@@ -1185,9 +1206,11 @@ final class FixedWidthByteSpanMatcher
     {
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset() + start;
-        for (int index = 0; index < width; index++) {
+        // Bounded by the array's length, two words a position, so the check of each position
+        // needs no range check.
+        for (int index = 0; index < asciiMasks.length >>> 1; index++) {
             // The candidate position accepts exactly the bytes the scan finds.
-            if (index != candidateOffset && !containsByte(index, bytes[inputOffset + index] & 0xFF)) {
+            if (index != candidateOffset && !containsByte(index, bytes[inputOffset + index])) {
                 return false;
             }
         }
@@ -1226,7 +1249,7 @@ final class FixedWidthByteSpanMatcher
     {
         int value = bytes[position] & 0xFF;
         if (value < 0x80 || kinds[index] == ONE_BYTE) {
-            return containsByte(index, value) ? position + 1 : -1;
+            return containsByte(index, bytes[position]) ? position + 1 : -1;
         }
         if (kinds[index] == ALL_NON_ASCII) {
             // The lenient byte ranges accept every character re2CharacterWidth reads.
@@ -1243,15 +1266,28 @@ final class FixedWidthByteSpanMatcher
     {
         int value = bytes[end - 1] & 0xFF;
         if (value < 0x80 || kinds[index] == ONE_BYTE) {
-            return containsByte(index, value) ? end - 1 : -1;
+            return containsByte(index, bytes[end - 1]) ? end - 1 : -1;
         }
         int characterStart = Utf8.previousCharacterStart(bytes, start, end);
         return readForward(index, bytes, characterStart, end) == end ? characterStart : -1;
     }
 
-    private boolean containsByte(int index, int value)
+    /// Returns whether position `index` accepts byte `value`. A byte above ASCII, negative
+    /// here, reads `upperMasks`, held only by Latin-1 or Rust byte patterns with a class above
+    /// ASCII. For ASCII, the words at `2 * index` and `2 * index + 1` hold low and low XOR
+    /// high. Bit 6 selects low for bytes 0..63 or reconstructs high for bytes 64..127,
+    /// without a branch. Both loads depend only on the position, so they can overlap the
+    /// input-byte load.
+    private boolean containsByte(int index, byte value)
     {
-        return (value < 0x80 || maskShift == 2) && ((masks[(index << maskShift) | (value >>> 6)] >>> value) & 1) != 0;
+        if (value < 0) {
+            return upperMasks != null && ((upperMasks[(index << 1) | ((value >>> 6) & 1)] >>> value) & 1) != 0;
+        }
+        long low = asciiMasks[2 * index];
+        long difference = asciiMasks[2 * index + 1];
+        // All ones for a byte from 64 to 127, which turns the low word into the high one.
+        long mask = low ^ (difference & -(long) (value >>> 6));
+        return ((mask >>> value) & 1) != 0;
     }
 
     private static boolean containsRune(int[] ranges, int rune)
