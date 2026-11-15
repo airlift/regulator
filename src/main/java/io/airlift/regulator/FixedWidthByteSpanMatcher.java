@@ -175,6 +175,13 @@ final class FixedWidthByteSpanMatcher
     // The block search's classes, with candidateOffset -1, or null where the search scans a
     // candidate.
     private final BlockClasses blockClasses;
+    // Whether a search shorter than the vector scan's runs searchCandidateByte, and a count
+    // countCandidateBytes: a candidate of one byte that never bails, in a pattern whose every
+    // position reads one byte.
+    private final boolean searchesCandidateByte;
+    // Counts the searchCandidateByte searches for the diagnostics, only when tests turn on route
+    // counts: every thread searching a compiled pattern shares this matcher.
+    private long candidateByteSearchCount;
 
     private FixedWidthByteSpanMatcher(List<Position> positions, boolean readsCharacters, boolean latin1NonAscii, int candidateOffset, boolean yieldsToEngineScans, BlockClasses blockClasses)
     {
@@ -194,6 +201,7 @@ final class FixedWidthByteSpanMatcher
             candidateTable = null;
             candidateScanSet = 0;
             candidateNibbleTables = null;
+            searchesCandidateByte = false;
             return;
         }
         asciiMasks = new long[2 * width];
@@ -240,6 +248,7 @@ final class FixedWidthByteSpanMatcher
         candidateTable = table;
         candidateScanSet = scanSet;
         candidateNibbleTables = nibbleTables;
+        searchesCandidateByte = candidate != null && !readsCharacters && !bailsOnDenseCandidates;
     }
 
     static FixedWidthByteSpanMatcher analyze(Regexp regexp, ExpressionAnalysis analysis)
@@ -704,6 +713,26 @@ final class FixedWidthByteSpanMatcher
         return upperMasks != null;
     }
 
+    /// Returns the number of [#searchCandidateByte] searches this matcher ran: one for each find
+    /// on that route, and for each count one from its start and one from the end of each match,
+    /// the last of which finds none. Other routes leave it unchanged. Only tests count them, under
+    /// the DFA's route count switch.
+    long candidateByteSearchCountForDiagnostics()
+    {
+        if (!Dfa.COUNTS_ROUTES) {
+            throw new IllegalStateException("Candidate byte search counting is off; set -Dio.airlift.regulator.dfa.route-counts=true");
+        }
+        return candidateByteSearchCount;
+    }
+
+    // A call site is smaller bytecode than a field increment, so counting grows no caller.
+    private void countCandidateByteSearch()
+    {
+        if (Dfa.COUNTS_ROUTES) {
+            candidateByteSearchCount++;
+        }
+    }
+
     /// Returns whether the search yields to the engine's scans: whether its candidate was chosen
     /// as rare, under [#MAXIMUM_CANDIDATE_PROBABILITY], as for every pattern but an
     /// [ASCII singleton pattern][#isAsciiSingletonPattern], or it tests blocks for want of one.
@@ -736,6 +765,9 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(input, 0)) {
             return searchLong(input, 0, true, false);
         }
+        if (searchesCandidateByte) {
+            return countCandidateBytes(input);
+        }
         return kinds != null
                 ? searchCharacters(input, 0, true, false)
                 : blockClasses != null
@@ -745,14 +777,17 @@ final class FixedWidthByteSpanMatcher
 
     /// Returns [#count(Slice)], or, where the count bails on dense candidates, a negative value
     /// from which [#countBeforeBail] reads the matches counted and [#resumeAfterBail] where the
-    /// last of them ended, zero when none was counted. The whole count is one search, so its
-    /// failures and the bytes they are measured against run from the input start across every
-    /// match.
+    /// last of them ended, zero when none was counted. A count that can bail is one search, so
+    /// its failures and the bytes they are measured against run from the input start across
+    /// every match.
     long countOrBail(Slice input)
     {
         requireNonNull(input, "input is null");
         if (usesSingleByteVectorScan(input, 0)) {
             return searchLong(input, 0, true, bailsOnDenseCandidates);
+        }
+        if (searchesCandidateByte) {
+            return countCandidateBytes(input);
         }
         return kinds != null
                 ? searchCharacters(input, 0, true, bailsOnDenseCandidates)
@@ -786,6 +821,9 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(input, start)) {
             return searchLong(input, start, false, false);
         }
+        if (searchesCandidateByte) {
+            return searchCandidateByte(input, start);
+        }
         return kinds != null
                 ? searchCharacters(input, start, false, false)
                 : blockClasses != null
@@ -807,6 +845,9 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(region, start)) {
             return searchLong(region, start, false, bailsOnDenseCandidates);
         }
+        if (searchesCandidateByte) {
+            return searchCandidateByte(region, start);
+        }
         return kinds != null
                 ? searchCharacters(region, start, false, bailsOnDenseCandidates)
                 : blockClasses != null
@@ -817,8 +858,9 @@ final class FixedWidthByteSpanMatcher
     /// Returns the first match's span at or after `start`, or with `counting`, the number of
     /// matches from there; or, with `bailing`, [#BAILED] or a bailed count once the candidates
     /// that fail are dense. [#searchLongBytes] copies this loop for a
-    /// [long one-byte candidate search][#usesSingleByteVectorScan]; its matching, restart, and
-    /// bail logic must stay the same as this one's.
+    /// [long one-byte candidate search][#usesSingleByteVectorScan], and [#searchCandidateByte]
+    /// copies its find for a shorter one that never bails; their matching and restart logic must
+    /// stay the same as this one's.
     private long searchBytes(Slice input, int start, boolean counting, boolean bailing)
     {
         int lastStart = input.length() - width;
@@ -860,6 +902,61 @@ final class FixedWidthByteSpanMatcher
             candidatePosition = found + 1;
         }
         return counting ? count : Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH], for a
+    /// candidate of one byte that never bails, in a pattern whose every position reads one byte.
+    /// The entries call it for a search shorter than the
+    /// [vector scan's][#usesSingleByteVectorScan], or for any search without the Vector API, and
+    /// it finds each candidate with `Slice.indexOf`. It copies [#searchBytes]'s find and keeps
+    /// only what such a search needs: with the shared loop's scan choice and failure count live
+    /// across `Slice.indexOf` and the check of each candidate, C2 spilled the matcher's fields
+    /// and loop state to the stack at each candidate.
+    private long searchCandidateByte(Slice input, int start)
+    {
+        countCandidateByteSearch();
+        int lastStart = input.length() - width;
+        if (start < 0 || start > lastStart) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+
+        int lastCandidate = lastStart + candidateOffset;
+        int candidatePosition = start + candidateOffset;
+        // lastCandidate is at least candidatePosition, so an unsigned compare also ends the loop
+        // on a candidate position that overflowed past Integer.MAX_VALUE.
+        while (Integer.compareUnsigned(candidatePosition, lastCandidate) <= 0) {
+            int found = input.indexOf(candidate, candidatePosition);
+            if (found < 0 || found > lastCandidate) {
+                return Dfa.SEARCH_NO_MATCH;
+            }
+            int matchStart = found - candidateOffset;
+            if (matchesBytes(input, matchStart)) {
+                int matchEnd = matchStart + width;
+                return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
+            }
+            candidatePosition = found + 1;
+        }
+        return Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// Returns the number of non-overlapping matches in `input` for a matcher that runs
+    /// [#searchCandidateByte], which it calls from the input start and then from the end of each
+    /// match, until a search finds none. C2 compiles the search on its own and calls it, as 2.0's
+    /// count called its search: a count kept in the search's loop stayed live across
+    /// `Slice.indexOf` and the check, and a UUID count stored 14 values to the stack each time it
+    /// searched for a candidate.
+    private long countCandidateBytes(Slice input)
+    {
+        long count = 0;
+        int searchStart = 0;
+        while (true) {
+            long span = searchCandidateByte(input, searchStart);
+            if (span < 0) {
+                return count;
+            }
+            count++;
+            searchStart = (int) span;
+        }
     }
 
     /// [#searchBytes] for a pattern that [searches blocks][#BLOCK_BYTES]. A block starts at each
@@ -1030,11 +1127,12 @@ final class FixedWidthByteSpanMatcher
     /// vector byte-set scan, as a one-byte literal search does: a search of at least
     /// [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] candidate positions where the Vector API is
     /// available, which runs in [#searchLong]. A shorter search keeps the word-at-a-time scan of
-    /// `Slice.indexOf` in [#searchBytes] or [#searchCharacters], which compile as they would
-    /// without the vector scan: a length test on each candidate search made short rows up to
-    /// 3.6% slower on Graviton, and holding the array for the vector call up to 8.5% slower on
-    /// x86-64. Each entry makes the choice before it dispatches on the reading, since the length
-    /// test would push [#searchCharacters] past C2's inline size (`TestHotMethodSize`).
+    /// `Slice.indexOf` in [#searchCandidateByte], [#searchBytes], or [#searchCharacters], which
+    /// compile as they would without the vector scan: a length test on each candidate search
+    /// made short rows up to 3.6% slower on Graviton, and holding the array for the vector call
+    /// up to 8.5% slower on x86-64. Each entry makes the choice before it dispatches on the
+    /// reading, since the length test would push [#searchCharacters] past C2's inline size
+    /// (`TestHotMethodSize`).
     boolean usesSingleByteVectorScan(Slice input, int start)
     {
         // The search has a candidate position for each match start from start to
