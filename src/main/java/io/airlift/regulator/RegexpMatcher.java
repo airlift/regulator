@@ -51,11 +51,11 @@ public final class RegexpMatcher
     // fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
     // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
-    // The pattern's literal-alternation, literal-set, dot-star literal, or fixed-width span search,
-    // which find() runs in place of the program, a literal alternation's only on fewer than
-    // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes and a short-search fixed-width matcher's
-    // only on searches too short for the inner literal search. See
-    // CompiledPattern.groupZeroSpanSearch.
+    // The pattern's exact-literal, literal-alternation, literal-set, dot-star literal, or
+    // fixed-width span search, which find() runs in place of the program, a literal
+    // alternation's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes and a
+    // short-search fixed-width matcher's only on searches too short for the inner literal
+    // search. See CompiledPattern.groupZeroSpanSearch.
     private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
     // Created by the constructor for a matcher with no single-byte table, span search, or class
@@ -272,15 +272,18 @@ public final class RegexpMatcher
     {
         int start = regionStart + nextFindStart;
         long span;
-        if (spanSearch instanceof LiteralAlternationSpanMatcher literalAlternation) {
+        // An exact literal is its own span search, found by its prefix scan or substring search.
+        if (spanSearch == pattern) {
+            span = pattern.findExactLiteralSpan(input, start, regionEnd);
+        }
+        else if (spanSearch instanceof LiteralAlternationSpanMatcher literalAlternation) {
             // A region with at least MINIMUM_LONG_SEARCH_BYTES left takes the program's search,
             // whose start-byte scan the span search replaced: the DFA candidate cursor where the
             // literals differ in length, and the group-zero forward cursor where they share one.
             // Without it, a matcher's finds of ERROR|WARN|FATAL took 2.0x the time on r9g and
             // 4.4-4.6x on r8i on 1 KiB rows; 16 to 64 byte rows measured flat.
             if (regionEnd - start >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
-                createLongSearchCandidateStartCursor();
-                return rustSearch ? findRust() : findGeneral();
+                return findOnProgramFromSpanSearch();
             }
             // With fewer bytes left, the span search takes the root-table loop and carries no
             // route from one find to the next.
@@ -303,8 +306,7 @@ public final class RegexpMatcher
             // search, as a find of the pattern without the matcher would.
             span = ((FixedWidthByteSpanMatcher) spanSearch).findSpanOrBail(input, start, regionEnd);
             if (span == FixedWidthByteSpanMatcher.BAILED) {
-                createLongSearchCandidateStartCursor();
-                return rustSearch ? findRust() : findGeneral();
+                return findOnProgramFromSpanSearch();
             }
         }
         if (span < 0) {
@@ -365,6 +367,14 @@ public final class RegexpMatcher
             }
         }
         return false;
+    }
+
+    /// Hands a span search's find to the program, creating the candidate cursor on the first such
+    /// find. It is out of line so that [#findSpanSearch] stays small enough for C2 to inline.
+    private boolean findOnProgramFromSpanSearch()
+    {
+        createLongSearchCandidateStartCursor();
+        return rustSearch ? findRust() : findGeneral();
     }
 
     /// Creates the candidate cursor the first time a span search hands a find to the program:

@@ -32,8 +32,11 @@ import java.util.stream.Stream;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
+import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
+import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -205,6 +208,85 @@ public class TestPublicEngineAgreement
                 }
             }
         }
+    }
+
+    @Test
+    public void testExactLiteralSpanRegions()
+    {
+        // A nonempty exact literal's unanchored one-shot searches of a range, find, findInto with
+        // group zero alone or with a second pair, which stays unset, and findResult, in RE2, Java,
+        // and Rust, and a group-zero matcher's finds in every language, Trino's included, take the
+        // exact-literal span search and run no program. Their spans are those of the generic
+        // matcher of the literal inside a capture, which keeps the program, in every region of a
+        // Slice view that begins inside its byte array: a region end inside an occurrence leaves
+        // it unmatched, `aab` holds `ab` after a false start, and nothing matches the malformed
+        // byte at the #. The long input's windows of at least 64 bytes take the literal's prefix
+        // scan, which must not report an occurrence that ends past the region's end. A one-byte
+        // literal's matcher finds on the single-byte table, so only its one-shot searches are
+        // checked here. Java's `(?x)a b` is the literal `ab`, so it takes the route too.
+        String text = "!!ab aab ERRORβeta ERRERROR R#ab ERROR βeta ab?";
+        byte[] bytes = utf8Slice(text).getBytes();
+        bytes[utf8Slice(text.substring(0, text.indexOf('#'))).length()] = (byte) 0xFF;
+        Slice input = wrappedBuffer(bytes, 2, bytes.length - 3);
+        byte[] longBytes = utf8Slice("!!ab" + "x".repeat(100) + "aab" + "x".repeat(80) + "ERRORβeta" + "x".repeat(70) + "R?").getBytes();
+        Slice longInput = wrappedBuffer(longBytes, 2, longBytes.length - 3);
+
+        record Row(CompiledPattern pattern, CompiledPattern captured, boolean oneShot) {}
+
+        List<Row> rows = new ArrayList<>();
+        for (String literal : List.of("ab", "ERROR", "βeta", "R")) {
+            rows.add(new Row(Re2.compile(utf8Slice(literal)), Re2.compile(utf8Slice("(" + literal + ")")), true));
+            rows.add(new Row(JavaRegexp.compile(utf8Slice(literal)), JavaRegexp.compile(utf8Slice("(" + literal + ")")), true));
+            rows.add(new Row(RustRegexp.compile(utf8Slice(literal)), RustRegexp.compile(utf8Slice("(" + literal + ")")), true));
+            rows.add(new Row(TrinoRegexp.compile(utf8Slice(literal)).re2(), TrinoRegexp.compile(utf8Slice("(" + literal + ")")).re2(), false));
+        }
+        rows.add(new Row(Re2.compile(utf8Slice("ab"), Re2.Options.latin1()), Re2.compile(utf8Slice("(ab)"), Re2.Options.latin1()), true));
+        rows.add(new Row(RustRegexp.compile(utf8Slice("(?-u)ab"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?-u)(ab)"), RustRegexp.Options.bytes()), true));
+        rows.add(new Row(JavaRegexp.compile(utf8Slice("(?x)a b")), JavaRegexp.compile(utf8Slice("(?x)(a b)")), true));
+        for (Row row : rows) {
+            CompiledPattern pattern = row.pattern();
+            String label = label(pattern);
+            assertThat(shape(pattern)).as(label).isEqualTo(EXACT_LITERAL);
+            assertThat(shape(row.captured())).as(label(row.captured())).isEqualTo(EXACT_LITERAL);
+            if (row.oneShot()) {
+                RegexpMatcher generic = row.captured().genericGroupZeroMatcherForDiagnostics(input);
+                for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+                    for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                        assertOneShotRegion(pattern, generic, input, regionStart, regionEnd, label);
+                    }
+                }
+                RegexpMatcher longGeneric = row.captured().genericGroupZeroMatcherForDiagnostics(longInput);
+                for (int regionStart : List.of(0, 1, 2, 3, 103)) {
+                    for (int regionEnd = regionStart; regionEnd <= longInput.length(); regionEnd++) {
+                        assertOneShotRegion(pattern, longGeneric, longInput, regionStart, regionEnd, label + " on long input");
+                    }
+                }
+                int[] groups = {7, 7};
+                assertThat(pattern.findInto(longInput, groups)).as(label).isTrue();
+                longGeneric.reset(longInput);
+                assertThat(longGeneric.find()).as(label).isTrue();
+                assertThat(groups).as(label).containsExactly(longGeneric.start(), longGeneric.end());
+                assertNoProgramSearch(pattern, label);
+            }
+            if (pattern.sharedSingleByteMatcher() == null) {
+                assertThat(pattern.groupZeroSpanSearch()).as(label).isSameAs(pattern);
+                assertSpanSearchRegions(pattern, pattern.getClass(), input, row.captured());
+                assertSpanSearchRegions(pattern, pattern.getClass(), longInput, row.captured());
+                assertNoProgramSearch(pattern, label);
+            }
+        }
+
+        // A one-shot search of a literal with captures keeps the program, which reports them, and
+        // so does one of a Java pattern whose flags make it no exact literal.
+        Re2 captures = Re2.compile(utf8Slice("(ab)"));
+        int[] groups = new int[4];
+        assertThat(captures.findInto(input, groups)).isTrue();
+        assertThat(groups).containsExactly(0, 2, 0, 2);
+        assertProgramSearch(captures, label(captures));
+        JavaRegexp caseInsensitive = JavaRegexp.compile(utf8Slice("(?i)ab"));
+        assertThat(shape(caseInsensitive)).isNotEqualTo(EXACT_LITERAL);
+        assertThat(caseInsensitive.findInto(utf8Slice("xAb"), new int[2])).isTrue();
+        assertProgramSearch(caseInsensitive, label(caseInsensitive));
     }
 
     @Test
