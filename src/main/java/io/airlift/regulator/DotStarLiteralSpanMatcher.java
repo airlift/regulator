@@ -53,7 +53,8 @@ sealed class DotStarLiteralSpanMatcher
 
     private final Slice literal;
     // The pattern's shared contains search for this literal, or null for a one-byte literal or
-    // no room beside the forward DFAs. Null selects Slice.indexOf.
+    // no room beside the forward DFAs. Null, or a window shorter than
+    // LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES, selects Slice.indexOf.
     private final LiteralSearchKernel search;
     private final byte[] characterWidths;
 
@@ -181,7 +182,7 @@ sealed class DotStarLiteralSpanMatcher
     // inline depth below the public entries; see CompiledPattern.oneShotDotStarLiteral.
     private long findSpanWithinLine(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
-        int literalStart = search != null ? search.findContains(input, start, end - start) : findLiteral(input, start, end);
+        int literalStart = LiteralSearchKernel.searchesWindow(search, end - start) ? search.findContains(input, start, end - start) : indexOfLiteral(input, start, end);
         if (literalStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }
@@ -262,11 +263,17 @@ sealed class DotStarLiteralSpanMatcher
 
     private int findLiteral(Slice input, int start, int end)
     {
-        if (search != null) {
+        if (LiteralSearchKernel.searchesWindow(search, end - start)) {
             return search.findContains(input, start, end - start);
         }
-        // Slice.indexOf searches to the end of its Slice, so a region that ends before the input
-        // searches a view that ends with it.
+        return indexOfLiteral(input, start, end);
+    }
+
+    // The search of a window the contains search does not take; see
+    // LiteralSearchKernel.searchesWindow. Slice.indexOf searches to the end of its Slice, so a
+    // region that ends before the input searches a view that ends with it.
+    private int indexOfLiteral(Slice input, int start, int end)
+    {
         return (end == input.length() ? input : input.slice(0, end)).indexOf(literal, start);
     }
 
@@ -517,7 +524,7 @@ sealed class DotStarLiteralSpanMatcher
         private long findSpanBetweenStops(Slice input, int start, int end, ScanDiagnostics diagnostics)
         {
             LiteralSearchKernel search = super.search;
-            int literalStart = search != null ? search.findContains(input, start, end - start) : super.findLiteral(input, start, end);
+            int literalStart = LiteralSearchKernel.searchesWindow(search, end - start) ? search.findContains(input, start, end - start) : super.indexOfLiteral(input, start, end);
             if (literalStart < 0) {
                 return Dfa.SEARCH_NO_MATCH;
             }

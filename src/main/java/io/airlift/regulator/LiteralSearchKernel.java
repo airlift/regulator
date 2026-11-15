@@ -38,12 +38,22 @@ final class LiteralSearchKernel
     // methods below, except the literal set scan, whose literals bound the comparisons at each
     // candidate.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
+    // Boolean contains and dot-star spans use Slice.indexOf below this window length.
+    // The AWS sweep placed the crossover between 48 and 64 bytes, with an approximate
+    // tie on r8i at 64; see REGULATOR_DECISIONS.md.
+    static final int MINIMUM_SEARCH_WINDOW_BYTES = 64;
 
     // The prefix shifts of every literal shorter than this table's 64 entries whose first byte
     // does not recur: no prefix of such a literal has a border, so every shift after the first is
     // zero. Kernels share it and never write it; KMP reads only the shifts below the literal's
     // length.
     private static final int[] BORDER_FREE_PREFIX_SHIFTS = borderFreePrefixShifts(64);
+    // The windows searchesWindow has sent to a contains search on each thread, counted only when
+    // tests turn on the DFA's route counts. A count on the kernel would grow it by 8 bytes even
+    // with counting off, and each pattern charges its kernel's size to its memory budget, so a
+    // DFA that fits a budget without it would not; each thread counts its own searches, so
+    // concurrent searches of a shared pattern do not race on one count.
+    private static final ThreadLocal<long[]> WINDOW_SEARCH_COUNTS = Dfa.COUNTS_ROUTES ? ThreadLocal.withInitial(() -> new long[1]) : null;
 
     private final byte[] literal;
     private final int[] prefixShifts;
@@ -229,6 +239,40 @@ final class LiteralSearchKernel
             matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd, literal, prefixShifts);
         }
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
+    }
+
+    /// Returns whether `search` is non-null and `windowLength` is at least
+    /// [#MINIMUM_SEARCH_WINDOW_BYTES]. Boolean contains and dot-star spans use this rule in
+    /// every language, regardless of literal length. With DFA route counts enabled, a true
+    /// result increments the calling thread's window-search count.
+    ///
+    /// Callers invoke `search` directly to keep its word reads within C2's inline depth below
+    /// the dot-star span entries; see [CompiledPattern#oneShotDotStarLiteral].
+    static boolean searchesWindow(LiteralSearchKernel search, int windowLength)
+    {
+        if (search == null || windowLength < MINIMUM_SEARCH_WINDOW_BYTES) {
+            return false;
+        }
+        countWindowSearch();
+        return true;
+    }
+
+    // A call site is smaller bytecode than a counter increment, so counting grows no caller.
+    private static void countWindowSearch()
+    {
+        if (Dfa.COUNTS_ROUTES) {
+            WINDOW_SEARCH_COUNTS.get()[0]++;
+        }
+    }
+
+    /// The windows [#searchesWindow] has sent to any contains search on the calling thread; only
+    /// tests call it, with the DFA's route counts on.
+    static long windowSearchCountForDiagnostics()
+    {
+        if (!Dfa.COUNTS_ROUTES) {
+            throw new IllegalStateException("Window search counting is off; set -Dio.airlift.regulator.dfa.route-counts=true");
+        }
+        return WINDOW_SEARCH_COUNTS.get()[0];
     }
 
     /// Returns the array-absolute index in `input` of the first occurrence of the literal in the

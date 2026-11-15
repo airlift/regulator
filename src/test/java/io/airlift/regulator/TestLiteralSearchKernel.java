@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -28,6 +29,16 @@ public class TestLiteralSearchKernel
 {
     // A block of findLast's vector scan at the widest supported width: four vectors of 64 bytes.
     private static final int WIDEST_BLOCK_BYTES = 4 * 64;
+
+    @Test
+    public void testInstanceLayout()
+    {
+        // A pattern charges its contains search's size to its memory budget, so a field only tests
+        // read would change which DFAs fit a budget; the window search count is kept per thread.
+        // The kernel is the size of a record of its search fields in every object layout, 48 bytes
+        // with compressed references.
+        assertThat(instanceSize(LiteralSearchKernel.class)).isEqualTo(instanceSize(KernelFields.class));
+    }
 
     @Test
     public void testBoundedOffsetSearch()
@@ -495,4 +506,14 @@ public class TestLiteralSearchKernel
         System.arraycopy(value, 0, bytes, 9, value.length);
         return Slices.wrappedBuffer(bytes).slice(9, value.length);
     }
+
+    // Mirrors the kernel's fields: the literal, its prefix shifts and those of its reverse, the
+    // broadcasts of its first and last bytes, and the low bits.
+    private record KernelFields(
+            byte[] literal,
+            int[] prefixShifts,
+            int[] lastOccurrenceShifts,
+            long frontBroadcast,
+            long backBroadcast,
+            long lowBits) {}
 }
