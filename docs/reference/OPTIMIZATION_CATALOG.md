@@ -314,8 +314,11 @@ so the automata run only where a match can be.
   pair for literals whose smallest period is at most half their length; the
   literal set form on those vector windows when the literals every match
   begins with run past a prefix shorter than six bytes and share a byte at the
-  same offset there; a Trino exact-literal span with fewer than 64 bytes left
-  uses `Slice.indexOf` instead, unless the probe byte moved; the masked pair
+  same offset there; an exact-literal span, in Trino's span operations and in
+  every language's group-zero matcher finds and one-shot searches, with fewer
+  than 64 bytes left in the Slice after the search start uses `Slice.indexOf`
+  instead, unless the probe byte moved;
+  the masked pair
   compare on x86 with 64-byte vectors only
 - **What it does:** A candidate must hold the prefix's first and last bytes
   before the whole prefix is compared. RE2 tests them 32 bytes at a time with
@@ -2359,8 +2362,8 @@ avoid copying input bytes, as
 ### Group-zero matcher routes
 
 - **Origin:** First described by the Rust regex crate
-  ([strategy.rs][ra-strategy]) for answering a literal alternation, and an
-  exact set of one-byte literals with a 256-entry table
+  ([strategy.rs][ra-strategy]) for answering a single literal, a literal
+  alternation, and an exact set of one-byte literals with a 256-entry table
   ([strategy.rs][ra-strategy] `Pre::from_prefixes`, [byteset.rs][ra-byteset]),
   without a regex engine, and by the JDK's 256-entry class table
   ([Pattern.java][jdk8-pattern] `BitClass`) for the one-byte table; Inspired
@@ -2368,11 +2371,18 @@ avoid copying input bytes, as
   Regulator: the one-byte table route and the 64-byte handoffs ([#122],
   [#123]).
 - **Where:** `RegexpMatcher.find`, `RegexpMatcher.findSpanSearch`,
-  `RegexpMatcher.findGeneral`
-- **Applies when:** Matchers that retain no capturing groups
+  `RegexpMatcher.findGeneral`, `CompiledPattern.findExactLiteralSpan`,
+  `CompiledPattern.oneShotExactLiteral`
+- **Applies when:** Matchers that retain no capturing groups; for an exact
+  literal, also its unanchored one-shot searches
 - **What it does:** A matcher that retains no capturing groups finds with a
   one-byte pattern's 256-entry table while fewer than 64 bytes remain, with
-  the span matchers, or with the class counter, before the program's search.
+  an exact literal's own span search, with the span matchers, or with the
+  class counter, before the program's search. The exact-literal span search,
+  which also answers the unanchored one-shot searches of an exact literal
+  without captures in RE2, Java, and Rust, runs the literal's prefix scan, or
+  `Slice.indexOf` when fewer than 64 bytes remain in the Slice after the
+  search start and the probe is the literal's first byte.
   A literal alternation and the short-row form of the fixed-width byte span
   hand regions of 64 bytes or more to the program's search. Matcher iteration
   of one-byte patterns on short rows runs in 0.33 to 0.37 of its earlier time

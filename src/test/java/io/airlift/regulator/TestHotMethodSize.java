@@ -95,6 +95,18 @@ public class TestHotMethodSize
                 .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
     }
 
+    /// Keeps the matcher's span search dispatch small enough for C2 to inline into
+    /// `RegexpMatcher.find`, which runs it on every find of a pattern with a group-zero span
+    /// search, such as a literal alternation iterated over a row.
+    @Test
+    public void testMatcherSpanSearchFitsInlineSize()
+    {
+        assertThat(codeLength(RegexpMatcher.class, "findSpanSearch"))
+                .as("RegexpMatcher.findSpanSearch bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+    }
+
     /// Keeps the word-run plan's searches and boundary check small enough for C2 to inline into the
     /// pre-engine plan dispatch, which runs once per match when a matcher iterates over dense
     /// `\b\w+\b` matches.
@@ -311,6 +323,25 @@ public class TestHotMethodSize
             assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), DotStarLiteralSpanMatcher.class))
                     .as("DotStarLiteralSpanMatcher methods %s.matchInto calls", type.getSimpleName())
                     .containsExactly(findSpan);
+        }
+    }
+
+    /// Keeps the exact literal's span searches small enough for C2 to inline into the group-zero
+    /// matcher find and the one-shot overrides of the RE2, Java, and Rust exact-literal classes
+    /// that call them, and each override's call to the region search direct: each frame between a
+    /// public one-shot entry and the prefix scan costs C2 inline depth.
+    @Test
+    public void testExactLiteralSpanSearchFitsInlineSize()
+    {
+        assertThat(codeLengths(CompiledPattern.class, "findExactLiteralSpan"))
+                .as("CompiledPattern.findExactLiteralSpan bytecode bytes")
+                .hasSize(2)
+                .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+        String findSpan = "findExactLiteralSpan" + MethodType.methodType(long.class, Slice.class, int.class, int.class).toMethodDescriptorString();
+        for (Class<?> type : List.of(Re2.ExactLiteralRe2.class, JavaRegexp.ExactLiteralJavaRegexp.class, RustRegexp.ExactLiteralRustRegexp.class)) {
+            assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), type))
+                    .as("%s.matchInto calls", type.getSimpleName())
+                    .contains(findSpan);
         }
     }
 

@@ -2067,8 +2067,10 @@ cascade when no scan plan applies, except on a Trino fixed-width pattern that
 compiled no program, whose every operation runs the [fixed-width
 matcher](#fixed-width-rare-class-candidates), on a [large literal
 set](#large-literal-alternations) that compiled no program, whose every
-operation runs the automaton, and on a `.*literal.*` pattern in RE2, Java, and
-Rust, whose unanchored searches run the dot-star literal matcher below. A
+operation runs the automaton, on a capture-free exact literal in RE2, Java,
+and Rust, whose unanchored one-shot searches use its exact-literal span
+search, and on a `.*literal.*` pattern in RE2, Java, and Rust, whose
+unanchored searches run the dot-star literal matcher below. A
 group-zero matcher of a one-byte pattern finds on the single-byte table in every
 language, Trino's included, while fewer than 64 bytes are left; a longer search
 runs the group-zero forward cursor, whose vector byte scan the table replaced,
@@ -2098,6 +2100,26 @@ reports the leftmost-first span lying entirely in the matcher's region, as the
 general engine does: a region end that cuts `abc` of `abc|x|ab` leaves `ab`.
 Compilation resolves the matcher; a pattern with a single-byte table or a class
 counter finds on that instead.
+
+A nonempty exact literal answers a group-zero `RegexpMatcher.find()` within the
+matcher's region in every language, Trino's included, and, without capturing
+groups, its unanchored one-shot searches in RE2, Java, and Rust, with the span
+search Trino's exact-literal operations use: the literal's prefix scan, or
+`Slice.indexOf` when fewer than 64 bytes remain in the Slice after the search
+start and the probe is the literal's first byte. The general engine ran a
+forward DFA for these searches, with the start at the end less the literal's
+length; on the 2.1 release run, `findInto` of `literal` took 3.6 to 4.1 times
+the Rust crate's time on r8i, whose find answers from its substring prefilter.
+The first occurrence from the search's start ends before any later one, so one
+that ends past the region's end leaves no match. The prefix scan reads only the
+region, so a loop of short range finds over a long text reads each byte a
+bounded number of times; `Slice.indexOf` may read fewer than 64 bytes past it. A
+one-byte literal's matcher keeps the single-byte table, and a one-shot search of
+a literal with a capture keeps the engine, which reports the capture. The
+exact-literal classes override the `matchInto` overload without workspace
+parameters, through which every one-shot search passes: C2 inlines no callee
+whose signature names a class not yet loaded, and a process that runs only exact
+literals may never load the engines' workspaces.
 
 The count of a `.*literal.*` pattern whose dots match any character but their
 stops, a line feed and at most seven others, a group-zero `RegexpMatcher.find()`

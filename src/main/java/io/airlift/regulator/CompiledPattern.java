@@ -34,6 +34,7 @@ import static java.util.Objects.requireNonNull;
 /// offsets are byte offsets relative to the logical Slice, not its backing array.
 @SuppressWarnings("CharUsedInArithmeticContext")
 abstract sealed class CompiledPattern
+        implements GroupZeroSpanSearch
         permits JavaRegexp,
                 Re2,
                 RustRegexp,
@@ -2240,16 +2241,20 @@ abstract sealed class CompiledPattern
     }
 
     /// Returns the span search that a group-zero [RegexpMatcher#find()] runs in place of the
-    /// program, or `null`: the pattern's literal-alternation matcher, literal set, dot-star literal
-    /// matcher, fixed-width matcher, or short-search fixed-width matcher, in that order, the same
-    /// one full-Slice count searches. It reads only what compilation fixed, so a pattern stores no
-    /// route of its own, and a pattern with a single-byte table or a class counter, which answer
-    /// the find themselves, has none. The span search is immutable and shared; a matcher keeps any
-    /// search state it carries between finds.
+    /// program, or `null`: an exact literal's own [#findExactLiteralSpan(Slice,int,int)], or the
+    /// pattern's literal-alternation matcher, literal set, dot-star literal matcher, fixed-width
+    /// matcher, or short-search fixed-width matcher, in that order, the same one full-Slice count
+    /// searches. It reads only what compilation fixed, so a pattern stores no route of its own,
+    /// and a pattern with a single-byte table or a class counter, which answer the find
+    /// themselves, has none. The span search is immutable and shared; a matcher keeps any search
+    /// state it carries between finds.
     GroupZeroSpanSearch groupZeroSpanSearch()
     {
         if (singleByteMatcher != null || matcherClassCounter != null || usesCompactBoundedCharacterClassForDiagnostics()) {
             return null;
+        }
+        if (hasExactLiteralShape()) {
+            return this;
         }
         if (booleanPlans.literalAlternationMatcher() != null) {
             return booleanPlans.literalAlternationMatcher();
@@ -2432,6 +2437,32 @@ abstract sealed class CompiledPattern
         return minimumLiteralLength >= 2;
     }
 
+    /// Whether this pattern has the [exact-literal shape][Shape#EXACT_LITERAL]: full-Slice find
+    /// searches for its nonempty exact literal, and no scan plan takes its other operations.
+    private boolean hasExactLiteralShape()
+    {
+        return exactLiteralLength > 0 && booleanPlans.find() == BooleanPlanKind.LITERAL_SEARCH && booleanPlans.scanPlan() == null;
+    }
+
+    /// Returns the span of the first occurrence of this pattern's nonempty exact literal that lies
+    /// in `[start, end)` of `input`, a valid range, packed as [#findExactLiteralSpan(Slice,int)]
+    /// packs it, or [Dfa#SEARCH_NO_MATCH]. The first occurrence from `start` ends before every
+    /// later one, so one that ends past `end` leaves none in the range. The prefix scan reads only
+    /// the range when [#exactLiteralSpanUsesPrefixScan(int)] selects it from the bytes remaining in
+    /// `input` after `start`. Otherwise the substring search may read fewer than
+    /// {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes past `end`. Thus a caller's
+    /// finds of short ranges across a long input read each byte a bounded number of times.
+    /// A group-zero [RegexpMatcher#find()] runs this as the pattern's span search, and the
+    /// one-shot unanchored searches of a pattern without captures, through
+    /// [#oneShotExactLiteral].
+    final long findExactLiteralSpan(Slice input, int start, int end)
+    {
+        long span = exactLiteralSpanUsesPrefixScan(input.length() - start)
+                ? findExactLiteralSpanWithPrefixScan(input, start, end)
+                : findExactLiteralSpan(input, start);
+        return (int) span > end ? Dfa.SEARCH_NO_MATCH : span;
+    }
+
     long findExactLiteralSpan(Slice input, int start)
     {
         requireNonNull(input, "input is null");
@@ -2446,7 +2477,7 @@ abstract sealed class CompiledPattern
         }
 
         if (exactLiteralSpanUsesPrefixScan(input.length() - start)) {
-            return findExactLiteralSpanWithPrefixScan(input, start);
+            return findExactLiteralSpanWithPrefixScan(input, start, input.length());
         }
         int matchStart = LiteralMatchKernel.find(input, booleanPlans.literal(), start);
         if (matchStart < 0) {
@@ -2465,12 +2496,13 @@ abstract sealed class CompiledPattern
         return remainingBytes >= EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES || partialProg.prefixAccelProbeOffset() != 0;
     }
 
-    /// Answers [#findExactLiteralSpan(Slice,int)] with the prefix scan. It is out of line so
-    /// that the short-row substring search stays small enough for C2 to inline into per-row callers
-    /// without pulling the prefix scan in with it.
-    private long findExactLiteralSpanWithPrefixScan(Slice input, int start)
+    /// Answers [#findExactLiteralSpan(Slice,int)] and [#findExactLiteralSpan(Slice,int,int)] with
+    /// the prefix scan of `[start, end)`. It is out of line so that the short-row substring search
+    /// stays small enough for C2 to inline into per-row callers without pulling the prefix scan in
+    /// with it.
+    private long findExactLiteralSpanWithPrefixScan(Slice input, int start, int end)
     {
-        int arrayMatchStart = findExactLiteral(input.byteArray(), input.byteArrayOffset() + start, input.length() - start);
+        int arrayMatchStart = findExactLiteral(input.byteArray(), input.byteArrayOffset() + start, end - start);
         if (arrayMatchStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }
@@ -4274,17 +4306,17 @@ abstract sealed class CompiledPattern
     {
         requireNonNull(text, "text is null");
         validateRange(text, start, end);
-        // The one-shot unanchored searches come here, unless a literal-kernel override answers them
-        // first through oneShotDotStarLiteral: find and findInto of a range, findInto,
-        // findResult, RE2's replaceFirst and extract, and each retry of a Rust search after an
-        // empty match that splits a character. A pattern with a required literal never makes
-        // such a retry, since none of its matches is empty. None of these callers has checked
-        // for the required literal yet. A matcher's searches take matchRegionInto after their own
-        // check, and RE2's replaceAll takes matchIntoAfterLoopCheck after its loop's check. A
-        // caller's own loop of range finds checks on every call, without the back-off, since
-        // each call is one search and the pattern keeps no state between them. The capture
-        // buffer is checked first, as the engine checks it before it reads any input. An
-        // unanchored search of a long window ends where longWindowSearchEnd bounds it, and the
+        // The one-shot unanchored searches come here, unless a literal-kernel or exact-literal
+        // override answers them first through oneShotDotStarLiteral or oneShotExactLiteral: find
+        // and findInto of a range, findInto, findResult, RE2's replaceFirst and extract, and each
+        // retry of a Rust search after an empty match that splits a character. A pattern with a
+        // required literal never makes such a retry, since none of its matches is empty. None of
+        // these callers has checked for the required literal yet. A matcher's searches take
+        // matchRegionInto after their own check, and RE2's replaceAll takes matchIntoAfterLoopCheck
+        // after its loop's check. A caller's own loop of range finds checks on every call, without
+        // the back-off, since each call is one search and the pattern keeps no state between them.
+        // The capture buffer is checked first, as the engine checks it before it reads any input.
+        // An unanchored search of a long window ends where longWindowSearchEnd bounds it, and the
         // context keeps the whole text.
         if (groups != null) {
             checkGroupsLength(groups);
@@ -4377,7 +4409,7 @@ abstract sealed class CompiledPattern
     /// the matcher. The one-shot unanchored searches come to matchInto: the range finds,
     /// `findInto`, `findResult`, and RE2's `replaceFirst` and `extract`. The RE2, Java, and Rust
     /// literal-kernel classes override matchInto to call this, then the matcher's span search
-    /// themselves, and [#setDotStarLiteralGroups]. C2 limits inline depth below the method it
+    /// themselves, and [#setOneShotSpanGroups]. C2 limits inline depth below the method it
     /// compiles, and forwarding frames spend that depth. A caller that inlines a public entry
     /// spends part of it above the entry, so every frame between the entry and the contains
     /// search's word reads costs the caller a frame of headroom: the route skips matchRegionInto,
@@ -4399,10 +4431,33 @@ abstract sealed class CompiledPattern
         return dotStarLiteral;
     }
 
-    /// Writes `span`, the dot-star literal matcher's result for a one-shot [#matchInto], into
-    /// `groups` as that call's matchRegionInto would: group zero on a match and every other group
-    /// unset, and every group unset on a miss. Returns whether it matched.
-    static boolean setDotStarLiteralGroups(long span, int[] groups)
+    /// Whether a one-shot [#matchInto] of an exact-literal pattern, after the checks that call
+    /// makes, runs [#findExactLiteralSpan(Slice,int,int)]: an unanchored call of a pattern without
+    /// capturing groups, which reports only group zero. The literal has no assertions and reads
+    /// no context, so the range alone decides. The RE2, Java, and Rust exact-literal classes
+    /// override matchInto to call this, then the span search themselves, and
+    /// [#setOneShotSpanGroups], for the inline depth that [#oneShotDotStarLiteral] describes. They
+    /// override the overload without workspaces, through which every one-shot search passes: C2
+    /// inlines no callee whose signature names a class not yet loaded, and a process that runs
+    /// only such patterns may never load the engines' workspace classes. As there, the route makes
+    /// no long-window check, which would never shorten the search.
+    final boolean oneShotExactLiteral(Slice text, int start, int end, Anchor anchor, int[] groups)
+    {
+        if (anchor != Anchor.UNANCHORED || capturingGroupCount != 0) {
+            return false;
+        }
+        requireNonNull(text, "text is null");
+        validateRange(text, start, end);
+        if (groups != null) {
+            checkGroupsLength(groups);
+        }
+        return true;
+    }
+
+    /// Writes `span`, a one-shot span search's result for [#matchInto], into `groups` as that
+    /// call's matchRegionInto would: group zero on a match and every other group unset, and every
+    /// group unset on a miss. Returns whether it matched.
+    static boolean setOneShotSpanGroups(long span, int[] groups)
     {
         if (groups != null) {
             Arrays.fill(groups, -1);

@@ -596,6 +596,16 @@ public sealed class RustRegexp
         {
             return lookingAtOnExactLiteral(input);
         }
+
+        @Override
+        boolean matchInto(Slice text, int start, int end, Anchor anchor, int[] groups)
+        {
+            // The span search runs here, not in a shared helper; see oneShotExactLiteral.
+            if (!oneShotExactLiteral(text, start, end, anchor, groups)) {
+                return super.matchInto(text, start, end, anchor, groups);
+            }
+            return setOneShotSpanGroups(findExactLiteralSpan(text, start, end), groups);
+        }
     }
 
     /// A pattern of the [literal-kernel shape][Shape#LITERAL_KERNEL].
@@ -645,7 +655,7 @@ public sealed class RustRegexp
             if (dotStarLiteral == null) {
                 return super.matchInto(text, start, end, anchor, groups, onePassWorkspace, bitStateWorkspace, nfaWorkspace);
             }
-            return setDotStarLiteralGroups(dotStarLiteral.findSpan(text, start, end, null), groups);
+            return setOneShotSpanGroups(dotStarLiteral.findSpan(text, start, end, null), groups);
         }
     }
 

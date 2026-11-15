@@ -258,7 +258,9 @@ public class TestRe2BooleanPlans
         }
         Set<String> overrides = switch (expected) {
             case ENGINE -> throw new IllegalArgumentException("the engine shape has no shape class");
-            case EXACT_LITERAL -> Set.of("find", "countMatches", "matches", "lookingAt");
+            // An exact literal runs its unanchored one-shot searches on its span search; Trino's
+            // runs them on the engine, and its TrinoRegexp answers them on the span search itself.
+            case EXACT_LITERAL -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "countMatches", "matches", "lookingAt") : Set.of("find", "countMatches", "matches", "lookingAt", "matchInto");
             // A literal kernel counts a dot-star literal's spans and runs its unanchored one-shot
             // searches and program calls on the dot-star literal matcher; Trino counts them on its
             // own dot-star subtype, so its literal-kernel class counts and runs its searches and
@@ -274,7 +276,7 @@ public class TestRe2BooleanPlans
         Set<String> routes = Set.of("find", "countMatches", "matches", "lookingAt");
         Set<String> declared = Arrays.stream(pattern.getClass().getDeclaredMethods())
                 .filter(method -> (routes.contains(method.getName()) && Arrays.equals(method.getParameterTypes(), new Class<?>[] {Slice.class})) ||
-                        (method.getName().equals("matchInto") && method.getParameterCount() == 8) ||
+                        (method.getName().equals("matchInto") && (method.getParameterCount() == 8 || method.getParameterCount() == 5)) ||
                         (method.getName().equals("matchInternal") && method.getParameterCount() == 9))
                 .map(Method::getName)
                 .collect(toSet());
