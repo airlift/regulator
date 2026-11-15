@@ -276,6 +276,10 @@ Regulator, and pinned Joni. A checksummed exhaustive ledger records
 incompatible syntax or semantics.
 A compatible workload that exceeds the fixed verification timeout remains a
 runtime `did-not-finish` outcome rather than being reclassified as incompatible.
+Starting with the 2.1 report, each bulk runner selects the workload's Rebar
+model, such as grep or count-spans, once per timed call, outside its per-line
+and per-match loops. The change moved both Regulator and comparator times, so
+bulk rows do not compare directly with the 2.0 report.
 
 Run semantic smoke tests before timing either side. A comparator mismatch is a
 correctness problem, not a performance result.

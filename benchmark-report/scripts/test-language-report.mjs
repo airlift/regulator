@@ -611,7 +611,7 @@ const delimiterCount = { ...literalCount, caseId: 'everyday/delimiter' };
 assert.match(workloadCommentary(delimiterCount).performance, /shared byte-class scanner/);
 assert.match(workloadCommentary({ ...delimiterCount, operation: 'reusedContains' }).performance, /shared byte-class scanner/);
 assert.equal(workloadCommentary({ ...delimiterCount, measurementSource: undefined }).performance, undefined);
-assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace' }).performance, /specialized character-run counter/);
+assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace' }).performance, /character-run counter over bytes/);
 assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace', operation: 'reusedContains' }).performance, /never builds the DFA/);
 const veryl = { ...reused, caseId: 'curated/05-lexer-veryl/single', language: 'java', operation: 'execute',
   population: 'bulk-text', source: 'fixture', workload: { pattern: '(token)' } };
