@@ -28,40 +28,37 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDfaAbsolutePointerTransitions
 {
-    // Each child also runs every test of TestDfaPairedTransitions, and the children force each
-    // paired-row form, so every host tests both forms whichever one it selects.
+    // Each child also runs every test of TestDfaPairedTransitions.
     @Test
     public void testWithAndWithoutNativeAccess()
             throws Exception
     {
-        for (boolean flatPairedRows : List.of(false, true)) {
-            ProbeResult disabled = runProbe(false, flatPairedRows);
-            assertThat(disabled.exitCode()).as("flat-paired-rows=%s: %s", flatPairedRows, disabled.output()).isZero();
-            assertThat(disabled.output()).contains("OK disabled flat-paired-rows=" + flatPairedRows);
-            assertThat(disabled.output()).doesNotContain("restricted method", "native access");
+        ProbeResult disabled = runProbe(false);
+        assertThat(disabled.exitCode()).as("%s", disabled.output()).isZero();
+        assertThat(disabled.output()).contains("OK disabled");
+        assertThat(disabled.output()).doesNotContain("restricted method", "native access");
 
-            ProbeResult enabled = runProbe(true, flatPairedRows);
-            assertThat(enabled.exitCode()).as("flat-paired-rows=%s: %s", flatPairedRows, enabled.output()).isZero();
-            assertThat(enabled.output()).contains("OK enabled flat-paired-rows=" + flatPairedRows);
-            assertThat(enabled.output()).doesNotContain("restricted method");
-        }
+        ProbeResult enabled = runProbe(true);
+        assertThat(enabled.exitCode()).as("%s", enabled.output()).isZero();
+        assertThat(enabled.output()).contains("OK enabled");
+        assertThat(enabled.output()).doesNotContain("restricted method");
     }
 
     @Test
     public void testProbeDeadlineTerminatesChild()
     {
-        assertThatThrownBy(() -> runProbe(false, false, Duration.ofNanos(1)))
+        assertThatThrownBy(() -> runProbe(false, Duration.ofNanos(1)))
                 .isInstanceOf(AssertionError.class)
                 .hasMessageContaining("pointer probe timed out");
     }
 
-    private static ProbeResult runProbe(boolean enableNativeAccess, boolean flatPairedRows)
+    private static ProbeResult runProbe(boolean enableNativeAccess)
             throws IOException, InterruptedException
     {
-        return runProbe(enableNativeAccess, flatPairedRows, Duration.ofSeconds(60));
+        return runProbe(enableNativeAccess, Duration.ofSeconds(60));
     }
 
-    private static ProbeResult runProbe(boolean enableNativeAccess, boolean flatPairedRows, Duration timeout)
+    private static ProbeResult runProbe(boolean enableNativeAccess, Duration timeout)
             throws IOException, InterruptedException
     {
         List<String> command = new ArrayList<>();
@@ -73,7 +70,6 @@ public class TestDfaAbsolutePointerTransitions
         command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.add("-Dio.airlift.regulator.dfa.pointer-reader-probe=true");
         command.add("-Dio.airlift.regulator.dfa.route-counts=true");
-        command.add("-Dio.airlift.regulator.dfa.flat-paired-rows=" + flatPairedRows);
         command.add("--illegal-native-access=deny");
         command.add("--add-modules");
         command.add("jdk.incubator.vector");

@@ -178,10 +178,7 @@ bytes the pattern treats alike share a class), so one load advances two bytes.
 
 For object rows, the whole table is built only when it fits an estimated
 64 KiB, or less when the DFA's budget has less room; otherwise the DFA pairs
-two rows within 16 KiB. On aarch64 the rows are one flat table of byte
-offsets, charged its real size, about half the object-row estimate, within
-32 KiB, or 8 KiB for two rows, so it pairs graphs the object-row estimate
-rejects. The two rows are chosen from the DFA's cached start states and the
+two rows within 16 KiB. The two rows are chosen from the DFA's cached start states and the
 states that loop on themselves, but only when exactly two qualify or the
 budget has room for only two. Paired rows and the pointer table never run
 together: the pointer table waits while paired rows exist, and once a pointer
