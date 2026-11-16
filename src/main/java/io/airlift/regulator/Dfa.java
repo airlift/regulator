@@ -89,7 +89,7 @@ final class Dfa
     private static final int SELF_LOOP_SAMPLE_PERCENTAGE = 90;
     private static final int SHORT_PAIRED_SEARCH_BYTES = 16;
     private static final int SHORT_PAIRED_SEARCH_LIMIT = 16;
-    private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 16;
+    private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 1;
     // Sidecar rows and entries are eight-byte aligned, so their low bits encode computed terminals.
     private static final long ABSOLUTE_POINTER_TAG_MASK = Long.BYTES - 1;
     private static final long ABSOLUTE_POINTER_MATCH_TAG = 1;

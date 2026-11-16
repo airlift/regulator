@@ -369,8 +369,9 @@ public class TestDfaRetainedState
 
         assertThat(trinoDfa.retainedStateMemory())
                 .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+        // A pointer table the search requested outlives the reset and keeps its charge.
         assertThat(trinoDfa.cacheSnapshot().stateBudget() - trinoDfa.cacheSnapshot().availableStateMemory())
-                .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+                .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes() + trinoDfa.absolutePointerTransitionMemory());
     }
 
     @Test
@@ -409,8 +410,9 @@ public class TestDfaRetainedState
         assertThat(rustDfa.cacheSnapshot().populatedStartStates()).isZero();
         assertThat(rustDfa.retainedStateMemory())
                 .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
+        // A pointer table the search requested outlives the reset and keeps its charge.
         assertThat(rustDfa.cacheSnapshot().stateBudget() - rustDfa.cacheSnapshot().availableStateMemory())
-                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes() + rustDfa.absolutePointerTransitionMemory());
     }
 
     @Test
