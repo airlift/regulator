@@ -83,8 +83,9 @@ const cpuOrders = [["r9g", "r8g", "r8i"], ["r9g", "r8i"], ["c9g", "c8g", "c8i"]]
 export function cpuOrder(data: Pick<ReportData, "platforms">): string[] {
   return cpuOrders.find(order => order.every(cpu => Object.hasOwn(data?.platforms || {}, cpu))) || [];
 }
-// The 1.0 release measured three regex languages; later campaigns add Rust.
-const languageOrders = [["re2", "java", "trino", "rust", "like"], ["re2", "java", "trino", "like"]];
+// Rust leads because its crate is the comparison most readers want. The 1.0 release measured three
+// regex languages; later campaigns add Rust.
+const languageOrders = [["rust", "re2", "java", "trino", "like"], ["re2", "java", "trino", "like"]];
 export function languageOrder(data: Pick<ReportData, "languages">): string[] {
   return languageOrders.find(order => order.every(language => Object.hasOwn(data?.languages || {}, language))) || [];
 }
@@ -531,7 +532,7 @@ export function RowEvidence({ row, reused, variants, comparator, missingSingle =
         {row.patternSummary.sourceUrl && <> See the <a href={row.patternSummary.sourceUrl}>benchmark definition and pattern source</a>.</>}
         {row.patternSummary.fullPatternAvailable && <> The full pattern is also included in the full results download.</>}</p>}
       {row.workload?.flags?.length ? <p>Flags: {row.workload.flags.join(", ")}</p> : null}
-      {row.memoryBudgetBytes != null && <><h4>Memory budget</h4><p>This row runs at a memory budget of its own, {budgetLabel(row.memoryBudgetBytes)}, set in the budget list: its whole setup runs at that budget rather than at each engine’s default. Every engine with a memory limit uses it: Regulator, native RE2 as its max_mem, and the Rust crate as both its compiled-size and its lazy DFA cache limits. JDK Pattern and Joni have no memory limit. Rows without a pill run each engine at its own default.</p></>}
+      {row.memoryBudgetBytes != null && <><h4>Memory budget</h4><p>This row runs at a memory budget of its own, {budgetLabel(row.memoryBudgetBytes)}, set in the budget list: its whole setup runs at that budget rather than at each engine’s default. Every engine with a memory limit uses it: Regulator, the Rust crate as both its compiled-size and its lazy DFA cache limits, and native RE2 as its max_mem. JDK Pattern and Joni have no memory limit. Rows without a pill run each engine at its own default.</p></>}
       <p>{operationDescription(row)}{reused && ` ${operationDescription(reused)}`}</p>
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
       {row.workload?.inputDescription && <p>{row.workload.inputDescription}</p>}
@@ -830,7 +831,7 @@ function selectionFromUrl(data?: Pick<ReportData, "platforms" | "languages">): S
   const parameters = new URLSearchParams(typeof window === "undefined" ? "" : window.location.hash.slice(1));
   const available = data ? cpuOrder(data) : cpuOrders.flat();
   const languages = data ? languageOrder(data) : languageOrders[0];
-  return { language: languages.includes(parameters.get("language") || "") ? parameters.get("language")! : "re2",
+  return { language: languages.includes(parameters.get("language") || "") ? parameters.get("language")! : languages[0],
     cpu: available.includes(parameters.get("cpu") || "") ? parameters.get("cpu")! : data ? available[0] : "c9g",
     memory: parameters.get("memory") === "safe" ? "safe" : "native" };
 }
@@ -1005,7 +1006,7 @@ function App() {
       if (cancelled) return;
       setManifest(manifest);
       if (!Object.hasOwn(manifest.languages, selection.language)) {
-        setSelection({ ...selection, language: "re2" });
+        setSelection({ ...selection, language: languageOrder(manifest)[0] });
         return;
       }
       if (!Object.hasOwn(manifest.platforms, selection.cpu)) {

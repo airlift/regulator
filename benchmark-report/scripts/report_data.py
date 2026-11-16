@@ -413,8 +413,8 @@ def summary_markdown(data: dict) -> str:
     calculated = subprocess.run(['node', str(REPORT_ROOT / 'scripts/summary-ratios.mjs')],
                                 input=encode_json(data), text=True, capture_output=True, check=True)
     ratios = json.loads(calculated.stdout)
-    comparators = {'re2': 'Native RE2', 'java': 'Java regex', 'trino': 'Trino regex (Joni)',
-                   'rust': 'Rust regex crate', 'like': 'Trino LIKE'}
+    comparators = {'rust': 'Rust regex crate', 're2': 'Native RE2', 'java': 'Java regex',
+                   'trino': 'Trino regex (Joni)', 'like': 'Trino LIKE'}
     lines = [SUMMARY_START, "| Compared with | Everyday expressions | Text processing |", "|---|---:|---:|"]
     for language, comparator in comparators.items():
         if language not in ratios:

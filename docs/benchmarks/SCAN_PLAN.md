@@ -1,6 +1,6 @@
 # Specialized scan plan
 
-The scan plan recognizes a bounded family of Trino, RE2, Java, and Rust
+The scan plan recognizes a bounded family of Rust, RE2, Java, and Trino
 patterns and executes literals, deterministic character runs, and captures over
 Slice bytes. It targets `contains`, match boundaries, captures, extraction, and
 replacement through the public APIs. RE2, Java, and Rust plans also admit runs
