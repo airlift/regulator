@@ -782,13 +782,12 @@ public class TestRegexpMatcher
     }
 
     @Test
-    public void testLiteralAlternationHandsOffToCandidateCursor()
+    public void testLiteralAlternationFindsOnSpanSearch()
     {
-        // A find with fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes left runs the
-        // literal-alternation span search, which builds no program search, and one with at least
-        // that many runs the candidate cursor, whose start-byte scan the span search replaced.
-        // Each find starts partway into a 1024-byte input, so the bytes left decide, not the
-        // input length, and the find that resumes after the match has 6 left.
+        // A find runs the literal-alternation span search, which builds no program search, with
+        // fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes left and with more. Each find
+        // starts partway into a 1024-byte input, and the find that resumes after the match has 6
+        // left.
         byte[] bytes = "x".repeat(1024).getBytes(US_ASCII);
         System.arraycopy("WARN".getBytes(US_ASCII), 0, bytes, 1014, 4);
         Slice input = Slices.wrappedBuffer(bytes);
@@ -804,13 +803,8 @@ public class TestRegexpMatcher
                 assertThat(matcher.find(input.length() - remaining)).as(label).isTrue();
                 assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(1014, 1018);
                 assertThat(matcher.find()).as(label).isFalse();
-                if (remaining < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
-                    assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(label).isZero();
-                    assertNoProgramSearch(pattern, label);
-                }
-                else {
-                    assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(label).isPositive();
-                }
+                assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(label).isZero();
+                assertNoProgramSearch(pattern, label);
             }
         }
     }

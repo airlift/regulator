@@ -1369,15 +1369,14 @@ public class TestLiteralAlternationSpanMatcher
     @Test
     public void testMatchersOwnTheirCandidateCursors()
     {
-        // Every find below, the one after each input's last match included, has more than
-        // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES left, so a matcher hands it from the span
-        // search to its own DFA candidate cursor. On near misses with an ERROR every 10,007 bytes
-        // the cursor's productivity check rejects the start-byte scan and turns the cursor off for
-        // the rest of the input, while on log lines of a few KiB it routes the finds. Two matchers
-        // of one compiled pattern interleave their finds over the two inputs, so a cursor shared
-        // between them would carry one input's verdict into the other's search; each matcher's
-        // spans are the general engine's. Then the first matcher, reset onto a shorter input,
-        // turns its cursor back on.
+        // On near misses with an ERROR every 10,007 bytes the span search finds the filter's stops
+        // dense at the first find's start and declines, so the matcher hands that find and the
+        // rest to its own DFA candidate cursor, whose productivity check rejects the start-byte
+        // scan and turns the cursor off for the rest of the input, while on log lines of a few KiB
+        // the span search finds every match itself. Two matchers of one compiled pattern
+        // interleave their finds over the two inputs, so a route shared between them would carry
+        // one input's verdict into the other's search; each matcher's spans are the general
+        // engine's. Then the first matcher, reset onto a shorter input, finds its matches again.
         // These near misses pass the start class filter each language's DFA builds for the
         // pattern, whose third offset reads R to T, so its productivity check still rejects the
         // scan; ERxO, WAxN, and FAxA would not pass it.
@@ -1417,12 +1416,11 @@ public class TestLiteralAlternationSpanMatcher
             assertThat(denseMatcher.candidateStartProductivityRejectionCountForDiagnostics()).as(expression).isPositive();
             assertThat(denseMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isZero();
             assertThat(logMatcher.candidateStartProductivityRejectionCountForDiagnostics()).as(expression).isZero();
-            assertThat(logMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isPositive();
+            assertThat(logMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isZero();
 
             denseMatcher.reset(dense);
             assertThat(denseMatcher.find()).as(expression).isTrue();
             assertThat(findSpans(denseMatcher.reset(shorter))).as(expression).containsExactly("0-4", "95-100", "101-106");
-            assertThat(denseMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isPositive();
         }
     }
 

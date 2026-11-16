@@ -2089,13 +2089,16 @@ and runs through the compiled pattern, which holds the program it bails to. A
 group-zero `RegexpMatcher.find()` of a fixed-width pattern, or of
 a [large literal alternation](#large-literal-alternations), searches the same
 matcher in every language, while Trino's span subtypes iterate theirs directly.
-A literal alternation's matcher searches by itself only while fewer than 64
-bytes are left, and a longer search takes the program's search, whose
-start-byte scan the matcher replaced: the DFA's candidate cursor, which the
-matcher creates on its first long search, where the literals differ in length,
-and the group-zero forward cursor where they share one. On 1 KiB rows of
-`ERROR|WARN|FATAL`, a matcher's finds without that hand-off took 2.0x the time
-on r9g and 4.4–4.6x on r8i, while 16 to 64 byte rows measured flat. The search
+A literal alternation's matcher searches by itself on every region, carrying
+its route from one find to the next in a cursor of its own, as Trino's matcher
+does. Where the filter's stops are dense at a find's start, it declines, and
+that find and the rest until a reset take the program's search: the DFA's
+candidate cursor, which the matcher creates on its first declined find, where
+the literals differ in length, and the group-zero forward cursor where they
+share one. An earlier rule handed every search with 64 bytes or more left to
+the program; on 1 KiB rows of `ERROR|WARN|FATAL`, a matcher's finds without
+that hand-off took 2.0x the time on r9g and 4.4–4.6x on r8i, while 16 to 64
+byte rows measured flat. The search
 reports the leftmost-first span lying entirely in the matcher's region, as the
 general engine does: a region end that cuts `abc` of `abc|x|ab` leaves `ab`.
 Compilation resolves the matcher; a pattern with a single-byte table or a class

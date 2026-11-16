@@ -2039,8 +2039,8 @@ ordinary engine would.
   matching, in every regex language, case-sensitive or ASCII literals whose
   letters fold case, or are written as classes of their two cases, where the
   language gives them exactly two cases, the folded ones only with a selective
-  filter and at most 64 bytes of literals per leading byte; a boolean find that
-  is dense from its start defers to the DFA
+  filter and at most 64 bytes of literals per leading byte; a boolean find, or
+  a matcher's find, that is dense from its start defers to the DFA
 - **What it does:** Up to 64 alternatives of up to 64 bytes go in a byte trie
   with a root table. When the span matcher runs with a filter and at least 64
   bytes left, the start literal filter skips non-starts; a filter route whose

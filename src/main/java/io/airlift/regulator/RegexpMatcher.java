@@ -52,16 +52,21 @@ public final class RegexpMatcher
     // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
     // The pattern's exact-literal, literal-alternation, literal-set, dot-star literal, or
-    // fixed-width span search, which find() runs in place of the program, a literal
-    // alternation's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes and a
-    // short-search fixed-width matcher's only on searches too short for the inner literal
-    // search. See CompiledPattern.groupZeroSpanSearch.
+    // fixed-width span search, which find() runs in place of the program, a short-search
+    // fixed-width matcher's only on searches too short for the inner literal search. See
+    // CompiledPattern.groupZeroSpanSearch.
     private final GroupZeroSpanSearch spanSearch;
+    // The route a literal alternation's span search carries from one find to the next, created
+    // on its first search, or null.
+    private LiteralAlternationSpanMatcher.Cursor literalAlternationCursor;
+    // Whether a literal alternation's span search declined a find since the last reset, so that
+    // the finds until the next reset take the program's search.
+    private boolean literalAlternationDeclined;
     private final BoundedCharacterClassCounter characterClassCounter;
     // Created by the constructor for a matcher with no single-byte table, span search, or class
-    // counter, by a literal alternation's matcher on its first long search, and by a fixed-width
-    // matcher on its first search that bails on dense candidates. See
-    // createLongSearchCandidateStartCursor.
+    // counter, by a literal alternation's matcher on its first search that the span search
+    // declines, and by a fixed-width matcher on its first search that bails on dense candidates.
+    // See createLongSearchCandidateStartCursor.
     private Dfa.CandidateStartCursor candidateStartCursor;
     private boolean longSearchCandidateStartCursorCreated;
     private final boolean enableGroupZeroForwardCursor;
@@ -229,6 +234,10 @@ public final class RegexpMatcher
         else {
             groupZeroForwardCursorInitialized = false;
         }
+        if (literalAlternationCursor != null) {
+            literalAlternationCursor.reset();
+        }
+        literalAlternationDeclined = false;
         nextFindStart = 0;
         retryStart = 0;
         previousMatchEnd = -1;
@@ -277,17 +286,15 @@ public final class RegexpMatcher
             span = pattern.findExactLiteralSpan(input, start, regionEnd);
         }
         else if (spanSearch instanceof LiteralAlternationSpanMatcher literalAlternation) {
-            // A region with at least MINIMUM_LONG_SEARCH_BYTES left takes the program's search,
-            // whose start-byte scan the span search replaced: the DFA candidate cursor where the
-            // literals differ in length, and the group-zero forward cursor where they share one.
-            // Without it, a matcher's finds of ERROR|WARN|FATAL took 2.0x the time on r9g and
-            // 4.4-4.6x on r8i on 1 KiB rows; 16 to 64 byte rows measured flat.
-            if (regionEnd - start >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
+            // The span search carries its route from one find to the next in the cursor, as
+            // Trino's matcher does. Where the filter's stops are dense at a find's start, it
+            // declines, and that find and the rest until a reset take the program's search: the
+            // DFA candidate cursor where the literals differ in length, and the group-zero forward
+            // cursor where they share one.
+            span = findLiteralAlternationSpan(literalAlternation, start);
+            if (span == LiteralAlternationSpanMatcher.DECLINED) {
                 return findOnProgramFromSpanSearch();
             }
-            // With fewer bytes left, the span search takes the root-table loop and carries no
-            // route from one find to the next.
-            span = literalAlternation.findSpan(input, start, regionEnd);
         }
         else if (spanSearch instanceof LiteralSetSpanMatcher literalSet) {
             span = literalSet.findSpan(input, start, regionEnd);
@@ -369,6 +376,23 @@ public final class RegexpMatcher
         return false;
     }
 
+    /// Returns the literal alternation's span from `start` to the region end, carrying its route
+    /// in the matcher's cursor, or [LiteralAlternationSpanMatcher#DECLINED] for a find that the
+    /// span search declines or that follows one since the last reset. It is out of line so that
+    /// [#findSpanSearch] stays small enough for C2 to inline.
+    private long findLiteralAlternationSpan(LiteralAlternationSpanMatcher literalAlternation, int start)
+    {
+        if (literalAlternationDeclined) {
+            return LiteralAlternationSpanMatcher.DECLINED;
+        }
+        if (literalAlternationCursor == null) {
+            literalAlternationCursor = new LiteralAlternationSpanMatcher.Cursor();
+        }
+        long span = literalAlternation.findSpanOrDecline(input, start, regionEnd, literalAlternationCursor);
+        literalAlternationDeclined = span == LiteralAlternationSpanMatcher.DECLINED;
+        return span;
+    }
+
     /// Hands a span search's find to the program, creating the candidate cursor on the first such
     /// find. It is out of line so that [#findSpanSearch] stays small enough for C2 to inline.
     private boolean findOnProgramFromSpanSearch()
@@ -378,8 +402,8 @@ public final class RegexpMatcher
     }
 
     /// Creates the candidate cursor the first time a span search hands a find to the program:
-    /// when a literal alternation's matcher, whose span search answers its short searches,
-    /// searches a long region, or when a fixed-width matcher's search bails on dense candidates.
+    /// when a literal alternation's span search declines a find, or when a fixed-width matcher's
+    /// search bails on dense candidates.
     /// Creating it builds the program's DFA, so a matcher whose span search answers every find
     /// builds none. An alternation whose literals share one length has no candidate cursor and
     /// takes the group-zero forward cursor instead.

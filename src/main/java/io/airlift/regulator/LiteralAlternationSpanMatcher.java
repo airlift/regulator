@@ -659,6 +659,16 @@ abstract sealed class LiteralAlternationSpanMatcher
                 : ((FoldedMatcher) this).findSpan(input, 0, input.length(), null, true, null);
     }
 
+    /// Returns [#findSpan(Slice,int,int)], with `cursor` carrying the route from one search of
+    /// `input` to the next, or [#DECLINED] when the filter's stops are dense where the search
+    /// chooses its first route.
+    final long findSpanOrDecline(Slice input, int start, int end, Cursor cursor)
+    {
+        return this instanceof ExactMatcher exact
+                ? exact.findSpan(input, start, end, cursor, true, null)
+                : ((FoldedMatcher) this).findSpan(input, start, end, cursor, true, null);
+    }
+
     /// Returns [#findSpan(Slice,int,Cursor)], adding the routes it reads to `diagnostics`.
     final long findSpanForDiagnostics(Slice input, int start, Cursor cursor, RouteDiagnostics diagnostics)
     {
@@ -1931,8 +1941,9 @@ abstract sealed class LiteralAlternationSpanMatcher
     /// group-zero cursor keeps its scan rejection. It also carries the filter stops its searches
     /// made on the route, which decide whether the next route keeps the filter without sampling;
     /// a cursor without a route reads as on the root table, so its next search samples.
-    /// Positions are relative to the input. Its callers search whole inputs: Trino's matcher
-    /// across its finds, and Trino's operations that find repeatedly within one call. A new cursor
+    /// Positions are relative to the input. Its callers are the matchers, across their finds of
+    /// an input or the rest of a region, and Trino's operations that find repeatedly within one
+    /// call. A new cursor
     /// is reset; a caller must [#reset()] it before searching a different input, since a route end
     /// carried past that input's end would read outside it. The cursor is mutable, so each caller
     /// owns its own, and the shared span matcher holds none.
