@@ -232,7 +232,7 @@ public class TestRetainedSize
     private static List<Dfa.DfaInstance> dfas(CompiledPattern pattern)
     {
         List<Dfa.DfaInstance> dfas = new ArrayList<>();
-        for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.booleanProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
+        for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
             if (program == null) {
                 continue;
             }

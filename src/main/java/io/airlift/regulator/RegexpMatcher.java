@@ -65,8 +65,6 @@ public final class RegexpMatcher
     private Dfa.CandidateStartCursor candidateStartCursor;
     private boolean longSearchCandidateStartCursorCreated;
     private final boolean enableGroupZeroForwardCursor;
-    private final boolean hasLoweredCandidateSearch;
-    private final boolean hasDirectLoweredGroupZeroSearch;
     // The pattern's start-anchored scan plan that find() can run directly. See
     // CompiledPattern.startAnchoredScanPlan.
     private final ScanPlan startAnchoredScanPlan;
@@ -155,8 +153,6 @@ public final class RegexpMatcher
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
-        this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
-        this.hasDirectLoweredGroupZeroSearch = capturingGroupCount == 0 && pattern.hasDirectLoweredGroupZeroSearch();
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
@@ -525,59 +521,15 @@ public final class RegexpMatcher
             }
         }
 
-        int searchStart = regionStart + nextFindStart;
-        if (hasDirectLoweredGroupZeroSearch) {
-            long matchBoundary = pattern.findLoweredGroupZeroBoundary(
-                    input,
-                    regionStart,
-                    regionEnd,
-                    searchStart);
-            if (matchBoundary >= 0) {
-                groups[0] = (int) (matchBoundary >>> 32);
-                groups[1] = (int) matchBoundary;
-                setMatchAndAdvance(groups[0], groups[1]);
-                return true;
-            }
-            if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                return failFind();
-            }
-        }
-
-        long loweredCandidateStart = Dfa.SEARCH_FAILED;
-        if (hasLoweredCandidateSearch) {
-            loweredCandidateStart = pattern.findLoweredCandidateStart(input, regionStart, regionEnd, searchStart);
-        }
-        if (loweredCandidateStart == Dfa.SEARCH_NO_MATCH) {
-            return failFind();
-        }
-        if (loweredCandidateStart >= 0) {
-            searchStart += (int) loweredCandidateStart;
-        }
-
         if (!pattern.matchRegionInto(
                 input,
                 regionStart,
                 regionEnd,
-                searchStart,
+                regionStart + nextFindStart,
                 regionEnd,
                 UNANCHORED,
                 groups,
                 this)) {
-            // The lowered program preserves existence, but the semantic program remains authoritative
-            // for boundaries and captures. Fall back if a future lowering does not preserve its start.
-            if (loweredCandidateStart >= 0 && searchStart != regionStart + nextFindStart &&
-                    pattern.matchRegionInto(
-                            input,
-                            regionStart,
-                            regionEnd,
-                            regionStart + nextFindStart,
-                            regionEnd,
-                            UNANCHORED,
-                            groups,
-                            this)) {
-                setMatchAndAdvance(groups[0], groups[1]);
-                return true;
-            }
             return failFind();
         }
 

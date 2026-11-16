@@ -1125,7 +1125,7 @@ public class TestScanPlan
                 new PlanAdmission("([a-z][a-z]*)(x|yz)", false),
                 new PlanAdmission("([a-z][a-z]*)x?=", false),
                 new PlanAdmission("(?i)([a-z][a-z0-9]*)=v", false),
-                new PlanAdmission("([a-z][a-z]*)=([a-z]*)$", false));
+                new PlanAdmission("([a-z][a-z]*)=([a-z]*)$", true));
         List<Slice> sources = randomSources(
                 191,
                 List.of("a", "b", "c", "h", "x", "yz", "v", "V", "A", "_", "0", "7", "=", "@", "!", "-", " ", "é", "😀", "例"),
