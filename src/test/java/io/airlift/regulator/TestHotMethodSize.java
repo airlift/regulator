@@ -345,6 +345,33 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the fixed-width matcher's region search and its one-shot checks small enough for C2
+    /// to inline into the one-shot overrides of the RE2, Java, and Rust fixed-width classes, and
+    /// each override's call to the region search direct: each frame between a public one-shot
+    /// entry and the matcher's scan costs C2 inline depth.
+    @Test
+    public void testOneShotFixedWidthSpanSearchFitsInlineSize()
+    {
+        assertThat(codeLength(FixedWidthByteSpanMatcher.class, "findSpanOrBail"))
+                .as("FixedWidthByteSpanMatcher.findSpanOrBail bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        assertThat(codeLength(CompiledPattern.class, "oneShotFixedWidth"))
+                .as("CompiledPattern.oneShotFixedWidth bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        String findSpan = "findSpanOrBail" + MethodType.methodType(long.class, Slice.class, int.class, int.class).toMethodDescriptorString();
+        for (Class<?> type : List.of(Re2.FixedWidthRe2.class, JavaRegexp.FixedWidthJavaRegexp.class, RustRegexp.FixedWidthRustRegexp.class)) {
+            assertThat(codeLength(type, "matchInto"))
+                    .as("%s.matchInto bytecode bytes", type.getSimpleName())
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+            assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), FixedWidthByteSpanMatcher.class))
+                    .as("FixedWidthByteSpanMatcher methods %s.matchInto calls", type.getSimpleName())
+                    .containsExactly(findSpan);
+        }
+    }
+
     /// Keeps the prefix scan and the folded routes it takes small enough for C2 to inline into the
     /// DFA, NFA, and BitState searches that call it.
     @Test

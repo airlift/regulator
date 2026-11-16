@@ -825,6 +825,16 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).as(label).isEqualTo("работа,".getBytes(UTF_8).length);
             assertThat(matcher.findSpanOrBail(denseFromStart, 0, denseFromStart.length())).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
             assertThat(matcher.findSpanOrBail(dense, regionStart, regionEnd)).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
+            // A one-shot findInto that bails searches again from its start on the program.
+            int[] groups = new int[2];
+            RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(denseFromStart);
+            assertThat(generalMatcher.find()).as(label).isTrue();
+            assertThat(pattern.findInto(denseFromStart, groups)).as(label).isTrue();
+            assertThat(groups).as(label).containsExactly(generalMatcher.start(), generalMatcher.end());
+            generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(dense).reset(dense, regionStart, regionEnd);
+            assertThat(generalMatcher.find()).as(label).isTrue();
+            assertThat(pattern.findInto(dense, regionStart, regionEnd, groups)).as(label).isTrue();
+            assertThat(groups).as(label).containsExactly(generalMatcher.start(), generalMatcher.end());
             for (Slice input : List.of(dense, denseFromStart, english)) {
                 assertThat(pattern.count(input)).as(label).isEqualTo(generalEngineCount(pattern, input));
                 assertThat(pattern.find(input)).as(label).isTrue();
@@ -931,13 +941,18 @@ public class TestFixedWidthByteSpanMatcher
             String label = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            // Boolean find and count answer from the matcher without building the general
-            // engine's DFA or reverse program, so they run before the general engine does.
+            // Boolean find, count, and the one-shot findInto answer from the matcher without
+            // building the general engine's DFA or reverse program, so they run before the general
+            // engine does.
             List<Boolean> found = new ArrayList<>();
             List<Long> counts = new ArrayList<>();
+            List<Long> firstSpans = new ArrayList<>();
+            int[] groups = new int[2];
             for (Slice input : inputs) {
                 found.add(pattern.find(input));
                 counts.add(pattern.count(input));
+                Arrays.fill(groups, 7);
+                firstSpans.add(findIntoSpan(pattern.findInto(input, groups), groups, "%s findInto input %s", label, HexFormat.of().formatHex(input.getBytes())));
             }
             assertNoProgramSearch(pattern, label);
             FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
@@ -948,6 +963,7 @@ public class TestFixedWidthByteSpanMatcher
                 assertThat(found.get(inputIndex)).as(inputLabel).isEqualTo(expectedCount > 0);
                 assertThat(counts.get(inputIndex)).as(inputLabel).isEqualTo(expectedCount);
                 RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                assertThat(firstSpans.get(inputIndex)).as(inputLabel).isEqualTo(generalMatcher.find() ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH);
                 for (int start = 0; start <= input.length(); start++) {
                     long expected = generalMatcher.find(start) ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH;
                     assertThat(matcher.findSpan(input, start)).as("%s start %s", inputLabel, start).isEqualTo(expected);
@@ -955,6 +971,8 @@ public class TestFixedWidthByteSpanMatcher
                     for (int end : regionEnds.apply(input, start).toArray()) {
                         expected = generalMatcher.reset(input, start, end).find() ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH;
                         assertThat(matcher.findSpanOrBail(input, start, end)).as("%s region %s-%s", inputLabel, start, end).isEqualTo(expected);
+                        Arrays.fill(groups, 7);
+                        assertThat(findIntoSpan(pattern.findInto(input, start, end, groups), groups, "%s findInto %s-%s", inputLabel, start, end)).as("%s findInto %s-%s", inputLabel, start, end).isEqualTo(expected);
                     }
                 }
                 assertMatcherSpans(pattern, input, 0, input.length(), inputLabel);
@@ -1009,6 +1027,17 @@ public class TestFixedWidthByteSpanMatcher
     private static long matcherSpan(boolean matched, RegexpMatcher matcher)
     {
         return matched ? span(matcher.start(), matcher.end()) : Dfa.SEARCH_NO_MATCH;
+    }
+
+    // The span a findInto wrote into `groups`, which the caller seeded with stale offsets; a miss
+    // must clear them.
+    private static long findIntoSpan(boolean matched, int[] groups, String description, Object... args)
+    {
+        if (matched) {
+            return span(groups[0], groups[1]);
+        }
+        assertThat(groups).as(description, args).containsExactly(-1, -1);
+        return Dfa.SEARCH_NO_MATCH;
     }
 
     // Short rows joined from ASCII, Latin-1 and UTF-8 characters, and malformed UTF-8: truncated

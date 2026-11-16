@@ -1961,7 +1961,7 @@ ordinary engine would.
   `FixedWidthByteSpanMatcher.yieldsToEngineScans`,
   `FixedWidthByteSpanMatcher.countOrBail`,
   `FixedWidthByteSpanMatcher.findSpanOrBail`,
-  `CompiledPattern.yieldsToEngineRoute`
+  `CompiledPattern.yieldsToEngineRoute`, `CompiledPattern.oneShotFixedWidth`
 - **Applies when:** Fixed-width patterns in every language that have a
   position whose first bytes' estimated English-text frequencies sum to under
   1 in 100, other than ASCII singleton patterns of up to 64 bytes. The pattern

@@ -4329,18 +4329,18 @@ abstract sealed class CompiledPattern
     {
         requireNonNull(text, "text is null");
         validateRange(text, start, end);
-        // The one-shot unanchored searches come here, unless a literal-kernel or exact-literal
-        // override answers them first through oneShotDotStarLiteral or oneShotExactLiteral: find
-        // and findInto of a range, findInto, findResult, RE2's replaceFirst and extract, and each
-        // retry of a Rust search after an empty match that splits a character. A pattern with a
-        // required literal never makes such a retry, since none of its matches is empty. None of
-        // these callers has checked for the required literal yet. A matcher's searches take
-        // matchRegionInto after their own check, and RE2's replaceAll takes matchIntoAfterLoopCheck
-        // after its loop's check. A caller's own loop of range finds checks on every call, without
-        // the back-off, since each call is one search and the pattern keeps no state between them.
-        // The capture buffer is checked first, as the engine checks it before it reads any input.
-        // An unanchored search of a long window ends where longWindowSearchEnd bounds it, and the
-        // context keeps the whole text.
+        // The one-shot unanchored searches come here, unless a literal-kernel, exact-literal, or
+        // fixed-width override answers them first through oneShotDotStarLiteral,
+        // oneShotExactLiteral, or oneShotFixedWidth: find and findInto of a range, findInto,
+        // findResult, RE2's replaceFirst and extract, and each retry of a Rust search after an
+        // empty match that splits a character. A pattern with a required literal never makes such
+        // a retry, since none of its matches is empty. None of these callers has checked for the
+        // required literal yet. A matcher's searches take matchRegionInto after their own check,
+        // and RE2's replaceAll takes matchIntoAfterLoopCheck after its loop's check. A caller's own
+        // loop of range finds checks on every call, without the back-off, since each call is one
+        // search and the pattern keeps no state between them. The capture buffer is checked
+        // first, as the engine checks it before it reads any input. An unanchored search of a long
+        // window ends where longWindowSearchEnd bounds it, and the context keeps the whole text.
         if (groups != null) {
             checkGroupsLength(groups);
         }
@@ -4475,6 +4475,30 @@ abstract sealed class CompiledPattern
             checkGroupsLength(groups);
         }
         return true;
+    }
+
+    /// The fixed-width matcher that answers a one-shot [#matchInto] of a fixed-width pattern,
+    /// after the checks that call makes, or `null` where the call takes the ordinary route: an
+    /// anchored call, or a pattern without the matcher. The matcher accepts no captures,
+    /// assertions, or empty matches, and finds at most one match per start, so its leftmost span
+    /// is the one the engine reports for the range. The RE2, Java, and Rust fixed-width classes
+    /// override matchInto to call this, then call [FixedWidthByteSpanMatcher#findSpanOrBail] and
+    /// [#setOneShotSpanGroups] themselves, to keep C2's inline depth as [#oneShotDotStarLiteral]
+    /// describes. They override the overload without workspace types, to avoid the restriction
+    /// on unloaded classes that [#oneShotExactLiteral] explains. A search that bails on dense
+    /// candidates runs again from `start` on the ordinary route. As there, the route makes no
+    /// long-window check, which would never shorten the search.
+    final FixedWidthByteSpanMatcher oneShotFixedWidth(Slice text, int start, int end, Anchor anchor, int[] groups)
+    {
+        if (anchor != Anchor.UNANCHORED) {
+            return null;
+        }
+        requireNonNull(text, "text is null");
+        validateRange(text, start, end);
+        if (groups != null) {
+            checkGroupsLength(groups);
+        }
+        return booleanPlans.fixedWidthByteMatcher();
     }
 
     /// Writes `span`, a one-shot span search's result for [#matchInto], into `groups` as that
