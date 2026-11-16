@@ -308,9 +308,7 @@ step. On 14 DFA-heavy rows, most picked because native access had mattered
 most there, the pure-Java table took about 5% longer than the native one at
 the median on Graviton and 7% on Intel, and at most 15% longer on Graviton and
 40% on Intel. On the same rows before pure-Java mode had that table, it took
-about 35% longer at the median and up to 3.7 times as long. The published 2.0
-preliminary report predates the Java-array table, so its overall
-native-access gain does not describe the current implementation.
+about 35% longer at the median and up to 3.7 times as long.
 
 The [benchmark report](https://airlift.github.io/regulator/benchmarks/) runs
 every row with and without native access, always with the Vector API on, so

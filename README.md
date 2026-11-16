@@ -36,9 +36,7 @@ _Source: Regulator 2.1 preliminary results `47eaddfd9abc40519b1349278716a2fc49ae
 
 See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
 for individual workloads, Intel and Graviton results, absolute time differences,
-and pure-Java comparisons. The [1.0 release results](docs/benchmarks/RESULTS_1.0.md)
-cover compiler cost, memory, concurrency, unresolved findings, and evidence
-retrieval.
+and pure-Java comparisons.
 
 Results depend on the pattern, input, pattern reuse, CPU architecture, and native
 memory access. Comparisons measure corresponding public operations using each
@@ -122,12 +120,12 @@ including short-term-support releases.
 <dependency>
     <groupId>io.airlift</groupId>
     <artifactId>regulator</artifactId>
-    <version>2.0</version>
+    <version>2.1</version>
 </dependency>
 ```
 
-See the [2.0 release](https://github.com/airlift/regulator/releases/tag/2.0) and
-[API documentation](https://javadoc.io/doc/io.airlift/regulator/2.0).
+See the [2.1 release](https://github.com/airlift/regulator/releases/tag/2.1) and
+[API documentation](https://javadoc.io/doc/io.airlift/regulator/2.1).
 Regulator's runtime dependencies are Slice and the airlift classfile library.
 The classfile library is loaded only when a pattern is compiled with generated
 bytecode.

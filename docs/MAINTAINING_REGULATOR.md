@@ -9,8 +9,8 @@ one extra instruction can affect performance.
 Breaking public API changes wait for a major version, as
 [Implementation Standards](../AGENTS.md#implementation-standards) describes.
 
-The [1.0 release benchmark report](benchmarks/RESULTS_1.0.md) records the
-latest published release campaign: its measured coverage, findings, and
+The [benchmark report](https://airlift.github.io/regulator/benchmarks/)
+records the latest published campaign: its measured coverage, findings, and
 remaining limitations. Any production repair belongs to a version after the
 measured one and to a separately identified measurement campaign. Record
 collector revisions separately from the library artifact and tagged
@@ -246,9 +246,8 @@ when they explain why maintainers should not repeat a rejected experiment.
 [`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md) defines the measurement
 protocol. Broad routing, representation, or execution-loop changes require the
 affected qualification shards or complete qualification matrix in addition to
-focused measurements. Do not commit exploratory outputs. The preliminary 1.0
-report is an explicitly labeled publication snapshot, not an exploratory
-campaign log.
+focused measurements. Do not commit exploratory outputs. A preliminary report
+is an explicitly labeled publication snapshot, not an exploratory campaign log.
 
 ### Normative Trino rows gate
 
@@ -371,11 +370,10 @@ Commit the manifest before freezing the collector revisions: workers load it
 from the collector commit. The campaign's `--release-version <version>` option
 reads that manifest. Then run the R9g and R8i publication campaign, using the
 published artifact for public-API measurements and recording its checksum and
-release tag. The 1.0 campaign, which also measured R8g, is recorded in
-[`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). The public report is built by
+release tag. The public report is built by
 `benchmark-report/scripts/build_capture_data.py --released-campaign` from the
-language exports and the baseline unit campaign. Measure both native-memory and
-pure-Java routes. Run internal diagnostics only when a qualification
+language exports and the baseline unit campaign. Measure both native-memory
+and pure-Java routes. Run internal diagnostics only when a qualification
 failure or explicit measurement-quality question requires them; use the same
 tagged source and give them a separate inventory, budget, and private archive.
 A later change invalidates at least the affected publication shards; a broad or
@@ -389,10 +387,11 @@ and superseded cohorts without adding them to the public download. If the
 candidate changes afterward, its affected results are no longer final.
 A campaign of a candidate build before the release publishes as preliminary
 results for that release version; a later campaign of the released JAR
-supersedes it as the current report. Preliminary results may instead combine
-development revisions and targeted single-host follow-ups, as the 1.0 ones did,
-provided the report says so and preserves each row's actual source, host
-coverage, and uncertainty. Mixed-revision results do not satisfy the final
+supersedes it as the current report. Preliminary results may instead replace
+some rows with a targeted re-measure of a later candidate, provided the report
+says so, preserves each row's actual source, host coverage, and uncertainty, and
+measures the re-measured rows on three independent hosts. Mixed-revision
+results do not qualify one released artifact, so they do not satisfy the final
 campaign's replication requirements.
 
 ## Release checklist

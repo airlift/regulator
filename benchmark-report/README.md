@@ -15,9 +15,9 @@ Local checks require Node.js 22 or newer and Python 3.11 or newer on `PATH`.
 
 The page loads a small `data/manifest.json`, then fetches one immutable JSON
 file for the selected language, CPU, and memory setting. There is one page
-file for each language, CPU, and memory setting the capture declares: 24 for
-the published 1.0 capture's four languages on three CPUs, and 20 for a 2.0
-capture's five languages on two CPUs, each in both memory settings. Each
+file for each language, CPU, and memory setting the capture declares: 20 for a
+release campaign's five languages on two CPUs, and 24 for the published 1.0
+capture's four languages on three CPUs, each in both memory settings. Each
 includes the tables and ordinary row details, so expanding a row needs no
 further download. Previously visited selections are cached in memory.
 After a page request fails, the next attempt revalidates the manifest so an open
