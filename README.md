@@ -42,6 +42,30 @@ Results depend on the pattern, input, pattern reuse, CPU architecture, and nativ
 memory access. Comparisons measure corresponding public operations using each
 library's own input and output types. Input conversion is outside the timings.
 
+### Choosing a language
+
+<!-- language-comparison:start -->
+Regulator's four regex languages compile onto the same matching engines, so the
+language barely changes matching speed. On everyday expressions they run within
+about 1% of each other:
+
+| Time relative to Rust | R9g | R8i |
+|---|---:|---:|
+| Rust regex | 1.00× | 1.00× |
+| RE2 | 0.99× (0.98–1.00) | 1.00× (0.99–1.02) |
+| Java regex | 1.00× (0.99–1.02) | 1.01× (0.98–1.03) |
+| Trino regex | 1.00× (0.95–1.06) | 1.01× (0.94–1.10) |
+
+_Regulator's own time for each language, relative to its Rust language: geometric mean of per-workload ratios, with the 10th–90th percentile range, over reused contains and count. Native access enabled. Source: Regulator 2.1 preliminary results `47eaddfd9abc40519b1349278716a2fc49ae7d5d`._
+
+Text processing shows larger differences: Java takes about 1.1× and Trino about
+1.3× Rust's time (geometric mean), though the median workload takes the same
+time in every language. Rust's byte mode and RE2's Latin-1 mode match bytes,
+while Java and Trino match characters, and a few workloads take slower routes in
+Java and Trino today, mainly Unicode word boundaries and Trino's full case
+folding.
+<!-- language-comparison:end -->
+
 ## Supported languages
 
 Regulator provides separate compilers for:

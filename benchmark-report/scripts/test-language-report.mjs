@@ -183,6 +183,30 @@ const likeSummary = exports.summaryRatios({ ...data, rows: likeSummaryRows }).li
 assertRatio(likeSummary.everyday, Math.cbrt(0.25 * 0.25 * 0.75));
 assert.equal(likeSummary.textProcessing, null);
 assert.equal(exports.summaryRatios({ ...data, rows: [] }).java.everyday, null);
+// The language comparison relates Regulator's own time in each regex language to its Rust language
+// on the same workload; reports without Rust have no comparison.
+const ownTime = (language, caseId, candidateNs, changes = {}) => ({ ...reused, language, caseId, platform: "r9g",
+  result: { ...result, candidateNs }, ...changes });
+const bulkTime = (language, caseId, candidateNs) => ownTime(language, caseId, candidateNs, { population: "bulk-text", operation: "execute" });
+const comparisonRows = [
+  ...[1, 1.1, 1.2, 1.3, 2].flatMap((ratio, index) => [ownTime("rust", `case-${index}`, 10), ownTime("re2", `case-${index}`, 10 * ratio)]),
+  ...[.5, 1, 4].flatMap((ratio, index) => [bulkTime("rust", `text-${index}`, 10), bulkTime("re2", `text-${index}`, 10 * ratio)]),
+  // Each operation joins with Rust's time for that operation.
+  ownTime("rust", "case-0", 40, { operation: "reusedCount" }), ownTime("re2", "case-0", 40, { operation: "reusedCount" }),
+  ownTime("re2", "no-rust-workload", 1000), ownTime("re2", "case-0", 1000, { memoryMode: "safe" }),
+];
+const languageComparison = exports.languageComparison({ ...rustData, rows: comparisonRows });
+assert.deepEqual(Array.from(Object.keys(languageComparison)), ["re2", "java", "trino"]);
+assertRatio(languageComparison.re2.everyday.r9g.geometricMean, Math.pow(1.1 * 1.2 * 1.3 * 2, 1 / 6));
+// Percentiles interpolate linearly between the nearest ranks.
+assertRatio(languageComparison.re2.everyday.r9g.p10, 1);
+assertRatio(languageComparison.re2.everyday.r9g.p90, 1.65);
+assert.equal(languageComparison.re2.everyday.r8i, null);
+assertRatio(languageComparison.re2.textProcessing.geometricMean, Math.cbrt(2));
+assertRatio(languageComparison.re2.textProcessing.median, 1);
+assert.equal(languageComparison.java.textProcessing, null);
+assert.equal(Object.keys(exports.languageComparison({ ...currentData, rows: comparisonRows })).length, 0);
+assert.throws(() => exports.languageComparison({ ...rustData, rows: [...comparisonRows, ownTime("rust", "case-1", 5)] }), /Duplicate rust r9g/);
 const html = renderToStaticMarkup(React.createElement(LanguageReport, { data }));
 assert.match(html, /Regex pattern lifecycle/);
 // Results collected before the find operation list each everyday workload's find after its other operations,
