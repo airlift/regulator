@@ -95,10 +95,8 @@ answer, or reject the input before any engine runs.
   minimum, the 4 KiB engine cutoff, the gated one-byte inner literal check,
   which full-Slice find runs first in place of a check of the same required
   byte, the scan plan's one check after its first failed attempt, a matcher's
-  reuse of the long-window literal it found, the long-window check beside
-  another literal route, and full-Slice find's handoff of that check's first
-  hit to the inner literal search ([#10], [#103], [#138], [#147], [#154],
-  [#188], [#193], [#241], [design][d-required-absence],
+  reuse of the long-window literal it found ([#10], [#103], [#138], [#147],
+  [#154], [#188], [#193], [design][d-required-absence],
   [design][d-required-suffix], [design][d-required-bytes],
   [design][d-min-inner-window]).
 - **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
@@ -107,8 +105,6 @@ answer, or reject the input before any engine runs.
   `CompiledPattern.shortWindowLacksRequiredBytes`,
   `CompiledPattern.mayCheckRequiredLiteralOnLongWindows`,
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
-  `InnerLiteralSearch.literalBeginsEveryMatch`,
-  `RequiredBytes.literalBesideRoutes`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`,
   `CompiledPattern.nearRequiredLiteralScansInLoop`, `RequiredBytes.indexIn`,
@@ -127,10 +123,6 @@ answer, or reject the input before any engine runs.
   `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`,
   `InnerLiteralSearch.search`, `InnerLiteralSearch.checksShortWindows`,
   `CompiledPattern.findOnInnerLiteralSearch`,
-  `CompiledPattern.findFromRequiredLiteral`,
-  `CompiledPattern.handsOffRequiredLiteral`,
-  `RequiredBytes.admitsInnerLiteralHandoff`, `RequiredBytes.handoffIndexIn`,
-  `InnerLiteralSearch.searchFromCheckedHit`,
   `ScanPlan.findRequiredLiteralOperation`, `ScanPlan.containsRequiredLiteral`,
   `VectorScanner.containsLiteral`
 - **Applies when:** Every regex language. Required bytes: windows under 256
@@ -161,25 +153,11 @@ answer, or reject the input before any engine runs.
   whose matches all end with at least two exact ASCII bytes and no assertion
   after them; not for a program with assertions the DFA cannot run, such as
   Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
-  lowered boolean program. Beside a route: a pattern kept from the check only
-  by a route that starts where a match starts (a prefix scan, a transparent
-  start literal, an inner literal search for a literal that begins every
-  match, or a start literal filter) or by a scan plan checks long windows for
-  its rarest exact literal that the route does not already search for, without
-  the search-end bound. It does not check beside an inner literal search for a
-  literal inside the match. On 4 KiB lines that each end in `,z`, this costs
-  about 3% on Graviton for `\bthe\b.*?,z` and runs 1.10 to 1.12 times main's
-  time on Intel for `the.*?,z`; lines without `,z` reject in about 0.02 of
-  main's time. Handoff: full-Slice find of a long window where the inner
-  literal search is for the checked literal, or, for a pattern otherwise
-  without the check, for the literal less a last byte that the search's gate
-  after its literal admits alone, as for `\w+,\bz`. If the full charge does
-  not fit beside the forward DFAs, the search-end bound is removed and the
-  charge retried. If that fails, the pattern keeps only the short-window check
-  when eligible and affordable, and otherwise no check. Each smaller step gives
-  up the handoff, and the last, the short-window check alone, also gives up a
-  handoff's own scan. A matcher reuses an occurrence until a find passes it. A
-  matcher, and `replaceAll` in one call, stop after eight scans in a row find
+  lowered boolean program. If the full charge does not fit beside the forward
+  DFAs, the search-end bound is removed and the charge retried. If that fails,
+  the pattern keeps only the short-window check when eligible and affordable,
+  and otherwise no check. A matcher reuses an occurrence until a find passes
+  it. A matcher, and `replaceAll` in one call, stop after eight scans in a row find
   the literal or one-of bytes within 256 bytes of their start. Minimum length:
   windows under 4 KiB, where longer ones skip the metadata load, matcher finds
   that take the general route, and every count, generated or not; a Trino
@@ -207,9 +185,7 @@ answer, or reject the input before any engine runs.
   of the one-of bytes, with the vector byte-set scan from 1 KiB; where an
   inner literal search for one exact literal stands in for that check, the
   routes that skip the search, BitState capture of groups and a skipped DFA,
-  scan the window for its literal instead. Under the handoff, full-Slice find
-  of a long window starts the inner literal search at the check's first hit
-  rather than at the window start. With the search-end bound, a long
+  scan the window for its literal instead. With the search-end bound, a long
   search scans back from the window's end for the last occurrence of the bytes
   every match ends with, the forward scan mirrored: none means no match, and
   otherwise the search ends at that occurrence's end, since every match ends
@@ -247,14 +223,8 @@ answer, or reject the input before any engine runs.
   four vectors at a time, each loaded at a constant offset from the block's
   low end, takes the count to 0.79 to 0.82 of the time with the reverse scan
   before it on Graviton, and the first megabyte's count to 0.94 to 0.97 on
-  Intel, where the 16 MB count is unchanged. In RE2 and Java, the handoff
-  takes `\w+,\bz` on 1 to 16 KiB chunks of text with commas to 0.24 to 0.32 of
-  main's time on Graviton and 0.08 to 0.15 on Intel without `,z`, and to 0.31
-  to 0.46 and 0.09 to 0.26 with it; comma-dense CSV without `,z` to 0.035 and
-  0.022; text without a comma to 0.97 and 0.93; and 256-byte windows to 0.70
-  to 0.86 and 0.43 to 0.67. It takes `(\w+)foobar(\d)` grep on 16 KiB chunks
-  to 0.53 and 0.58 to 0.61 ([#241]). The maximum-length reject takes rebar's
-  `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to
+  Intel, where the 16 MB count is unchanged. The maximum-length reject takes
+  rebar's `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to
   0.62 on Graviton and 0.72 to 0.75 on Intel.
 
 ### Match starts without a reverse DFA
@@ -1864,10 +1834,8 @@ ordinary engine would.
 - **Applies when:** Full-input boolean finds, in every language, of exactly a
   class repeated by `+`, a literal of at most 64 one-byte characters, and
   another such repeat, in the normalized expression, captures looked through,
-  with no fold flag left on the classes or the literal, except a find of at
-  least 256 bytes whose required literal full-Slice find
-  [hands to the inner literal search](#required-byte-and-match-length-rejects),
-  which keeps that handoff; the matcher yields to the forward DFAs, as
+  with no fold flag left on the classes or the literal; the matcher yields to
+  the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes. On
   an input of at least 4 KiB, a one-byte literal that the DFA's start-byte
   density sample finds dense leaves the find to the general engine before any
@@ -2605,7 +2573,6 @@ change is described.
 [#231]: https://github.com/airlift/regulator/pull/231
 [#232]: https://github.com/airlift/regulator/pull/232
 [#235]: https://github.com/airlift/regulator/pull/235
-[#241]: https://github.com/airlift/regulator/pull/241
 [#242]: https://github.com/airlift/regulator/pull/242
 [#244]: https://github.com/airlift/regulator/pull/244
 [#245]: https://github.com/airlift/regulator/pull/245
