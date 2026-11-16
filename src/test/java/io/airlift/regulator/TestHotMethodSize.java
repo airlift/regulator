@@ -216,13 +216,13 @@ public class TestHotMethodSize
     /// Keeps each literal search small enough for C2 to inline:
     /// `LiteralSearchKernel.findSingleByte` into matchers such as InnerLiteralSearch,
     /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into
-    /// `findContains`, `skipToLastContainsCandidate` into `findLastContains`, the generated
+    /// `findContains`, the generated
     /// searches of a LIKE pattern into its `matchesMiddle`, and the finish of each one-byte scan
     /// into the scan. Candidate verification is outside this size check.
     @Test
     public void testLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate", "skipToLastContainsCandidate")) {
+        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate")) {
             assertThat(codeLength(LiteralSearchKernel.class, method))
                     .as("LiteralSearchKernel.%s bytecode bytes", method)
                     .isPositive()
@@ -479,10 +479,6 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(419);
-        assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
-                .as("VectorPrefixScanner.findLast bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(1004);
         // The literal set scan runs the same loop under the same rules, capped at the size it was
         // added at.
         assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))

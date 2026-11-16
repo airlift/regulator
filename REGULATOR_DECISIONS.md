@@ -2811,8 +2811,7 @@ described in
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
 the long-window check is chosen, the pattern keeps its literal for that check
-alone, with the [search-end bound](#required-suffix-bound-on-long-windows) where
-it has one, and otherwise it keeps no fact. Every short-window hook rejects a
+alone, and otherwise it keeps no fact. Every short-window hook rejects a
 window shorter than a match on its length first. For a one-of set of two or
 three distinct bytes beside an inner literal search, the short-window check
 covers only windows shorter than that search's
@@ -3235,9 +3234,8 @@ no match when it is absent. So does a pattern whose required bytes are one of up
 to three bytes, such as the `/` or `@` of `[a-z]+://\S+|[^ @]+@[^ @]+`: a window
 without any of them holds no match. Its search is the vector byte-set scan from
 1 KiB, and a word search for the first matching byte below that or without
-vectors. A one-of fact carries no exact suffix, so it never takes the
-[search-end bound](#required-suffix-bound-on-long-windows), and a check beside
-another route, below, searches only for an exact literal.
+vectors. A check beside another route, below, searches only for an exact
+literal.
 
 The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
@@ -3289,8 +3287,7 @@ starts (a prefix scan, a transparent start literal, an inner literal search for
 a literal that begins every match, or a start literal filter) or for a scan
 plan, and that meets every other condition, checks long windows beside that
 route instead, for the rarest exact literal every match consumes that the route
-does not already search for, and without the
-[search-end bound](#required-suffix-bound-on-long-windows). The route already
+does not already search for. The route already
 searches for a literal inside the exact bytes every match starts with, which a
 prefix scan, a transparent start literal, or an inner literal search for a
 leading literal finds, or inside the scan plan's literal or the inner literal
@@ -3382,12 +3379,10 @@ handoff took `\w+,\bz` on 1 to 16 KiB chunks of text with commas to 0.24 to
 and 0.58 to 0.61.
 
 Compilation decides this once, and the literal's search takes its memory in the
-required bytes' charge, with the search-end bound's search where the pattern has
-one; the one-of bytes' search keeps nothing beyond the bytes and adds nothing to
-it. That charge may not fit at compile time, or once a frontend route such as
-Trino's ordered-literal matcher is charged ahead of it. If the full charge does
-not fit, the bound is removed and the charge retried. If that fails, the pattern
-keeps only the short-window check, when its matches can fit a short window and
+required bytes' charge; the one-of bytes' search keeps nothing beyond the bytes
+and adds nothing to it. That charge may not fit at compile time, or once a
+frontend route such as Trino's ordered-literal matcher is charged ahead of it.
+If the full charge does not fit, the pattern keeps only the short-window check, when its matches can fit a short window and
 that smaller charge fits, and otherwise keeps no check.
 
 Five hooks run the check before any engine setup:
@@ -3412,9 +3407,7 @@ Five hooks run the check before any engine setup:
   `extract`; and each retry of a Rust search after an empty match that splits a
   character.
 - RE2's `replaceAll`, before each of its searches, on the rest of the text,
-  with the matcher's back-off within one call. A pattern with the search-end
-  bound skips this check where its suffix holds the literal, since the bound of
-  the whole text already stands in for it.
+  with the matcher's back-off within one call.
 
 A matcher's searches and `replaceAll`'s searches take another entry after their
 own check, so no search scans twice.
@@ -3519,71 +3512,6 @@ Measured with rebar on one r9g and one r8i Spot host, `leipzig/word-ending-nn`
 took 0.11x the base's time on r9g and 0.12x on r8i,
 `tom-sawyer-huckle-fin-prefix-short` 0.078x and 0.056x, and `leipzig/ing` about
 0.5x on both.
-
-## Required Suffix Bound On Long Windows
-
-The [long-window check](#required-literal-absence-on-long-windows) stops at the
-literal's first occurrence. When that occurrence is early and the rest of a long
-window holds no match, the engine still reads the whole tail: on rebar's
-`leipzig/bounded-strings-ending-z` with one `,z` in its first kilobyte, every
-language ran the forward DFA over all 16 MB. Hyperscan bounds such a scan by the
-last occurrence of the literal every match ends with. Regulator does the same
-with the search-end bound: a pattern that checks long windows for its own exact
-literal also bounds a long search's end by the last occurrence of its required
-suffix. A pattern that checks long windows beside another literal route takes
-no bound.
-
-The required suffix is exact ASCII bytes, at least two and at most the last 64,
-that every match ends with, with no zero-width op after its last byte at any
-depth. It is read from the end of the pattern's top-level concatenation, groups
-looked through: exact literals join it, a repetition of at least one copy gives
-its child's suffix and ends it, and an assertion between its bytes ends it
-there. It need not be the required literal: `(.*?;){3}abcdefgh` checks long
-windows for `abcdefgh` and bounds them by `;abcdefgh`.
-
-Every match in a window ends at the end of an occurrence of the suffix, so no
-later than the end of the last one, and a window without one holds no match.
-Ending the window there leaves the set of matches unchanged, so leftmost-first
-and longest-match spans and captures stay the same, provided no assertion of a
-match reads past the new end. No assertion of a match runs at its end, since
-none follows the suffix, and the assertions the DFA runs read at most one byte
-ahead. Java's final-terminator `$` and `\Z` and Trino's final line end read
-further, so a program with assertions the DFA cannot run takes no bound. Nor
-does a pattern with a lowered boolean program: it comes only from a final line
-end, which leaves no suffix, and its matches can end past the suffix after a
-final LF. Rust's Unicode word boundary is sound because the suffix is ASCII.
-
-The bound's search is a reverse scan for the last occurrence, the forward
-literal scan mirrored: a vector pair scan from 1 KiB and a word scan below it,
-both handing off to a reverse KMP once their comparisons pass the scan's
-budget, so the scan stays linear. Its memory joins the required bytes' charge.
-If the full charge does not fit, the bound is removed and the charge retried. If
-that fails, the pattern keeps only the short-window check, when its matches can
-fit a short window and that smaller charge fits, and otherwise keeps no check.
-
-Count and the one-shot unanchored searches take the bound in place of the
-forward check: no occurrence counts or finds nothing, and otherwise the DFA
-count, or the engine, reads only up to the end of the last occurrence. Where the
-suffix does not hold the literal, as `zz` does not hold `abcdefgh` in
-`(.*?;){3}abcdefgh.*zz`, the window up to that end is still checked for the
-literal, and one without it holds no match. A pattern that only the [class-run
-proof](#inner-literal-class-run-prefix) gives an inner literal search keeps the
-check and so the bound, and its count through that search reads only up to the
-same end, as the DFA count does. A one-shot search keeps the whole text as its
-context. RE2's `replaceAll` bounds the whole text once and ends each of its
-searches there. Where the suffix holds the literal, that bound stands in for its
-loop's check, so no search scans back from the text end once per match.
-
-With one `,z` placed about 600 bytes into the `bounded-strings-ending-z` text,
-where the forward check stops, a count took about 0.014 of main's time on x86
-and 0.040 on Graviton over the text's first megabyte, and 0.025 to 0.026 and
-0.040 over all 16 MB, in all four languages.
-
-The cost is the reverse scan over the window's tail when the last occurrence is
-early, where the forward check stopped at the first one. A window whose suffix
-ends it is found at once, where the forward check scanned up to it. A user loop
-over one-shot range finds on one long text pays a reverse scan over the tail
-after each match.
 
 ## Trino LIKE Frontend
 
@@ -4101,11 +4029,7 @@ rebar's `folly/literal-never-match-frequent` to 0.69x to 0.71x its earlier time
 on r9g and 0.68x to 0.70x on r8i, in RE2 and Rust. The contains search of
 `LiteralSearchKernel` and the vector filter of the scan plan's required-literal
 check still pair the first and last bytes; neither the continuation byte nor
-the adjacent pair has been measured there. The reverse scan for the last
-occurrence of a required suffix still pairs the suffix's first and last bytes,
-periodic or not: the adjacent pair is chosen only for the forward scans, and
-choosing it there too would change the reverse scan of a periodic required
-suffix, which has not been measured.
+the adjacent pair has been measured there.
 
 When the literals every match begins with run past a prefix shorter than six
 bytes and share a byte at the same offset past it, the vector scan pairs the
@@ -4224,20 +4148,11 @@ until the scan compares it with zero. A form that returned the mask from a
 helper had that helper left out of line at one of its two call sites, boxed a
 mask on every search, and took 1.62x for `zqj` on r9g with JDK 25. A vector
 returned from a helper left out of line is boxed the same way, so the scan's
-helper keeps a single call site. The reverse scan for a required suffix's last
-occurrence tests the at most three vectors below its last block of four with
-compare and AND on every platform. The XOR form written in line there allocates
-nothing either, but it made the scan about 1,072 bytecode bytes against compare
-and AND's 1,029, past the size `TestHotMethodSize` caps it at. A helper there
-that takes the probe vectors is left out of line when C2 compiles the scan
-before the profile of the branch into the tail has matured, and it then boxes
-both vectors once per call, as it did in a fresh JVM on a 1 MiB row with SVE and
-16-byte vectors.
+helper keeps a single call site.
 
 On x86 with 64-byte vectors, as with AVX-512 on r8i, the literal prefix scan of
 a single literal compares its second byte under the mask of the first; the
-literal set scan and the reverse scan for a required suffix's last occurrence,
-which was not measured in the masked form, keep compare and AND. C2 emits the masked compare as one
+literal set scan keeps compare and AND. C2 emits the masked compare as one
 compare that writes a mask register under the first compare's mask, in place of
 a second compare and a `kandq`. Over the counted loop on r8i with JDK 25 it took
 0.94x the compare-and-AND form's time for English sherlock, 0.82x to 0.83x for
