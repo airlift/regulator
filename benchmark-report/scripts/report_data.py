@@ -10,6 +10,7 @@ import math
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 
@@ -24,6 +25,8 @@ MANIFEST_FILE = DATA_DIRECTORY / "manifest.json"
 README_FILE = REPOSITORY_ROOT / "README.md"
 SUMMARY_START = "<!-- benchmark-summary:start -->"
 SUMMARY_END = "<!-- benchmark-summary:end -->"
+LANGUAGE_COMPARISON_START = "<!-- language-comparison:start -->"
+LANGUAGE_COMPARISON_END = "<!-- language-comparison:end -->"
 MANIFEST_SCHEMA_VERSION = 1
 REPORT_SCHEMA_VERSION = 2
 MAX_STORED_DATA_BYTES = 50 * 1024 * 1024
@@ -409,10 +412,21 @@ def ratio_text(ratio: float) -> str:
     return f"{ratio:.1f}× slower"
 
 
-def summary_markdown(data: dict) -> str:
+def report_ratios(data: dict) -> dict:
     calculated = subprocess.run(['node', str(REPORT_ROOT / 'scripts/summary-ratios.mjs')],
                                 input=encode_json(data), text=True, capture_output=True, check=True)
-    ratios = json.loads(calculated.stdout)
+    return json.loads(calculated.stdout)
+
+
+def source_text(data: dict) -> str:
+    source = data['sources']['currentLabel']
+    return source + (". Development builds with targeted updates; per-row sources are in the report"
+                     if data.get('publication', {}).get('sourcePolicy') == 'mixed-development-revisions'
+                     else f" `{data['sources']['currentCandidate']}`")
+
+
+def summary_markdown(data: dict, ratios: dict | None = None) -> str:
+    ratios = (ratios or report_ratios(data))['summary']
     comparators = {'rust': 'Rust regex crate', 're2': 'Native RE2', 'java': 'Java regex',
                    'trino': 'Trino regex (Joni)', 'like': 'Trino LIKE'}
     lines = [SUMMARY_START, "| Compared with | Everyday expressions | Text processing |", "|---|---:|---:|"]
@@ -422,30 +436,80 @@ def summary_markdown(data: dict) -> str:
         cells = [ratio_text(value) if value is not None else '—'
                  for value in (ratios[language]['everyday'], ratios[language]['textProcessing'])]
         lines.append(f"| {comparator} | {' | '.join(cells)} |")
-    source = data['sources']['currentLabel']
-    source += (". Development builds with targeted updates; per-row sources are in the report"
-               if data.get('publication', {}).get('sourcePolicy') == 'mixed-development-revisions'
-               else f" `{data['sources']['currentCandidate']}`")
     platform = next(cpu for cpu in data['platforms'] if cpu in ('r9g', 'c9g')).capitalize()
-    lines.extend(("", f"_Source: {source}. {platform} with native access enabled and patterns reused. "
+    lines.extend(("", f"_Source: {source_text(data)}. {platform} with native access enabled and patterns reused. "
                   "Geometric mean of per-workload time ratios; input conversion excluded._", SUMMARY_END))
     return "\n".join(lines)
 
 
-def replace_summary(readme: str, replacement: str) -> str:
-    if readme.count(SUMMARY_START) != 1 or readme.count(SUMMARY_END) != 1:
-        raise ValueError("README must contain exactly one benchmark summary marker pair")
-    before, remainder = readme.split(SUMMARY_START, 1)
-    _, after = remainder.split(SUMMARY_END, 1)
+def prose(text: str) -> str:
+    return textwrap.fill(text, width=80, break_long_words=False, break_on_hyphens=False)
+
+
+# Reports without Rust, or without everyday workloads Rust shares, leave the comparison section empty.
+def language_comparison_markdown(data: dict, ratios: dict | None = None) -> str:
+    comparison = (ratios or report_ratios(data))['languageComparison']
+    everyday = [cell['geometricMean'] for language in comparison.values()
+                for cell in language['everyday'].values() if cell is not None]
+    if not everyday:
+        return f"{LANGUAGE_COMPARISON_START}\n{LANGUAGE_COMPARISON_END}"
+    labels = {language: details['label'] for language, details in data['languages'].items()}
+    platforms = list(next(iter(comparison.values()))['everyday'])
+    # The spread matches the table's two-decimal cells, so a 1.01× language reads as within about 1%.
+    spread = max(1, round(max(abs(ratio - 1) for ratio in everyday) * 100))
+    lines = [LANGUAGE_COMPARISON_START,
+             prose("Regulator's four regex languages compile onto the same matching engines, so the language "
+                   f"barely changes matching speed. On everyday expressions they run within about {spread}% "
+                   "of each other:"),
+             "",
+             f"| Time relative to Rust | {' | '.join(platform.capitalize() for platform in platforms)} |",
+             "|---|" + "---:|" * len(platforms),
+             f"| {labels['rust']} | {' | '.join('1.00×' for _ in platforms)} |"]
+    for language, ratios in comparison.items():
+        cells = ['—' if cell is None else f"{cell['geometricMean']:.2f}× ({cell['p10']:.2f}–{cell['p90']:.2f})"
+                 for cell in ratios['everyday'].values()]
+        lines.append(f"| {labels[language]} | {' | '.join(cells)} |")
+    lines.extend(("", "_Regulator's own time for each language, relative to its Rust language: geometric mean of "
+                  "per-workload ratios, with the 10th–90th percentile range, over reused contains and count. "
+                  f"Native access enabled. Source: {source_text(data)}._"))
+    text = {language: ratios['textProcessing'] for language, ratios in comparison.items()}
+    if text.get('java') is not None and text.get('trino') is not None:
+        # The median clause holds only while every language's median workload is within 2% of Rust's.
+        median = (", though the median workload takes the same time in every language"
+                  if all(ratios is not None and ratio_text(ratios['median']) == "within 2%" for ratios in text.values())
+                  else "")
+        lines.extend(("", prose(
+            f"Text processing shows larger differences: Java takes about {text['java']['geometricMean']:.1f}× and "
+            f"Trino about {text['trino']['geometricMean']:.1f}× Rust's time (geometric mean){median}. Rust's byte "
+            "mode and RE2's Latin-1 mode match bytes, while Java and Trino match characters, and a few workloads "
+            "take slower routes in Java and Trino today, mainly Unicode word boundaries and Trino's full case "
+            "folding.")))
+    lines.append(LANGUAGE_COMPARISON_END)
+    return "\n".join(lines)
+
+
+def readme_sections(data: dict) -> list[tuple[str, str, str, str]]:
+    ratios = report_ratios(data)
+    return [("benchmark summary", SUMMARY_START, SUMMARY_END, summary_markdown(data, ratios)),
+            ("language comparison", LANGUAGE_COMPARISON_START, LANGUAGE_COMPARISON_END,
+             language_comparison_markdown(data, ratios))]
+
+
+def replace_section(readme: str, start: str, end: str, replacement: str) -> str:
+    if readme.count(start) != 1 or readme.count(end) != 1:
+        raise ValueError(f"README must contain exactly one {start} {end} marker pair")
+    before, remainder = readme.split(start, 1)
+    _, after = remainder.split(end, 1)
     return before + replacement + after
 
 
 def check() -> None:
     _, _, data, _ = validate_published_data()
-    expected = replace_summary(README_FILE.read_text(), summary_markdown(data))
-    actual = README_FILE.read_text()
-    if actual != expected:
-        print("README benchmark summary is stale; run:", file=sys.stderr)
+    readme = README_FILE.read_text()
+    stale = [name for name, start, end, replacement in readme_sections(data)
+             if replace_section(readme, start, end, replacement) != readme]
+    if stale:
+        print(f"README {' and '.join(stale)} is stale; run:", file=sys.stderr)
         print("  python3 benchmark-report/scripts/report_data.py update-readme", file=sys.stderr)
         raise SystemExit(1)
 
@@ -512,7 +576,10 @@ def import_data(source: Path) -> None:
 def update_readme() -> None:
     data = load_json(current_data_file())
     validate_report(data)
-    README_FILE.write_text(replace_summary(README_FILE.read_text(), summary_markdown(data)))
+    readme = README_FILE.read_text()
+    for _, start, end, replacement in readme_sections(data):
+        readme = replace_section(readme, start, end, replacement)
+    README_FILE.write_text(readme)
 
 
 def parse_arguments():

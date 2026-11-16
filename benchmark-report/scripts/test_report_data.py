@@ -498,6 +498,25 @@ class TestReportData(unittest.TestCase):
         summary = report_data.summary_markdown(report)
         self.assertIn('_Source: Regulator 2.0 preliminary results `candidate`.', summary)
 
+    def test_language_comparison_relates_each_language_to_rust(self):
+        report = report_fixture(CURRENT_PLATFORMS, LANGUAGES)
+        for row in report['rows']:
+            if row['operation'] == 'execute':
+                row['population'] = 'bulk-text'
+                row['result']['candidateNs'] = {'java': 11, 'trino': 13}.get(row['language'], 10)
+        comparison = report_data.language_comparison_markdown(report)
+        self.assertIn('| Time relative to Rust | R9g | R8i |', comparison)
+        self.assertIn('| Rust regex | 1.00× | 1.00× |', comparison)
+        self.assertIn('| RE2 | 1.00× (1.00–1.00) | 1.00× (1.00–1.00) |', comparison)
+        # The median clause holds only when every language's median workload is within 2% of Rust's.
+        self.assertIn("Java takes about 1.1× and Trino about 1.3× Rust's time (geometric mean). Rust's",
+                      ' '.join(comparison.split()))
+        # Reports without Rust, or without everyday workloads to compare, leave the section empty.
+        empty = f'{report_data.LANGUAGE_COMPARISON_START}\n{report_data.LANGUAGE_COMPARISON_END}'
+        self.assertEqual(empty, report_data.language_comparison_markdown(report_fixture()))
+        report['rows'] = [row for row in report['rows'] if row['population'] == 'bulk-text']
+        self.assertEqual(empty, report_data.language_comparison_markdown(report))
+
     def test_import_preserves_javascript_integer_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

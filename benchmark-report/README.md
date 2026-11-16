@@ -53,6 +53,13 @@ original estimators and warning labels. See
 [measurement quality](../docs/benchmarks/MEASUREMENT_QUALITY.md) and the
 [statistical replay](analysis/README.md) for definitions and reproduction.
 
+The README's language comparison uses the same eligible rows, but compares
+Regulator's own time in RE2, Java regex, and Trino regex with its Rust language
+on the same workload and operation. Everyday rows give a geometric mean with
+10th and 90th percentiles on each platform; text processing gives a geometric
+mean and median on the first platform. Percentiles interpolate linearly between
+ranks. A report without Rust leaves the section empty.
+
 Import checks platform and memory-mode coverage, that the platforms and
 languages match one campaign profile, and publication scope; for the frozen
 1.0 publication it also checks the pinned workload-source checksum. It stores

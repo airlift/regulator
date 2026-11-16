@@ -148,11 +148,52 @@ export function workloadSection(row: Row): string {
   return row.population;
 }
 
+// Sum logs instead of multiplying ratios, which can overflow or underflow.
+function geometricMean(ratios: number[]): number | null {
+  return ratios.length ? Math.exp(ratios.reduce((sum, ratio) => sum + Math.log(ratio), 0) / ratios.length) : null;
+}
+
+// Interpolate linearly between the two nearest ranks, as spreadsheets and NumPy do by default.
+function percentile(sortedRatios: number[], fraction: number): number {
+  const position = fraction * (sortedRatios.length - 1), lower = Math.floor(position);
+  const upper = Math.min(lower + 1, sortedRatios.length - 1);
+  return sortedRatios[lower] + (sortedRatios[upper] - sortedRatios[lower]) * (position - lower);
+}
+
+// Compare Regulator's own time in each regex language with its Rust language on the same
+// workloads. Reports without Rust have no reference language and no comparison.
+export function languageComparison(data: ReportData) {
+  if (languageOrder(data)[0] !== "rust") return {};
+  const eligible = data.rows.filter(row => row.memoryMode === "native" && row.result.state === "compared" && !comparisonIssue(row)
+    && Number.isFinite(row.result.candidateNs) && row.result.candidateNs! > 0);
+  const everyday = (row: Row) => workloadSection(row) === "ordinary-scalar" && ["reusedContains", "reusedCount"].includes(row.operation);
+  const textProcessing = (row: Row) => workloadSection(row) === "bulk-text";
+  const workload = (row: Row) => `${row.caseId}\n${row.operation}`;
+  const ratios = (language: string, cpu: string, section: (row: Row) => boolean) => {
+    const rows = eligible.filter(row => row.platform === cpu && section(row));
+    // A second row for one workload would silently replace the first in the join.
+    const times = (timed: string) => rows.filter(row => row.language === timed).reduce((byWorkload, row) => {
+      if (byWorkload.has(workload(row))) throw new Error(`Duplicate ${timed} ${cpu} comparison row for ${row.caseId} ${row.operation}`);
+      return byWorkload.set(workload(row), row.result.candidateNs!);
+    }, new Map<string, number>());
+    const rust = times("rust");
+    return [...times(language)].filter(([key]) => rust.has(key))
+      .map(([key, candidateNs]) => candidateNs / rust.get(key)!).sort((left, right) => left - right);
+  };
+  return Object.fromEntries(languageOrder(data).filter(language => !["rust", "like"].includes(language)).map(language => {
+    const text = ratios(language, cpuOrder(data)[0], textProcessing);
+    return [language, {
+      everyday: Object.fromEntries(cpuOrder(data).map(cpu => {
+        const values = ratios(language, cpu, everyday);
+        return [cpu, values.length ? { geometricMean: geometricMean(values), p10: percentile(values, .1), p90: percentile(values, .9) } : null];
+      })),
+      textProcessing: text.length ? { geometricMean: geometricMean(text), median: percentile(text, .5) } : null,
+    }];
+  }));
+}
+
 export function summaryRatios(data: ReportData) {
-  // Sum logs instead of multiplying ratios, which can overflow or underflow.
-  const geometricMean = (rows: Row[]) => rows.length
-    ? Math.exp(rows.reduce((sum, row) => sum + Math.log(row.result.ratio!), 0) / rows.length)
-    : null;
+  const ratioMean = (rows: Row[]) => geometricMean(rows.map(row => row.result.ratio!));
   return Object.fromEntries(languageOrder(data).map(language => {
     // Host disagreement describes variability, not invalid measurements. Keep
     // those row estimates in this summary; individual rows retain their warnings.
@@ -160,10 +201,10 @@ export function summaryRatios(data: ReportData) {
       && row.memoryMode === "native" && row.result.state === "compared" && !comparisonIssue(row)
       && Number.isFinite(row.result.ratio) && row.result.ratio! > 0);
     return [language, {
-      everyday: geometricMean(rows.filter(row => language === "like"
+      everyday: ratioMean(rows.filter(row => language === "like"
         ? workloadSection(row) === "like" && row.operation === "matches" && row.caseId !== "trino-like/ORDERED_DENSE_FALSE"
         : workloadSection(row) === "ordinary-scalar" && ["reusedContains", "reusedCount"].includes(row.operation))),
-      textProcessing: language === "like" ? null : geometricMean(rows.filter(row => workloadSection(row) === "bulk-text")),
+      textProcessing: language === "like" ? null : ratioMean(rows.filter(row => workloadSection(row) === "bulk-text")),
     }];
   }));
 }
