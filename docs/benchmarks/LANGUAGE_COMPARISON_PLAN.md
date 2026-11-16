@@ -5,7 +5,8 @@ with the library a developer would normally use for that language.
 
 Collection and reporting are implemented. The
 [qualification plan](QUALIFICATION_PLAN.md) defines the full released-artifact
-campaign; [the release results](RESULTS_1.0.md) record its coverage and findings.
+campaign; the [benchmark report](https://airlift.github.io/regulator/benchmarks/)
+publishes its results.
 This document does not authorize a run.
 
 Follow [workload organization](WORKLOAD_ORGANIZATION.md) for classification

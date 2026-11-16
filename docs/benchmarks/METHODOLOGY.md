@@ -276,10 +276,10 @@ Regulator, and pinned Joni. A checksummed exhaustive ledger records
 incompatible syntax or semantics.
 A compatible workload that exceeds the fixed verification timeout remains a
 runtime `did-not-finish` outcome rather than being reclassified as incompatible.
-Starting with the 2.1 report, each bulk runner selects the workload's Rebar
-model, such as grep or count-spans, once per timed call, outside its per-line
-and per-match loops. The change moved both Regulator and comparator times, so
-bulk rows do not compare directly with the 2.0 report.
+Each bulk runner selects the workload's Rebar model, such as grep or
+count-spans, once per timed call, outside its per-line and per-match loops.
+Reports measured before that change selected the model inside those loops, so
+their bulk rows do not compare directly with later ones.
 
 Run semantic smoke tests before timing either side. A comparator mismatch is a
 correctness problem, not a performance result.
@@ -419,9 +419,9 @@ checks. Do not replace it with a blanket five-fork or one-second setting.
 
 The [language collector](../../tools/re2-benchmark/language/README.md#target-host-measurement-and-saved-data)
 uses its own frozen protocol and receipts.
-The 1.0 measurement-quality follow-up uses separately frozen
+The 1.0 report's measurement-quality follow-up used separately frozen
 [replacement protocols](https://github.com/airlift/regulator/blob/a087e3a8bc7f826a63f70d6186ba32936bf2800c/tools/re2-benchmark/baseline/REMEASUREMENT.md)
-and the language profiles described in that collector guide. They preserve
+and the language profiles described in that collector guide. They preserved
 workload identities and release identity while replacing selected measurements
 with isolated forks and separate allocation profiling. These are qualified
 exceptions to the original protocol, not changes to archived observations.
@@ -440,12 +440,11 @@ flags. Consume match ranges or output checksums to prevent elimination.
 
 ### Statistics
 
-The final 1.0 public comparisons estimate mean operation cost. Average measured
-iteration costs within a process, independent processes within a host, and
-hosts with equal weights. Divide the candidate mean by the comparator mean.
-Allocation profiling runs separately from replacement primary timings.
-Historical median estimates remain available in the original captures and
-baseline diagnostic tables; never relabel an old aggregate as a new measurement.
+Public comparisons estimate mean operation cost. Average measured iteration
+costs within a process, independent processes within a host, and hosts with
+equal weights. Divide the candidate mean by the comparator mean. Historical
+median estimates remain available in the original captures and baseline
+diagnostic tables; never relabel an old aggregate as a new measurement.
 
 The public report shows approximate 95% percentile intervals from 4,000
 reproducible hierarchical bootstrap draws. Resample paired hosts together,
@@ -531,10 +530,10 @@ primaries and the confirmation; otherwise it stays unresolved. The
 [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#host-check)
 give the exact computation.
 
-The limits come from the 378 of 1.0's 396 hosts that measured at least 20 such
-rows: the worst whole host ran 1.3% slow and 1.5% noisy, and random 20-row
-samples of hosts reached 1.6% slow and 2.4% noisy at the 99.9th percentile, so
-2% slow and 3% noisy sit above both.
+The limits come from the 378 of an earlier campaign's 396 hosts that measured
+at least 20 such rows: the worst whole host ran 1.3% slow and 1.5% noisy, and
+random 20-row samples of hosts reached 1.6% slow and 2.4% noisy at the 99.9th
+percentile, so 2% slow and 3% noisy sit above both.
 Steal is the hypervisor's direct report of a noisy neighbor.
 
 The host check replaces per-unit calibration, which could not see a uniformly

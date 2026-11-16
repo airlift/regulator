@@ -4,24 +4,18 @@ This plan records the qualification requirements for a release campaign,
 which measures a published Regulator artifact on R9g and R8i for the RE2, Java,
 Trino, Rust, and LIKE languages.
 
-The 1.0 campaign measured `io.airlift:regulator:1.0` without Rust and also on
-R8g. The [release results](RESULTS_1.0.md) report it and its
-[measurement-quality follow-up](MEASUREMENT_QUALITY.md). The preliminary
-development measurements remain a separate historical capture.
-
 Record the artifact checksum and release tag. Measure the campaign's workloads
-through public APIs with that artifact. Where 1.0 published a frozen
-user-facing workload inventory, the report publishes every row except those the
-[publication boundary](METHODOLOGY.md#publication-boundary) hides. Trino
-operations are part of the comparison; integration into Trino is a separate
-project. Run internal-engine diagnostics from the same tag only when a
+through public APIs with that artifact. The report publishes every row except
+those the [publication boundary](METHODOLOGY.md#publication-boundary) hides.
+Trino operations are part of the comparison; integration into Trino is a
+separate project. Run internal-engine diagnostics from the same tag only when a
 qualification result or explicit measurement-quality question requires them.
 
 For machine-hour and dollar planning, see the
 [AWS cost guide](../../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
-The 1.0 campaign used Oregon Spot only, with no On-Demand fallback. Freeze the
-publication job plans and shared admission budget before collection. Give any
-conditional diagnostic campaign its own inventory, budget, and archive.
+Freeze the publication job plans and shared admission budget before
+collection. Give any conditional diagnostic campaign its own inventory, budget,
+and archive.
 
 During development, use the focused checks in the
 [maintenance guide](../MAINTAINING_REGULATOR.md). Repeating the full matrix
@@ -142,8 +136,7 @@ Use dedicated, non-burstable AWS instances with local execution on:
 - one Intel R8i instance
 - one Graviton5 R9g instance as the Arm target
 
-The [1.0 release results](RESULTS_1.0.md) also measured a Graviton4 R8g
-instance. The exact instance types, AMIs, and JDKs are pinned in
+The exact instance types, AMIs, and JDKs are pinned in
 [`platforms.tsv`](../../tools/re2-benchmark/baseline/platforms.tsv).
 Ordinary workers use `r8i.large` and `r9g.large`, each with two vCPUs and
 16 GiB RAM. Language lifecycle comparisons on R9g use the corresponding
@@ -316,10 +309,9 @@ Investigate any of these before accepting a number:
 - The Trino adapter is faster than Joni for the agreed common workload. Syntax
   unavailable to RE2 is reported separately.
 - Every supported Rust `regex` crate case is reported through `RustRegexp`
-  beside the crate. The bar against the crate will be set once benchmark data
-  exists: the goal is the native RE2 bar, at least as fast as the crate, but
-  the crate is a very strong engine, and the 2.0 benchmark runs are where we
-  learn how Regulator compares.
+  beside the crate. The bar against the crate is not yet set: the goal is the
+  native RE2 bar, at least as fast as the crate, but the crate is a very strong
+  engine.
 - `TrinoLikePattern` is faster than Trino's SQL LIKE route for warmed matches,
   with both DFA settings where Trino's DFA optimization applies. The
   dense-false stress case is reported separately.

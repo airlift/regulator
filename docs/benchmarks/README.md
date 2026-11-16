@@ -17,11 +17,7 @@ classifies every executable benchmark mode and identifies the sole formal
 baseline path.
 
 [The qualification plan](QUALIFICATION_PLAN.md) defines the full campaign for
-a released artifact. [The 1.0 release results](RESULTS_1.0.md) record that
-campaign's coverage, findings, limitations, and permanent evidence retrieval.
-Version 1.0 was released with labeled preliminary development results; its
-released-artifact campaign used Oregon Spot workers and preserved the measured
-library identity.
+a released artifact.
 
 The [measurement-quality assessment](MEASUREMENT_QUALITY.md) explains the
 follow-up collection, within-process and across-host variation, native controls,
@@ -31,20 +27,21 @@ separate from current measurement uncertainty.
 The [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
 loads the committed versioned result data and supports platform, memory-mode,
 and sortable workload comparisons. Its source and update instructions are in
-[`../../benchmark-report/`](../../benchmark-report/).
+[`../../benchmark-report/`](../../benchmark-report/). The site shows only the
+current report; earlier reports' data files stay in
+[`benchmark-report/data/`](../../benchmark-report/data/), with the 1.0
+campaign's write-up in [`RESULTS_1.0.md`](RESULTS_1.0.md).
 
-The 1.0 report and its download used one frozen user-facing workload
-inventory; later reports publish every campaign row except those the
+The report and its download publish every campaign row except those the
 [publication boundary](METHODOLOGY.md#publication-boundary) hides.
 Measurement-quality studies are separate supporting evidence. Internal route
 probes, scaling diagnostics, failed attempts, and the complete captured campaign
 remain in the indexed private archive and are not additional release benchmarks.
 
 Intermediate measurements, rejected experiments, raw profiles, and campaign
-notebooks are local working data and are not committed. The preliminary 1.0
-publication snapshot is one explicit exception: it preserves each row's actual
-source revision, host coverage, and uncertainty. Candidate-build preliminary
-reports, measured before their release, are the second. Commit the final public
+notebooks are local working data and are not committed. Preliminary reports are
+the exception: each preserves every published row's actual source revision,
+host coverage, and uncertainty. Commit the final public
 machine-readable release data with the provenance required to reproduce its
 conclusions, and index the separate private evidence needed to audit the wider
 campaign.
