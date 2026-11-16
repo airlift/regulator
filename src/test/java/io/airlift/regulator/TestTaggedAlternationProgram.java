@@ -36,23 +36,30 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestTaggedAlternationProgram
 {
     @Test
-    public void testTextDependentAlternationUsesScalarNfaWorkspace()
+    public void testWordBoundaryAlternationRunsOnDfaUntilItQuits()
     {
+        // Java and Trino word boundaries run on the DFA between ASCII bytes, so over ASCII text the
+        // group-zero forward cursor finds each match and the tagged DFA picks its branch.
         Slice expression = utf8Slice(largeAlternation("\\bfoo\\b", "foo", "."));
-        Slice input = utf8Slice("foo foo");
-        for (RegexpMatcher matcher : List.of(
-                JavaRegexp.compile(expression).matcher(input),
-                TrinoRegexp.compile(expression).re2().matcher(input))) {
-            assertThat(matcher.find()).isTrue();
-            assertMatch(matcher, 0, 3, 1);
-            assertThat(matcher.find()).isTrue();
-            assertMatch(matcher, 3, 4, 3);
-            assertThat(matcher.find()).isTrue();
-            assertMatch(matcher, 4, 7, 1);
-            assertThat(matcher.find()).isFalse();
-            // This shape has one participating branch, so no per-thread capture array is needed.
-            assertThat(matcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
+        CompiledPattern java = JavaRegexp.compile(expression);
+        CompiledPattern trino = TrinoRegexp.compile(expression).re2();
+        for (CompiledPattern pattern : List.of(java, trino)) {
+            assertThat(pattern.createGroupZeroForwardCursor()).isNotNull();
+            RegexpMatcher matcher = pattern.matcher(utf8Slice("foo foo"));
+            assertThat(winningBranches(matcher)).containsExactly("0-3:1", "3-4:3", "4-7:1");
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
         }
+
+        // Next to é the DFA quits, and the matches come from the NFA. Java's \b reads é as a
+        // non-word character and Joni's as a word character, so they pick different branches.
+        // This shape has one participating branch, so no per-thread capture array is needed.
+        Slice accented = utf8Slice("éfoo foo");
+        RegexpMatcher javaMatcher = java.matcher(accented);
+        assertThat(winningBranches(javaMatcher)).containsExactly("0-2:3", "2-5:1", "5-6:3", "6-9:1");
+        assertThat(javaMatcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
+        RegexpMatcher trinoMatcher = trino.matcher(accented);
+        assertThat(winningBranches(trinoMatcher)).containsExactly("0-2:3", "2-5:2", "5-6:3", "6-9:1");
+        assertThat(trinoMatcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
     }
 
     @Test

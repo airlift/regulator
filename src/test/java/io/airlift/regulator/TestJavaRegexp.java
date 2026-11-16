@@ -19,10 +19,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.airlift.regulator.TestRe2Api.assertNullInputFailures;
@@ -248,6 +250,31 @@ public class TestJavaRegexp
     }
 
     @Test
+    public void testWordBoundaryCursorFollowsQuitStreak()
+    {
+        // A matcher's group-zero forward cursor runs the same DFA and follows the quit streak: each
+        // find whose cursor quits beside 中 counts once, at the limit later finds skip the cursor
+        // until a reset, and a find the cursor completes ends the streak.
+        JavaRegexp endsInN = JavaRegexp.compile(utf8Slice("\\b\\w+n\\b"));
+        assertQuitStreaks(endsInN, "中an ".repeat(8) + "an ".repeat(4), List.of(1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4));
+        assertQuitStreaks(endsInN, ("中an " + "an ".repeat(3)).repeat(8), IntStream.range(0, 32).mapToObj(find -> find % 4 == 0 ? 1 : 0).toList());
+
+        // A cursor search that completes without a match ends the streak too.
+        RegexpMatcher matcher = endsInN.matcher(utf8Slice("中an n1 "));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.dfaQuitStreak()).isEqualTo(1);
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.dfaQuitStreak()).isZero();
+        assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
+
+        // Where the cursor finds a match but the tagged DFA quits picking its branch beside é, the
+        // find falls back from the match start and the streak never starts.
+        JavaRegexp branches = JavaRegexp.compile(utf8Slice("(a)|(a\\b)"));
+        assertThat(branches.taggedAlternationProgramForDiagnostics()).isNotNull();
+        assertQuitStreaks(branches, "aé".repeat(6), List.of(0, 0, 0, 0, 0, 0));
+    }
+
+    @Test
     public void testWordBoundaryWalksEachMarkRunOnce()
     {
         // A nonspacing mark's base is the letter or digit before its run of marks, which every
@@ -280,6 +307,24 @@ public class TestJavaRegexp
         assertThat(matcher.end()).isEqualTo(37);
         assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
         assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    private static void assertQuitStreaks(JavaRegexp pattern, String text, List<Integer> expectedStreaks)
+    {
+        RegexpMatcher matcher = pattern.matcher(utf8Slice(text));
+        Matcher jdkMatcher = Pattern.compile(pattern.pattern().toStringUtf8()).matcher(text);
+        List<Integer> streaks = new ArrayList<>();
+        while (matcher.find()) {
+            assertThat(jdkMatcher.find()).isTrue();
+            for (int group = 0; group <= jdkMatcher.groupCount(); group++) {
+                assertThat(matcher.start(group)).isEqualTo(utf8Offset(text, jdkMatcher.start(group)));
+                assertThat(matcher.end(group)).isEqualTo(utf8Offset(text, jdkMatcher.end(group)));
+            }
+            streaks.add(matcher.dfaQuitStreak());
+        }
+        assertThat(jdkMatcher.find()).isFalse();
+        assertThat(streaks).isEqualTo(expectedStreaks);
+        assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
     }
 
     private static Prog compileJavaProgram(String pattern, boolean reversed)

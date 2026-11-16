@@ -106,9 +106,9 @@ public final class RegexpMatcher
     // The consecutive searches of the current input whose DFA failed, in a program whose DFA can
     // quit on a byte outside ASCII. See CompiledPattern.DFA_QUIT_STREAK_LIMIT.
     private int dfaQuitStreak;
-    // Set when the current find's candidate cursor quit, so its fallback skips the DFA: the quit
-    // already counted toward the streak.
-    private boolean candidateStartCursorQuit;
+    // Set after the current find's candidate cursor or group-zero forward cursor failed and
+    // counted toward the streak, so the find's fallback search skips its DFA attempt.
+    private boolean cursorDfaQuit;
     // Set by a count whose DFA count bailed, so this matcher, which counts that call's matches,
     // skips the forward DFA, the inner-literal search, the end-anchored reverse DFA, the candidate
     // start cursor, and the group-zero forward cursor rather than filling the cache again for
@@ -233,7 +233,7 @@ public final class RegexpMatcher
         retryStart = 0;
         previousMatchEnd = -1;
         dfaQuitStreak = 0;
-        candidateStartCursorQuit = false;
+        cursorDfaQuit = false;
         requiredLiteralOccurrence = -1;
         nearRequiredLiteralScans = 0;
         skipsForwardDfa = false;
@@ -396,7 +396,7 @@ public final class RegexpMatcher
 
     private boolean findGeneral()
     {
-        candidateStartCursorQuit = false;
+        cursorDfaQuit = false;
         int regionLength = regionLength();
         if (nextFindStart > regionLength) {
             invalidateMatch();
@@ -494,12 +494,14 @@ public final class RegexpMatcher
             }
             if (candidateBoundary == Dfa.CANDIDATE_SEARCH_QUIT) {
                 dfaQuitStreak++;
-                candidateStartCursorQuit = true;
+                cursorDfaQuit = true;
             }
         }
 
-        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursorEnabled && !searchesInnerLiteral ? groupZeroForwardCursor() : null;
-        if (groupZeroForwardCursor != null) {
+        // The group-zero forward cursor follows the same quit streak, and a find whose candidate
+        // cursor quit skips it, since its DFA would quit at the same byte.
+        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursorEnabled && !searchesInnerLiteral && !cursorDfaQuit ? groupZeroForwardCursor() : null;
+        if (groupZeroForwardCursor != null && !(dfaQuitStreak >= CompiledPattern.DFA_QUIT_STREAK_LIMIT && groupZeroForwardCursor.quitsOnNonAscii())) {
             long matchBoundary = pattern.findGroupZeroBoundary(
                     groupZeroForwardCursor,
                     input,
@@ -516,12 +518,31 @@ public final class RegexpMatcher
                         regionStart + groups[0],
                         regionStart + groups[1],
                         groups)) {
+                    // A completed cursor search ends the streak; the guard keeps a store off a
+                    // streak that never starts. A tagged pick that fails leaves it to the search
+                    // below.
+                    if (dfaQuitStreak != 0) {
+                        dfaQuitStreak = 0;
+                    }
                     setMatchAndAdvance(groups[0], groups[1]);
                     return true;
                 }
+                // The tagged DFA declined to pick the branch, as when it quits beside a byte outside
+                // ASCII. The cursor proved that no match starts before groups[0], and the
+                // leftmost-first match starting there does not depend on where a search began, so
+                // the search below can start at groups[0], with the region end and assertion
+                // context unchanged, and still return that match.
+                nextFindStart = groups[0];
             }
             if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
+                if (dfaQuitStreak != 0) {
+                    dfaQuitStreak = 0;
+                }
                 return failFind();
+            }
+            if (matchBoundary == Dfa.SEARCH_FAILED && groupZeroForwardCursor.quitsOnNonAscii()) {
+                dfaQuitStreak++;
+                cursorDfaQuit = true;
             }
         }
 
@@ -927,9 +948,9 @@ public final class RegexpMatcher
         this.dfaQuitStreak = dfaQuitStreak;
     }
 
-    boolean candidateStartCursorQuit()
+    boolean cursorDfaQuit()
     {
-        return candidateStartCursorQuit;
+        return cursorDfaQuit;
     }
 
     boolean skipsForwardDfa()
@@ -1000,6 +1021,11 @@ public final class RegexpMatcher
     SingleByteMatcher singleByteMatcherForDiagnostics()
     {
         return singleByteMatcher;
+    }
+
+    boolean groupZeroForwardCursorInitializedForDiagnostics()
+    {
+        return groupZeroForwardCursor != null;
     }
 
     int groupZeroForwardProductivityCheckCountForDiagnostics()

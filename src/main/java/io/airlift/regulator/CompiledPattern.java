@@ -3627,7 +3627,7 @@ abstract sealed class CompiledPattern
                 requiredPrefix != null ||
                 partialProg.anchorStart() ||
                 partialProg.anchorEnd() ||
-                partialProg.hasTextDependentAssertions()) {
+                partialProg.hasDfaUnsupportedAssertions()) {
             return null;
         }
         return Dfa.createGroupZeroForwardCursor(partialProg);
@@ -5154,12 +5154,12 @@ abstract sealed class CompiledPattern
             // A matcher counts the searches whose DFA failed in a program whose DFA can quit. The
             // count is cleared before the DFA runs, so a search that completes ends the streak,
             // and a failure below sets it from the count read here. A search whose candidate
-            // cursor quit has already counted, so it skips the DFA.
+            // cursor or group-zero forward cursor quit has already counted, so it skips the DFA.
             boolean dfaCanQuit = prog.dfaQuitsOnNonAscii();
             int previousDfaQuits = 0;
             if (dfaCanQuit && !dfaSearchSkippedOrFailed) {
                 previousDfaQuits = dfaQuitStreak(workspaces);
-                if (previousDfaQuits >= DFA_QUIT_STREAK_LIMIT || candidateStartCursorQuit(workspaces)) {
+                if (previousDfaQuits >= DFA_QUIT_STREAK_LIMIT || cursorDfaQuit(workspaces)) {
                     dfaSearchSkippedOrFailed = true;
                 }
                 else {
@@ -6059,9 +6059,9 @@ abstract sealed class CompiledPattern
         return workspaces instanceof RegexpMatcher matcher && matcher.skipsForwardDfa();
     }
 
-    private static boolean candidateStartCursorQuit(MatchWorkspaces workspaces)
+    private static boolean cursorDfaQuit(MatchWorkspaces workspaces)
     {
-        return workspaces instanceof RegexpMatcher matcher && matcher.candidateStartCursorQuit();
+        return workspaces instanceof RegexpMatcher matcher && matcher.cursorDfaQuit();
     }
 
     private static void shiftGroupOffsets(int[] groupOffsets, int delta)
