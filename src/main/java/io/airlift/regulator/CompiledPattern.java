@@ -390,11 +390,11 @@ abstract sealed class CompiledPattern
         // span routes.
         this.classRepeat = boundedCharacterClassCounter != null ? null : repeat != null ? repeat : singleMember;
         this.hasClassRepeat = holdsClassRepeatCounter || repeat != null;
-        // The reverse DFA cannot run assertions the forward DFA cannot, or full case folding, and
-        // a Java count whose match depends on the reading direction compiles no reverse program.
+        // The reverse DFA cannot run assertions the forward DFA cannot, and a Java count whose
+        // match depends on the reading direction compiles no reverse program.
         Prog loweredProgram = booleanPlans.loweredProgram();
         Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
-        Regexp reverseRegexp = forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasFullCaseFold() || forwardProgram.hasDirectionalRepetition()
+        Regexp reverseRegexp = forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasDirectionalRepetition()
                 ? null
                 : analysis.normalizedReverseRegexp();
         long reverseShare = reverseProgramMemory();

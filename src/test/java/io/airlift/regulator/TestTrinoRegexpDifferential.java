@@ -260,6 +260,36 @@ public class TestTrinoRegexpDifferential
         }
     }
 
+    @Test
+    public void testFullFoldMatchStartsMatchJoni()
+    {
+        // A literal with a multi-character fold, such as ss for sharp s or ffi for its ligature,
+        // finds each match start on a reverse program. On text past BitState's unanchored limit,
+        // the DFA finds the end and the reverse program, reading back from it, the leftmost start
+        // among spellings of different lengths. The last pattern's inner literal search reads its
+        // prefix back on its own reverse program.
+        String spellings = "Office o\uFB03ce OFFICE o\uFB00ice of\uFB01ce o\uFB04ice o\uFB03\uFB01ce offce " +
+                "\uFB01rst FIRST \uFB01r\u017Ft fir\uFB06 FIR\uFB05 frst " +
+                "STRASSE stra\u00DFe Stra\u017F\u017Fe stra\u017FSe stra\u00DF\u00DFe " +
+                "cla\u00DF cla\u017Fs kiss \u212Ai\u00DF mi\u00DF\u00DF \u00DFtra\u00DFe " +
+                "1 = value o\uFB03ce2 = value OF\uFB01CE34 = value o\uFB00i = value ";
+        String fillerUnit = "filler text, ";
+        for (String pattern : List.of("(?i)\\w+ss\\w*", "(?i)\\w*(?:office|first)", "(?i)stra(ss|\u00DF)e", "(?i:office)?\\d+ = value")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            String filler = fillerUnit.repeat(regexp.re2().forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() / fillerUnit.length() + 1);
+            Slice longSource = utf8Slice(filler + spellings + filler + spellings);
+            Regex oracle = joniPattern(pattern);
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), List.of(utf8Slice(spellings), longSource));
+            RegexpMatcher matcher = regexp.re2().matcher(longSource, 0);
+            assertThat(matcher.find()).as(pattern).isTrue();
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(pattern).isFalse();
+            InnerLiteralSearch innerLiteralSearch = regexp.re2().innerLiteralSearchForDiagnostics();
+            Prog reverse = pattern.endsWith("= value") ? innerLiteralSearch.reversePrefixProgramForDiagnostics() : regexp.re2().reverseProgramIfComputedForDiagnostics();
+            assertThat(reverse).as(pattern).isNotNull();
+            assertThat(reverse.hasFullCaseFold()).as(pattern).isTrue();
+        }
+    }
+
     private static Map<String, Integer> joniNamedGroups(String description, Regex joni)
     {
         Map<String, Integer> namedGroups = new HashMap<>();

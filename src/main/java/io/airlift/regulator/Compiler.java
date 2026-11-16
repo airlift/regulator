@@ -1780,13 +1780,13 @@ final class Compiler
                 }
                 return fragment;
             }
-            if (reversed) {
-                throw new RegexpCompileException("full case-fold literals do not support reverse compilation");
-            }
             program.setHasFullCaseFold(true);
 
             int[] foldedRunes = caseFolding.fold(runes);
             Fragment terminal = noOperation();
+            if (reversed) {
+                return reversedFullCaseFoldLiteral(foldedRunes, terminal);
+            }
             Fragment[] suffixes = new Fragment[foldedRunes.length + 1];
             suffixes[foldedRunes.length] = terminal;
 
@@ -1813,6 +1813,36 @@ final class Compiler
                 suffixes[index] = new Fragment(begin, terminal.end, false);
             }
             return suffixes[0];
+        }
+
+        // The forward graph mirrored: `prefixes[end]` matches, last byte first, the text whose
+        // fold is the folded runes before `end`. It branches to the simple fold class of the rune
+        // at `end - 1`, and to the source of each multi-character fold that ends at `end`, each
+        // followed by the prefix before it. These are the forward graph's branches, so the
+        // program matches the reverse of the same byte strings; their order does not matter, since
+        // the reverse program runs longest-match.
+        private Fragment reversedFullCaseFoldLiteral(int[] foldedRunes, Fragment terminal)
+        {
+            Fragment[] prefixes = new Fragment[foldedRunes.length + 1];
+            prefixes[0] = terminal;
+            for (int end = 1; end <= foldedRunes.length; end++) {
+                List<Integer> branchStarts = new ArrayList<>();
+                addFullCaseFoldBranch(branchStarts, caseFolding.simpleFoldClass(foldedRunes[end - 1]), prefixes[end - 1]);
+                for (int length = 2; length <= caseFolding.maximumTokenLength() && length <= end; length++) {
+                    int start = end - length;
+                    for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokensStartingWith(foldedRunes[start])) {
+                        if (token.foldedRunes().length == length && token.matches(foldedRunes, start)) {
+                            addFullCaseFoldBranch(branchStarts, token.sourceRunes(), prefixes[start]);
+                        }
+                    }
+                }
+                int begin = branchStarts.getFirst();
+                for (int branchIndex = 1; branchIndex < branchStarts.size(); branchIndex++) {
+                    begin = add(Prog.altWord(begin, branchStarts.get(branchIndex)));
+                }
+                prefixes[end] = new Fragment(begin, terminal.end, false);
+            }
+            return prefixes[foldedRunes.length];
         }
 
         private void addFullCaseFoldBranch(List<Integer> branchStarts, CharClass sourceRunes, Fragment suffix)
