@@ -1097,28 +1097,14 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(trino.count(input)).as(text).isEqualTo(expectedCount);
         }
 
-        // A rare class pair is a two-byte inner literal too, searched for as its members in inputs
-        // of at least MINIMUM_LONG_SEARCH_BYTES; these shorter ones check that its routes agree.
-        TrinoRegexp classPair = TrinoRegexp.compile(utf8Slice("[a-z][?!.][\"']x"));
-        assertThat(classPair).isExactlyInstanceOf(TrinoRegexp.class);
-        assertThat(classPair.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"!\"".getBytes(ISO_8859_1), "!'".getBytes(ISO_8859_1), ".\"".getBytes(ISO_8859_1), ".'".getBytes(ISO_8859_1), "?\"".getBytes(ISO_8859_1), "?'".getBytes(ISO_8859_1)});
-        Re2 classPairReference = Re2.compile(utf8Slice("[a-z][?!.][\"']x"));
-        for (String text : List.of("?\"x has no letter before", "ab?\"x", "no.'x here", "ok!\"x, so?'x and z.\"x")) {
-            Slice input = utf8Slice(text);
-            long expectedCount = generalEngineCount(classPairReference, input);
-            assertThat(classPair.contains(input)).as(text).isEqualTo(expectedCount > 0);
-            assertThat(classPair.count(input)).as(text).isEqualTo(expectedCount);
-        }
-
         // A pattern with a short-search fixed-width matcher runs the inner literal search from
-        // MINIMUM_LONG_SEARCH_BYTES, for a single literal, whose own minimum is longer, as for a
-        // class pair. On fewer bytes every language, Trino included, counts and finds matcher
-        // spans with that matcher, which builds no program search, while full-Slice find stays on
-        // the engine. Each search covers the last bytes of a 1024-byte input that ends in a match,
+        // MINIMUM_LONG_SEARCH_BYTES, for a single literal, whose own minimum is longer. On fewer
+        // bytes every language, Trino included, counts and finds matcher spans with that matcher,
+        // which builds no program search, while full-Slice find stays on the engine. Each search covers the last bytes of a 1024-byte input that ends in a match,
         // so the find that resumes after the match has no bytes left. Every match of [a-z]shing
         // ends at its literal's end, so its count of the 95-byte input, whose hit lies past the
         // near-start fallback, confirms the hit on the reverse prefix DFA alone.
-        for (Map.Entry<String, String> example : List.of(Map.entry("[a-z]shing", "ishing"), Map.entry("[a-z][?!.][\"']x", "a?\"x"))) {
+        for (Map.Entry<String, String> example : List.of(Map.entry("[a-z]shing", "ishing"))) {
             String expression = example.getKey();
             int matchStart = 1024 - example.getValue().length();
             Slice longInput = utf8Slice("x".repeat(matchStart) + example.getValue());

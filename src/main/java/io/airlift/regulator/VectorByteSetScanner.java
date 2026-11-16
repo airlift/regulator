@@ -549,96 +549,6 @@ final class VectorByteSetScanner
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
-    // and benchmark evidence. Finds the first position whose byte is in slots 0 to 2 of `bytes`
-    // and whose next byte is in slots 3 to 5, a side with fewer bytes repeating one. The scan is a
-    // counted loop, with its step count fixed before it starts, so C2 can strip-mine its
-    // safepoint poll out of each step; the step that hits is compared again after the loop. The
-    // comparison is written out at both places rather than in a helper: C2 boxes the vectors a
-    // helper it leaves out of line takes or returns, on every step, and nothing guarantees it
-    // inlines one. The scalar tail is the one the scalar search uses. The SVE form is
-    // findClassPairSve; keep the two in step.
-    static int findClassPair(byte[] data, int offset, int length, byte[] bytes)
-    {
-        ByteVector first0 = ByteVector.broadcast(SPECIES, bytes[0]);
-        ByteVector first1 = ByteVector.broadcast(SPECIES, bytes[1]);
-        ByteVector first2 = ByteVector.broadcast(SPECIES, bytes[2]);
-        ByteVector second0 = ByteVector.broadcast(SPECIES, bytes[3]);
-        ByteVector second1 = ByteVector.broadcast(SPECIES, bytes[4]);
-        ByteVector second2 = ByteVector.broadcast(SPECIES, bytes[5]);
-        int lanes = SPECIES.length();
-        // The second byte of each step's last lane must lie before the end.
-        int steps = length > 0 ? (length - 1) / lanes : 0;
-        int step = 0;
-        for (; step < steps; step++) {
-            int stepStart = offset + step * lanes;
-            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
-            if (first.eq(first0).or(first.eq(first1)).or(first.eq(first2))
-                    .and(second.eq(second0).or(second.eq(second1)).or(second.eq(second2)))
-                    .anyTrue()) {
-                break;
-            }
-        }
-        int position = offset + step * lanes;
-        if (step < steps) {
-            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
-            VectorMask<Byte> matches = first.eq(first0).or(first.eq(first1)).or(first.eq(first2))
-                    .and(second.eq(second0).or(second.eq(second1)).or(second.eq(second2)));
-            return position + matches.firstTrue();
-        }
-
-        return InnerLiteralSearch.findClassPair(data, position, offset + length - position, bytes);
-    }
-
-    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
-    // and benchmark evidence. findClassPair in the form VectorSupport.SVE_128 selects: each side's
-    // bytes are XORed with the loaded vector, the differences reduced by unsigned minimum, the two
-    // sides ORed, and one compare with zero gives the mask. It is a separate method, as
-    // findTwoLiteralsSve is, so that each body holds one form and its loop. The step that hits is
-    // compared again after the loop as in findClassPair. Keep the two in step.
-    static int findClassPairSve(byte[] data, int offset, int length, byte[] bytes)
-    {
-        ByteVector first0 = ByteVector.broadcast(SPECIES, bytes[0]);
-        ByteVector first1 = ByteVector.broadcast(SPECIES, bytes[1]);
-        ByteVector first2 = ByteVector.broadcast(SPECIES, bytes[2]);
-        ByteVector second0 = ByteVector.broadcast(SPECIES, bytes[3]);
-        ByteVector second1 = ByteVector.broadcast(SPECIES, bytes[4]);
-        ByteVector second2 = ByteVector.broadcast(SPECIES, bytes[5]);
-        int lanes = SPECIES.length();
-        // The second byte of each step's last lane must lie before the end.
-        int steps = length > 0 ? (length - 1) / lanes : 0;
-        int step = 0;
-        for (; step < steps; step++) {
-            int stepStart = offset + step * lanes;
-            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
-            // A side's smallest difference is zero only where its byte is one of the side's, so
-            // the OR of both sides is zero only where the pair matches.
-            if (first.lanewise(VectorOperators.XOR, first0)
-                    .lanewise(VectorOperators.UMIN, first.lanewise(VectorOperators.XOR, first1))
-                    .lanewise(VectorOperators.UMIN, first.lanewise(VectorOperators.XOR, first2))
-                    .lanewise(VectorOperators.OR, second.lanewise(VectorOperators.XOR, second0)
-                            .lanewise(VectorOperators.UMIN, second.lanewise(VectorOperators.XOR, second1))
-                            .lanewise(VectorOperators.UMIN, second.lanewise(VectorOperators.XOR, second2)))
-                    .compare(VectorOperators.EQ, (byte) 0)
-                    .anyTrue()) {
-                break;
-            }
-        }
-        int position = offset + step * lanes;
-        if (step < steps) {
-            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
-            VectorMask<Byte> matches = first.eq(first0).or(first.eq(first1)).or(first.eq(first2))
-                    .and(second.eq(second0).or(second.eq(second1)).or(second.eq(second2)));
-            return position + matches.firstTrue();
-        }
-
-        return InnerLiteralSearch.findClassPair(data, position, offset + length - position, bytes);
-    }
-
-    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Finds the first position where every byte of the filter's span
     // lies in its offset's range, the span's last byte before offset + length, or -1. A pair
     // and a triple each have a compare form and the form VectorSupport.SVE_128 selects, each in
@@ -653,12 +563,12 @@ final class VectorByteSetScanner
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
-    // and benchmark evidence. findClassSequence for a span of two, in the form of findClassPair:
-    // a byte lies in a range of low to high when its distance above low, as an unsigned byte, is
-    // at most high - low, so each offset takes a subtract and an unsigned compare, and the masks
-    // are ANDed. The loop is counted, the step that hits is compared again after it, the
-    // comparison is written out at both places, and the tail is the filter's scalar search, as
-    // findClassPair records. The SVE form is findClassSequencePairSve; keep the two in step.
+    // and benchmark evidence. findClassSequence for a span of two: a byte lies in a range of low
+    // to high when its distance above low, as an unsigned byte, is at most high - low, so each
+    // offset takes a subtract and an unsigned compare, and the masks are ANDed. The loop is
+    // counted, the step that hits is compared again after it, the comparison is written out at
+    // both places, and the tail is the filter's scalar search. The SVE form is
+    // findClassSequencePairSve; keep the two in step.
     static int findClassSequencePair(byte[] data, int offset, int length, StartClassFilter filter)
     {
         ByteVector firstLow = ByteVector.broadcast(SPECIES, (byte) filter.firstLow());

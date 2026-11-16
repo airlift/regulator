@@ -2543,6 +2543,9 @@ and run once.
 
 ## Minimum Inner Literal Search Window
 
+The simplification sweep removed the literal set and class pair forms of the
+inner literal search, so their minimums below no longer apply.
+
 A line-by-line search calls the matcher once per line, and most lines are short.
 A matcher's or full-Slice find whose search window is shorter than the inner
 literal search's minimum runs the ordinary engine or a fixed-width pattern's
@@ -2901,6 +2904,10 @@ records.
 The row has not been remeasured with this check since.
 
 ## Inner Literal Class Pairs
+
+The simplification sweep removed class pairs and literal sets from the inner
+literal search; such a pattern takes the ordinary engine. The record below
+describes the removed search.
 
 The Rust crate's reverse inner strategy searches only for a literal or a set of
 literals. The inner literal search also takes two adjacent elements that each

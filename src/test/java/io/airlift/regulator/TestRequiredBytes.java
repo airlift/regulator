@@ -389,25 +389,6 @@ public class TestRequiredBytes
             }
         }
 
-        // A one-of set of two or three distinct bytes beside an inner literal search checks exactly
-        // the short windows too short for that search, whose minimum depends on its literal's kind:
-        // 64 bytes for the class pair `[?!.]["']` and 256 for the set `ing|ment`, whose bytes keep
-        // their check of every short window.
-        for (OneOfBesideSearch oneOf : List.of(
-                new OneOfBesideSearch("\\w+[?!.][\"'](?:=x|;y)", "one of =;", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
-                new OneOfBesideSearch("[a-z](?:ing|ment)", "one of gm", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES))) {
-            for (Map.Entry<String, CompiledPattern> compiled : compile(oneOf.pattern()).entrySet()) {
-                String description = "%s %s".formatted(compiled.getKey(), oneOf.pattern());
-                CompiledPattern regexp = compiled.getValue();
-                assertThat(regexp.requiredBytesForDiagnostics()).as(description).hasToString(oneOf.bytes());
-                assertThat(regexp.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(description).isEqualTo(oneOf.searchMinimum());
-                for (int length = 0; length < RequiredBytes.SHORT_WINDOW_LIMIT; length++) {
-                    Slice input = utf8Slice("x".repeat(length));
-                    assertThat(regexp.shortWindowLacksRequiredBytes(input, 0, length)).as("%s at %s", description, length).isEqualTo(!regexp.searchesInnerLiteralWindow(length));
-                }
-            }
-        }
-
         // A window without `@` is rejected at every short length, by the literal-neighbor matcher
         // in full-Slice find and by the search in a matcher's find, so neither find starts the
         // forward DFA.
@@ -498,22 +479,6 @@ public class TestRequiredBytes
             assertThat(spans(pattern.matcher(offsetInput))).as(language).containsExactly(offsetMatch);
             assertThat(pattern.find(offsetInput)).as(language).isTrue();
             assertThat(pattern.count(offsetInput)).as(language).isEqualTo(1);
-        }
-
-        // A literal set's search that only the class-run proof admits leaves the check as the
-        // pattern has it without that search, so the check rejects a window that lacks the literal
-        // and is shorter than the minimum a set behind a class run needs before its search runs.
-        Slice names = utf8Slice(SHORT_FILLER + "Tom and Finn\n");
-        for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(Tom|Finn)xyz").entrySet()) {
-            String language = entry.getKey();
-            CompiledPattern pattern = entry.getValue();
-            assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isGreaterThan(names.length());
-            RegexpMatcher matcher = pattern.matcher(names);
-            assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-            assertThat(pattern.find(names)).as(language).isFalse();
-            assertThat(pattern.count(names)).as(language).isZero();
-            assertNoForwardDfa(pattern, language + " names");
         }
     }
 
@@ -675,23 +640,6 @@ public class TestRequiredBytes
             RegexpMatcher matcher = entry.getValue().matcher(dense);
             assertThat(spans(matcher)).as(entry.getKey()).hasSize(100);
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(entry.getKey()).isEqualTo(RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT);
-        }
-
-        // An inner literal search that only the class-run proof admits is no other route, as for
-        // a literal: the pattern checks long windows for its one-of bytes as it would without it,
-        // over the search's minimum and under it, where the search does not run.
-        for (String filler : List.of(LONG_FILLER.substring(0, 512), LONG_FILLER)) {
-            for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(ab@|cd#)").entrySet()) {
-                String language = entry.getKey() + " " + filler.length();
-                CompiledPattern pattern = entry.getValue();
-                assertThat(pattern.innerLiteralSearchForDiagnostics().addedByClassRunProof()).as(language).isTrue();
-                assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isBetween(513, LONG_FILLER.length());
-                assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of @#");
-                RegexpMatcher matcher = pattern.matcher(utf8Slice(filler));
-                assertThat(matcher.find()).as(language).isFalse();
-                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-                assertNoForwardDfa(pattern, language + " class run");
-            }
         }
 
         // A start literal filter that only groups wider than one bit give is no other route, as
@@ -1139,7 +1087,6 @@ public class TestRequiredBytes
                 new BesideRoute("x(.*?,){3}z", "x,,,z", ",z", ",z", prefixScan),
                 new BesideRoute("Holmes.*?Watson", "Holmes Watson", "Holmes", "Watson", prefixScan),
                 new BesideRoute("\\bthe\\b.*?,z", "the,z", "the", ",z", pattern -> pattern.forwardProgramForDiagnostics().transparentStartLiteral() != null),
-                new BesideRoute("\\b(?:the|and)\\b.*?,z", "and,z", ",z", ",z", pattern -> pattern.innerLiteralSearchForDiagnostics().literalBeginsEveryMatch()),
                 new BesideRoute("(?:\\b|\\B)Holmes.*?foobar", "Holmes foobar", "Holmes", "foobar", pattern -> pattern.forwardProgramForDiagnostics().transparentStartLiteral() != null),
                 // A route literal rules out only a literal its exact bytes hold: `foobar` holds no
                 // `FOO`, and the folded `bar` of `foo[Bb][Aa][Rr]` may be `BAR`.
@@ -1694,10 +1641,6 @@ public class TestRequiredBytes
     }
 
     private record ForwardDfa(String expression, Dfa.DfaInstance.Kind kind) {}
-
-    // A pattern whose one-of set of two or three distinct bytes sits beside an inner literal
-    // search, its bytes, and the search's minimum.
-    private record OneOfBesideSearch(String pattern, String bytes, int searchMinimum) {}
 
     // A pattern that takes another route than the long-window check, which `route` tells, and
     // the text of one of its matches.

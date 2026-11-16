@@ -524,8 +524,8 @@ so the automata run only where a match can be.
 - **Origin:** Adapted from the Rust regex crate
   ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy],
   [teddy.rs][ra-teddy], [literal.rs][rs-literal], [#90]); First described by
-  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask]),
-  for class pairs ([shufti.c][hs-shufti-double]), and for a count that ends
+  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask])
+  and for a count that ends
   each match at its literal, whose Rose program asks only whether the prefix
   engine accepts at the hit and reports the match there without its start
   ([program_runtime.c][hs-check-prefix] `CHECK_PREFIX`), and by .NET for a
@@ -534,8 +534,7 @@ so the automata run only where a match can be.
   Hyperscan, whose Rose compiler anchors literals behind pure-repeat prefixes,
   for class-run prefixes ([rose_build_castle.cpp][hs-rose-castle],
   [rose_build_lookaround.cpp][hs-rose-leftfix]). Regulator: the exact head
-  with a folded tail, the vector kernels for long searches, class pairs with
-  an English-rarity gate and their own no-earlier-match proof, and the proof
+  with a folded tail, the vector kernels for long searches, and the proof
   for a bounded or unbounded run of one class that can hold the literal,
   behind assertions, and each literal kind's minimum search window, at its
   measured crossover with the DFA, and the proofs that a count's matches end
@@ -563,16 +562,11 @@ so the automata run only where a match can be.
   one-byte characters, and a pattern of the
   [dot-star literal span](#dot-star-literal-span) matcher's shape, such as
   `.*lit.*`, is left to that matcher and takes no inner literal search; the
-  vector forms from 1 KiB with the Vector API; class pairs only for required
-  pieces that are neither a literal nor a literal set; find windows and
-  counted texts of at least 64 bytes for a class pair or one-byte literal, 96
-  for a longer single literal, 256 for a literal set, and 1 KiB for a set
-  behind a class run that only the class-run proof admits, since below them
-  the literal's scan costs more than the DFA; 1 KiB, the folded prefix scan's
+  vector forms from 1 KiB with the Vector API; find windows and counted texts
+  of at least 64 bytes for a one-byte literal and 96 for a longer single
+  literal, since below them the literal's scan costs more than the DFA; 1 KiB, the folded prefix scan's
   vector cutoff and unmeasured for this search, for a case-insensitive literal
-  whose exact head is empty or one common byte; from 64 bytes for a count of a
-  set not behind a class run, whose one search continues across many matches,
-  and for a pattern with a fixed-width short-search matcher, which answers its
+  whose exact head is empty or one common byte; and from 64 bytes for a pattern with a fixed-width short-search matcher, which answers its
   shorter counts and matcher finds and loses to the search from 64 bytes.
   Guards against quadratic rescans, and a first hit that passes the byte gates
   within 64 bytes of the start, hand the search back to the ordinary engine. A
@@ -591,15 +585,12 @@ so the automata run only where a match can be.
   and confirms forward. A case-insensitive ASCII letter in the prefix consumes
   only its two cases, so the proof that the prefix cannot consume some byte of
   the literal holds behind one, as in `(?i:x)?\d+ = value`.
-  The required piece can take three other forms: one of
-  up to 8 ASCII literals of 3 to 64 bytes, searched with the start literal
-  filter; a literal with case-insensitive ASCII letters, such as `# (?i:noqa)`,
+  The required piece can also be a literal with case-insensitive ASCII
+  letters, such as `# (?i:noqa)`,
   found from 1 KiB with the Vector API by the folded pair kernel over its
   first nine bytes and in shorter windows by its exact leading bytes, such as
-  `# `, with the rest checked by an OR mask; or two adjacent elements that
-  each consume one of at most three ASCII bytes, such as `[?!.]["']`, which
-  English text rarely holds as a pair (estimated below once in 500 bytes),
-  scanned for its two-byte members with a counted loop. A case-insensitive
+  `# `, with the rest checked by an OR mask. A literal set or a pair
+  of small classes is not searched. A case-insensitive
   literal whose exact leading bytes are none or one common byte, such as
   `noqa` in `\s+(?i:noqa)`, is found only by the kernel. With no exact leading
   bytes its proofs count both cases of every letter, exact ones included; a
@@ -619,14 +610,11 @@ so the automata run only where a match can be.
   `word-ending-nn` to 0.96 to 0.98 ([design][d-count-literal-end]). Long
   searches for one exact ASCII literal use the vector byte-set scan for one
   byte and the vector pair scan otherwise. Leipzig `shing` and mariomka
-  `email` counts take 0.06 to 0.10 of their earlier time ([#90]), class pairs
-  take `quotes-bounded` to 0.54 of the start-byte scan's time on Intel and
-  0.74 on Graviton ([design][d-class-pairs]), and the class-run proof takes
+  `email` counts take 0.06 to 0.10 of their earlier time ([#90]), and the
+  class-run proof takes
   finds of `\w+[?!.]["']` in 300-byte to 2 KiB chunks of `sherlock.txt` to
   0.03 to 0.28 of their time without it and rebar's `leipzig/word-ending-nn`
-  to 0.11 to 0.12 ([#193]). With each literal kind's minimum window, per-line
-  finds of `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to 0.50 of their earlier
-  time ([#193]).
+  to 0.11 to 0.12 ([#193]).
 
 ### Inner literal byte gates
 

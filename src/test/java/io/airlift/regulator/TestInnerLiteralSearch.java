@@ -156,19 +156,6 @@ public class TestInnerLiteralSearch
         // A group that does not capture joins the top level too.
         assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
         assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
-        // An alternation of literals is searched as a set. Every language's parser factors the
-        // class out of this one's alternatives.
-        Slice target = utf8Slice("([A-Za-z]awyer|[A-Za-z]inn)\\s");
-        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
-                Map.entry("RE2", Re2.compile(target)),
-                Map.entry("Java", JavaRegexp.compile(target)),
-                Map.entry("Trino", TrinoRegexp.compile(target).re2()),
-                Map.entry("Rust", RustRegexp.compile(target)),
-                Map.entry("Rust bytes", RustRegexp.compile(target, RUST_BYTES_OPTIONS)))) {
-            InnerLiteralSearch search = compiled.getValue().innerLiteralSearchForDiagnostics();
-            assertThat(search).as(compiled.getKey()).isNotNull();
-            assertThat(literal(search)).as(compiled.getKey()).isEqualTo("awyer|inn");
-        }
         // A folded ASCII letter consumes only its own two cases. Every language keeps the folded x
         // and xy as folded literals, since the simplifier rebuilds [Xx] into one, so neither they
         // nor the digit run can consume the space that starts the literal, and every language
@@ -190,19 +177,9 @@ public class TestInnerLiteralSearch
         InnerLiteralSearch kelvinSearch = TrinoRegexp.compile(utf8Slice("(?i:k)ey = value")).re2().innerLiteralSearchForDiagnostics();
         assertThat(kelvinSearch).isNotNull();
         assertThat(literal(kelvinSearch)).isEqualTo("ey = value");
-        // Rust's Unicode \w has no fixed length in bytes, so the fixed-length proof needs RE2's.
-        InnerLiteralSearch wordSearch = Re2.compile(utf8Slice("\\w(?:foo|barbaz)\\s")).innerLiteralSearchForDiagnostics();
-        assertThat(wordSearch).isNotNull();
-        assertThat(literal(wordSearch)).isEqualTo("foo|barbaz");
-        assertThat(literal("\\s[a-z]{0,12}(?:ing|ment)\\s")).isEqualTo("ing|ment");
-        // A set that cannot be searched leaves a later literal to decide.
+        // A literal set or a pair of small classes is no literal, so a later literal decides.
         assertThat(literal("[a-z](?:ab|cd)@x")).isEqualTo("@x");
         assertThat(literal("(?:\\w|--)+[?!.][\"']@x")).isEqualTo("@x");
-        // A rare pair of small classes is searched as the set of its two-byte members. A quote
-        // ends every member, and the prefix holds one only as its one-byte opening quote, so no
-        // earlier match spans a later candidate.
-        assertThat(literal("[\"'][^\"']{0,30}[?!.][\"']")).isEqualTo("!\"|!'|.\"|.'|?\"|?'");
-        // A pair with a side of more than three bytes, or one common in English text, is not.
         assertThat(literal("[ \\t][!#%&][\"']@x")).isEqualTo("@x");
         assertThat(literal("\\s[ae][st]@x")).isEqualTo("@x");
         // The bytes that can end the prefix gate the byte before each hit, as the digits that end
@@ -261,7 +238,6 @@ public class TestInnerLiteralSearch
         for (Language language : Language.values()) {
             for (Map.Entry<String, String> entry : List.of(
                     Map.entry("\\b\\w+nn\\b", "nn"),
-                    Map.entry(".{0,2}(Tom|Sawyer|Huckleberry|Finn)", "Tom|Sawyer|Huckleberry|Finn"),
                     Map.entry("\\B\\w+nn\\b", "nn"))) {
                 InnerLiteralSearch search = language.compiledPattern(entry.getKey()).innerLiteralSearchForDiagnostics();
                 assertThat(search).as("%s %s", language, entry.getKey()).isNotNull();
@@ -292,11 +268,6 @@ public class TestInnerLiteralSearch
         assertThat(literal("[a-z]+ing")).isEqualTo("ing");
         assertThat(literal("[a-z]{0,3}xy")).isEqualTo("xy");
         assertThat(literal("[a-z]{2,5}ing")).isEqualTo("ing");
-        // A repeated body whose minimum is at most one matches every count in between.
-        assertThat(literal("(?:[a-z][a-z]?){2}(?:foo|bar)")).isEqualTo("foo|bar");
-        assertThat(literal("\\w+(?:foo|bar)\\s")).isEqualTo("foo|bar");
-        assertThat(literal("[0-9]+(?:foo|bar)\\s")).isEqualTo("foo|bar");
-        assertThat(literal("\\w+[?!.][\"']@x")).isEqualTo("!\"|!'|.\"|.'|?\"|?'");
         // A run with a minimum of at least two characters needs every character of the class to
         // be one byte: a later start inside a run of multibyte characters need not fall on a
         // character boundary of the earlier match, as in malformed input. RE2's \w and a Latin-1
@@ -304,9 +275,9 @@ public class TestInnerLiteralSearch
         // simplifies to \w\w+, a run with a minimum of two.
         assertThat(literal(Re2.compile(utf8Slice("\\w{2,5}nn")).innerLiteralSearchForDiagnostics())).isEqualTo("nn");
         assertThat(literal(Re2.compile(utf8Slice("\\w+\\w+Holmes")).innerLiteralSearchForDiagnostics())).isEqualTo("Holmes");
-        assertThat(literal(Re2.compile(utf8Slice(".{2,4}(?:Tom|Sawyer)"), Re2.Options.latin1()).innerLiteralSearchForDiagnostics())).isEqualTo("Tom|Sawyer");
-        assertThat(literal(Language.RUST_BYTES_ASCII.compiledPattern(".{2,4}(?:Tom|Sawyer)").innerLiteralSearchForDiagnostics())).isEqualTo("Tom|Sawyer");
-        assertThat(Re2.compile(utf8Slice(".{2,4}(?:Tom|Sawyer)")).innerLiteralSearchForDiagnostics()).isNull();
+        assertThat(literal(Re2.compile(utf8Slice(".{2,4}Sawyer"), Re2.Options.latin1()).innerLiteralSearchForDiagnostics())).isEqualTo("Sawyer");
+        assertThat(literal(Language.RUST_BYTES_ASCII.compiledPattern(".{2,4}Sawyer").innerLiteralSearchForDiagnostics())).isEqualTo("Sawyer");
+        assertThat(Re2.compile(utf8Slice(".{2,4}Sawyer")).innerLiteralSearchForDiagnostics()).isNull();
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -373,18 +344,6 @@ public class TestInnerLiteralSearch
                 "(?i:@)+@@")) {
             assertThat(TrinoRegexp.compile(utf8Slice(pattern)).re2().innerLiteralSearchForDiagnostics()).as(pattern).isNull();
         }
-    }
-
-    @Test
-    public void testLiteralSetFilterTakesOneBitGroups()
-    {
-        // The set's filter was measured with groups of one bit. Wider groups would check @, A, B,
-        // and D at the first byte under the mask 0x07; groups of one bit check the second, third,
-        // and fourth bytes.
-        InnerLiteralSearch search = innerLiteralSearch("[0-9]+(?:@eee|Aeee|@ttt|Bttt|@   |D   )");
-        assertThat(literal(search)).isEqualTo("@eee|Aeee|@ttt|Bttt|@   |D   ");
-        StartLiteralFilter filter = search.literalSetFilterForDiagnostics();
-        assertThat(List.of(filter.firstOffset(), filter.secondOffset(), filter.thirdOffset())).containsExactly(1, 2, 3);
     }
 
     @Test
@@ -697,8 +656,7 @@ public class TestInnerLiteralSearch
                 Map.entry("\\b\\w+nn\\b", gap + "Penn " + gap + "Finn," + gap),
                 Map.entry("\\w+@", gap + "ab@" + gap + "c@" + gap),
                 Map.entry("(?i:x)?\\d+ = value", gap + "X1 = value" + gap + "x22 = value" + gap),
-                Map.entry("[a-z]{2}ab", gap + "xyab" + gap + "zzab" + gap),
-                Map.entry("[\"'][^\"']{0,30}[?!.][\"']", gap + "\"Hi!\"" + gap + "'Yes.'" + gap))) {
+                Map.entry("[a-z]{2}ab", gap + "xyab" + gap + "zzab" + gap))) {
             String regex = entry.getKey();
             Slice text = utf8Slice(entry.getValue());
             for (Language language : Language.values()) {
@@ -818,26 +776,20 @@ public class TestInnerLiteralSearch
     @Test
     public void testSearchesWindowsFromMinimum()
     {
-        // A search window shorter than the search's minimum, a literal set's 256 bytes or 1024
-        // behind a class run, 1024 for a case-insensitive literal without an exact head, a longer
-        // single literal's 96, or 64 for a one-byte literal or class pair, never runs the inner
-        // literal search, except a gated one-byte search, which first rejects a window without a
-        // gate-passing hit: a matcher's find and a full-Slice find run the ordinary engine there. A
-        // whole-text count keeps the same minimum, except a literal set's not behind a class run,
-        // 64 bytes.
+        // A search window shorter than the search's minimum, 1024 for a case-insensitive literal
+        // without an exact head, a longer single literal's 96, or 64 for a one-byte literal, never
+        // runs the inner literal search, except a gated one-byte search, which first rejects a
+        // window without a gate-passing hit: a matcher's find and a full-Slice find run the
+        // ordinary engine there. A whole-text count keeps the same minimum.
         // A window at the minimum runs the search, the only route that starts its reverse prefix
         // DFA, or, where a literal ending a minimum window would still fall back near its start,
         // the shortest window that puts the literal past that fallback. Each window lies inside a
         // longer Slice, as a matcher region, and ends with the literal, inside any required bytes
         // check.
         List<MinimumWindow> windows = new ArrayList<>(List.of(
-                new MinimumWindow(".{0,2}(Tom|Sawyer|Huckleberry|Finn)", "Finn", Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES, Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES),
-                new MinimumWindow("\\s[a-z]{0,12}(?:ing|ment)\\s", " moment ", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
-                new MinimumWindow("[a-z](?:ing|ment)", "ament", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("\\w+\\s+Holmes", "a Holmes", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
                 new MinimumWindow("\\s*(?i:# noqa)", "# NoQA", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
-                new MinimumWindow("\\w+@", "a@", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
-                new MinimumWindow("\\w+[?!.][\"']", "a?\"", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES)));
+                new MinimumWindow("\\w+@", "a@", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES)));
         if (VectorSupport.isAvailable()) {
             windows.add(new MinimumWindow("\\s+(?i:noqa)", " NoQa", Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES, Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES));
             // A literal only the kernel searches gives way to a later one with a shorter minimum,
@@ -933,11 +885,6 @@ public class TestInnerLiteralSearch
                 "\\w+\\s+Holmes",
                 List.of(".".repeat(61) + "a Holmes" + filler),
                 List.of(".".repeat(62) + "a Holmes" + filler, ".".repeat(66) + "a Holmes" + filler));
-        // A set is near when its first gate-passing member starts fewer than the minimum bytes in.
-        assertNearStart(
-                "([A-Za-z]awyer|[A-Za-z]inn)\\s",
-                List.of(".".repeat(62) + "xinn " + filler, ".".repeat(62) + "Sawyer " + filler),
-                List.of(".".repeat(63) + "xinn " + filler, ".".repeat(63) + "Sawyer " + filler));
     }
 
     @Test
@@ -986,17 +933,17 @@ public class TestInnerLiteralSearch
     @Test
     public void testFallsBackOnDenseRejectedHits()
     {
-        // In rebar's folly/awyer-inn-busted, awyerinn holds two hits of the set every eight bytes,
-        // and each fails the gate before it, which needs a capital. The literal scan skips no text
-        // there, so the search falls back, and the count and find run the ordinary engine, whose
-        // start-byte scan passes the run: the reverse prefix DFA never starts, though the Sawyer
-        // at the end passes the gate. One rejected hit fewer than the rule needs, or as many hits
+        // As in rebar's folly/awyer-inn-busted, innawyer holds a hit every eight bytes, and each
+        // fails the gate before it, which needs a capital. The literal scan skips no text there,
+        // so the search falls back, and the count and find run the ordinary engine, whose
+        // start-byte scan passes the run: the reverse prefix DFA never starts, though the Finn at
+        // the end passes the gate. One rejected hit fewer than the rule needs, or as many hits
         // spread out by a byte more than its spacing, keep the search.
-        String regex = "([A-Z]awyer|[A-Z]inn)[0-9\\s]";
+        String regex = "[A-Z]inn[0-9\\s]";
         int hits = InnerLiteralSearch.MINIMUM_DENSE_REJECTED_HITS;
-        Slice dense = utf8Slice("awyerinn".repeat(hits / 2) + "Sawyer\n");
-        Slice fewer = utf8Slice("awyerinn".repeat(hits / 2 - 1) + "awyer........" + "Sawyer\n");
-        Slice spread = utf8Slice(("awyer" + ".".repeat(InnerLiteralSearch.DENSE_REJECTED_HIT_SPACING - 4)).repeat(hits) + "Sawyer\n");
+        Slice dense = utf8Slice("innawyer".repeat(hits) + "Finn\n");
+        Slice fewer = utf8Slice("innawyer".repeat(hits - 1) + "Finn\n");
+        Slice spread = utf8Slice(("inn" + ".".repeat(InnerLiteralSearch.DENSE_REJECTED_HIT_SPACING - 2)).repeat(hits) + "Finn\n");
         for (Language language : Language.values()) {
             String description = language.name();
             InnerLiteralSearch search = language.compiledPattern(regex).innerLiteralSearchForDiagnostics();
@@ -1300,19 +1247,6 @@ public class TestInnerLiteralSearch
         CompiledPattern exactLetters = Re2.compile(utf8Slice("\\sAa(?i:noqa)"));
         assertThat(exactLetters.find(utf8Slice("-".repeat(1_024) + " aaNOQA"))).isFalse();
         assertThat(reversePrefixStateCount(exactLetters)).isZero();
-    }
-
-    @Test
-    public void testNearStartCheckAgreesWithSearchPastShorterMember()
-    {
-        // The near-start check reads far enough to find the longest member starting before the
-        // minimum, so a shorter member can start past the minimum inside that read. There the
-        // search does not fall back, so the check must not report a near hit. Here a partial awyer
-        // straddles the minimum, and inn starts two bytes past it.
-        assertNearStart(
-                "([A-Za-z]awyer|[A-Za-z]inn)\\s",
-                List.of(),
-                List.of(".".repeat(61) + "awyxinn " + ".".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES)));
     }
 
     private static void assertNearStart(String regex, List<String> nearTexts, List<String> farTexts)

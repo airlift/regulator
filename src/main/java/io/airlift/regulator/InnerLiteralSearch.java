@@ -25,15 +25,14 @@ import static java.util.Objects.requireNonNull;
 
 /// Finds the leftmost-first match of a pattern `P L S`, whose top-level concatenation holds a
 /// literal `L` after its first element, by searching for `L` instead of running the DFA over every
-/// byte. `L` may also be a literal set, an alternation of literals or the members of a class pair,
-/// where an occurrence of any member is an occurrence of `L`. This is the Rust crate's reverse
+/// byte. This is the Rust crate's reverse
 /// inner strategy, which also covers its reverse suffix strategy (regex-automata 0.4.18
 /// `meta/strategy.rs` and `meta/reverse_inner.rs`). For each occurrence of `L` that its neighboring
 /// bytes do not rule out, a reverse DFA of `P` anchored at the occurrence finds the leftmost start,
 /// and the forward DFA of the whole pattern anchored at that start finds the end.
 ///
 /// The first confirmed candidate is the leftmost-first match only when no earlier match can span
-/// a later occurrence of `L`. [#analyze] accepts a literal or literal set only when one of these
+/// a later occurrence of `L`. [#analyze] accepts a literal only when one of these
 /// proofs holds: the crate's three (`meta/reverse_inner.rs` `has_no_earlier_match`), that `P`
 /// cannot consume every byte of a single literal `L`, that `P` has a fixed length, or that the
 /// first or last element of `P`, skipping elements such as assertions that match only the empty
@@ -43,8 +42,7 @@ import static java.util.Objects.requireNonNull;
 /// occurrence `g`, and let `P` also match `[e, h)` before a later occurrence `h`, with
 /// `s0 < e <= h < g`. Then such a `P` matches `[s0, h)` too, so the reverse search from `h` finds
 /// the earlier match's start. A run whose minimum is two or more characters qualifies only when
-/// each character of its class is one byte. A class pair may instead pass a proof of its own,
-/// described below.
+/// each character of its class is one byte.
 ///
 /// As in the crate, a search reports [#FALLBACK], for its caller to run the ordinary engine, when
 /// the reverse search would read back past the previous candidate, or a candidate lies in text the
@@ -70,18 +68,14 @@ import static java.util.Objects.requireNonNull;
 /// one-of set of two or three distinct bytes only those too short for the search, which itself
 /// scans a longer window for its literal before any engine runs unless the find skips the DFA. The
 /// minimums are where the literal's scan measured faster than the ordinary engine on r9g and r8i: a
-/// class pair's scan and a one-byte literal's from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], a
+/// one-byte literal's from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], a
 /// longer or case-insensitive single literal's word-at-a-time scan from
-/// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES], and a set's scalar filter from
-/// [#MINIMUM_LITERAL_SET_SEARCH_BYTES], or behind a class run that only the class-run proof admits
-/// from [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES], where the vector scan takes over. A
+/// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES]. A
 /// case-insensitive literal without a searched head, one whose exact head is empty or one common
 /// byte, searches from [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES], the folded prefix scan's vector
-/// cutoff, reused here and unmeasured for this search. A count of a set not behind a class run
-/// searches from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES]: one count search continues across
-/// many matches, so its scan pays off sooner, while each find starts a fresh search. The
+/// cutoff, reused here and unmeasured for this search. The
 /// fixed-width matcher took 2.7 to 5.8 times the search's time on 64- to 127-byte counts of
-/// `[a-z]shing`, a single literal; for a fixed-width class pair it is unmeasured. A find loop also
+/// `[a-z]shing`, a single literal. A find loop also
 /// keeps its cursors, as the ordinary engine falls back, where its first candidate [lies near the
 /// window start][#fallsBackNearStart].
 ///
@@ -93,15 +87,12 @@ import static java.util.Objects.requireNonNull;
 /// byte, as in `\w+(?i: holmes)`, is searched only by the kernel, so only with the Vector API. The
 /// 1 KiB cutoff admits its search, whose shorter scans then take the same kernel, and it gives way
 /// to a later element's search that runs on shorter windows, as `@x` does in `[a-z](?i: noqa)@x`.
-/// Two adjacent elements that each match one of a few ASCII bytes, such as the `[?!.]["']` that
-/// ends `["'][^"']{0,30}[?!.]["']`, are searched as the set of their two-byte members when English
-/// text rarely holds them, under a proof of its own.
 ///
 /// A hit is skipped before either DFA runs when the byte before it is not one the reverse prefix
 /// program can consume first, as a slash after a letter is not for a date, or when one of the up
 /// to three bytes before that is not one the program can consume there, as a byte that is neither
 /// a word byte nor whitespace is not two bytes before the `Holmes` of `\w+\s+Holmes`. A hit of a
-/// literal, or a set whose members share one length, is skipped too when the element after it is
+/// literal is skipped too when the element after it is
 /// a single ASCII byte class, alone or repeated at least once, and the byte after it is outside
 /// that class, as the `ing` of `kingdom` is for `\s[a-zA-Z]{0,12}ing\s`, or when a word boundary
 /// or non-boundary right after it rules out the ASCII byte after it, as a word byte after the `nn`
@@ -110,9 +101,7 @@ import static java.util.Objects.requireNonNull;
 /// limits repeated scan restarts and gate tests: after at least [#MINIMUM_DENSE_REJECTED_HITS]
 /// rejected hits, the search falls back to the ordinary engine when the distance from the
 /// search start to the current hit averages fewer than [#DENSE_REJECTED_HIT_SPACING] bytes per
-/// rejected hit, as the hits of `awyerinn` do for `([A-Z]awyer|[A-Z]inn)[0-9\s]`. There the
-/// ordinary engine's start-byte scan for `[A-Z]` passes the rejected run; other patterns, such
-/// as `\b\w+nn\b`, can require DFA steps over it.
+/// rejected hit. Patterns such as `\b\w+nn\b` can require DFA steps over the rejected run.
 ///
 /// A [count's search][#searchForCount] skips the forward DFA where every match provably ends at its
 /// literal's end: it asks the reverse DFA only whether some start exists, and takes the literal's
@@ -124,10 +113,6 @@ final class InnerLiteralSearch
     // single literal of two or more bytes. Its word-at-a-time scan lost to the DFA in 64-byte
     // windows and won from 100 bytes, on r9g and r8i.
     static final int MINIMUM_SINGLE_LITERAL_SEARCH_BYTES = 96;
-    // A find window shorter than this skips a literal set's search. Its scalar filter lost to the
-    // DFA in 64- and 128-byte windows on r9g and r8i, and for `ing|ment` won again by 300 bytes on
-    // r9g.
-    static final int MINIMUM_LITERAL_SET_SEARCH_BYTES = 256;
     // A first candidate closer than this to the search start leaves too few bytes to skip.
     static final int MINIMUM_SKIPPED_BYTES = 64;
     // A gated search that has rejected at least this many hits, fewer than
@@ -149,12 +134,6 @@ final class InnerLiteralSearch
     // which restarts its scan one byte past each hit, and WindowLiteralSearch, which visits every
     // overlapping occurrence, take the same limit.
     static final int MAXIMUM_LITERAL_LENGTH = 64;
-    // The set filter tests three positions of every member and holds at most eight members. The
-    // crate treats its Teddy prefilter as fast only when every literal has at least three bytes.
-    private static final int MINIMUM_SET_MEMBER_LENGTH = 3;
-    private static final int MAXIMUM_SET_MEMBERS = 8;
-    // Each side of a class pair is compared against up to this many bytes.
-    private static final int MAXIMUM_CLASS_PAIR_SIDE_BYTES = 3;
     // How many bytes before a hit its gates check, as Hyperscan's Rose lookaround checks a few
     // bytes around a literal.
     private static final int MAXIMUM_PREFIX_GATES = 4;
@@ -165,17 +144,10 @@ final class InnerLiteralSearch
     // word character, and that it is not.
     private static final int NEXT_IS_WORD = 1;
     private static final int NEXT_IS_NOT_WORD = 2;
-    // A class pair is searched only when it is estimated below once in 500 bytes, from English
-    // text byte frequencies, whatever frequencies the pattern was compiled with, as if each byte
-    // were independent of its neighbor. Each hit may pay a reverse search and an anchored
-    // confirmation, so a commoner pair could stop the scan about as often as the start-byte scan
-    // of the ordinary engine it replaces, and add the reverse search to its stops.
-    private static final double MAXIMUM_CLASS_PAIR_PROBABILITY = 0.002;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(InnerLiteralSearch.class);
 
-    // A single literal has its search kernel; a set has its members, in alternation order, or for a
-    // class pair in class order, and their filter, or for a class pair its scan bytes. A literal
+    // A single literal has its search kernel. A literal
     // with ASCII case-insensitive bytes, such as `# noqa` in `\s*# (?i:noqa)`, has the kernel of
     // its searched head, `# `, or none when its exact head is empty or one common byte, and the
     // whole literal with its case-insensitive letters lowered, its exact bytes unchanged, and a
@@ -194,13 +166,7 @@ final class InnerLiteralSearch
     private final int foldedSecondOffset;
     private final int foldedVerifiedBytes;
     private final boolean foldedDense;
-    private final byte[][] literalSet;
-    private final StartLiteralFilter literalSetFilter;
-    // A class pair set has no filter, but each side's bytes, the last repeated to three: the
-    // first side's in slots 0 to 2 and the second side's in slots 3 to 5.
-    private final byte[] classPairBytes;
     private final int minimumLiteralLength;
-    private final int maximumLiteralLength;
     // The bytes allowed before the literal, as the bits of four words, and the ASCII bytes allowed
     // after it, as the bits of two, low bytes first. A gate whose words are all zero is no gate.
     // A gate after the literal that only word boundaries set also admits every byte past ASCII,
@@ -224,16 +190,12 @@ final class InnerLiteralSearch
     private final boolean countsToLiteralEnd;
     private final boolean countEndNeedsAsciiBefore;
     private final boolean countEndNeedsNonWordAfter;
-    // The minimums are derived from the literal kind and this, not kept, so that the search keeps
-    // the 128-byte layout with compressed references, whose padding the booleans fill, that its
-    // memory budget charges.
-    private final boolean behindClassRun;
     private final boolean checksShortWindows;
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
     private final boolean addedByClassRunProof;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, FoldedScan foldedScan, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, boolean behindClassRun, boolean addedByClassRunProof, ByteGate prefixGate, long[] deeperPrefixGates, ByteGate suffixGate, CountEnd countEnd, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, FoldedScan foldedScan, boolean addedByClassRunProof, ByteGate prefixGate, long[] deeperPrefixGates, ByteGate suffixGate, CountEnd countEnd, Prog reversePrefixProgram, Prog forwardProgram)
     {
         this.literalSearch = literalSearch;
         this.foldedBytes = foldedBytes;
@@ -242,30 +204,7 @@ final class InnerLiteralSearch
         this.foldedSecondOffset = foldedScan.secondOffset();
         this.foldedVerifiedBytes = foldedScan.verifiedBytes();
         this.foldedDense = foldedScan.dense();
-        this.literalSet = literalSet;
-        this.literalSetFilter = literalSetFilter;
-        this.classPairBytes = classPairBytes;
-        if (foldedBytes != null) {
-            this.minimumLiteralLength = foldedBytes.length;
-            this.maximumLiteralLength = foldedBytes.length;
-        }
-        else if (literalSearch != null) {
-            this.minimumLiteralLength = literalSearch.literalLength();
-            this.maximumLiteralLength = literalSearch.literalLength();
-        }
-        else {
-            if (classPairBytes == null) {
-                requireNonNull(literalSetFilter, "literalSetFilter and classPairBytes are null");
-            }
-            int minimum = Integer.MAX_VALUE;
-            int maximum = 0;
-            for (byte[] literal : literalSet) {
-                minimum = Math.min(minimum, literal.length);
-                maximum = Math.max(maximum, literal.length);
-            }
-            this.minimumLiteralLength = minimum;
-            this.maximumLiteralLength = maximum;
-        }
+        this.minimumLiteralLength = foldedBytes != null ? foldedBytes.length : requireNonNull(literalSearch, "literalSearch is null").literalLength();
         this.prefixGate0 = prefixGate.word0();
         this.prefixGate1 = prefixGate.word1();
         this.prefixGate2 = prefixGate.word2();
@@ -279,7 +218,6 @@ final class InnerLiteralSearch
         this.countsToLiteralEnd = countEnd != null;
         this.countEndNeedsAsciiBefore = countEnd != null && countEnd.asciiBefore();
         this.countEndNeedsNonWordAfter = countEnd != null && countEnd.nonWordAfter();
-        this.behindClassRun = behindClassRun;
         // A gated one-byte search keeps the check below its minimum that every inner literal
         // search ran before the minimums: of lh3lh3's date lines under 64 bytes that hold `/`,
         // 41,614 of 43,452 fail the digit gates and then skip the forward DFA.
@@ -346,15 +284,12 @@ final class InnerLiteralSearch
     private static InnerLiteralSearch build(Regexp regexp, InnerLiteral innerLiteral, Prog forwardProgram, long prefixMemory, long retainedMemory, Compiler.Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         byte[] literal = innerLiteral.literal();
-        StartLiteralFilter literalSetFilter = innerLiteral.literalSetFilter();
         LiteralSearchKernel literalSearch = literal == null ? null : new LiteralSearchKernel(Slices.wrappedBuffer(literal));
         FoldedLiteral foldedLiteral = innerLiteral.foldedLiteral();
-        byte[][] literalSet = literal == null && foldedLiteral == null ? innerLiteral.literals() : null;
         byte[] foldedBytes = foldedLiteral == null ? null : foldedLiteral.bytes();
         byte[] foldedMasks = foldedLiteral == null ? null : foldedLiteral.masks();
         FoldedScan foldedScan = foldedLiteral == null ? FoldedScan.NONE : FoldedScan.of(foldedLiteral, byteFrequencies);
-        byte[] classPairBytes = innerLiteral.classPairBytes();
-        long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes));
+        long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, foldedBytes, foldedMasks));
         if (memory <= 0) {
             // The compiler reads a budget of zero or less as no limit.
             return null;
@@ -379,11 +314,11 @@ final class InnerLiteralSearch
         long[] positionByteSets = reversePrefixProgram.boundaryPositionByteSets(MAXIMUM_PREFIX_GATES);
         ByteGate prefixGate = positionByteSets == null ? ByteGate.NONE : ByteGate.of(positionByteSets).unlessHolding(literalEdgeBytes(innerLiteral.literals(), foldedLiteral, false));
         long[] deeperPrefixGates = positionByteSets == null || positionByteSets.length == 4 ? null : Arrays.copyOfRange(positionByteSets, 4, positionByteSets.length);
-        if (deeperPrefixGates != null && retainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, reversePrefixProgram, deeperPrefixGates) > retainedMemory) {
+        if (deeperPrefixGates != null && retainedSize(literalSearch, foldedBytes, foldedMasks, reversePrefixProgram, deeperPrefixGates) > retainedMemory) {
             deeperPrefixGates = null;
         }
         boolean addedByClassRunProof = innerLiteral.behindClassRun() && findsNoSearchWithoutClassRunProof(regexp, forwardProgram, prefixMemory, retainedMemory, dialect, caseFolding, byteFrequencies);
-        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, foldedScan, literalSet, literalSetFilter, classPairBytes, innerLiteral.behindClassRun(), addedByClassRunProof, prefixGate, deeperPrefixGates, innerLiteral.suffixGate(), innerLiteral.countEnd(), reversePrefixProgram, forwardProgram);
+        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, foldedScan, addedByClassRunProof, prefixGate, deeperPrefixGates, innerLiteral.suffixGate(), innerLiteral.countEnd(), reversePrefixProgram, forwardProgram);
     }
 
     // Whether the analysis would find no search without the class-run proof, which alone admitted
@@ -397,7 +332,7 @@ final class InnerLiteralSearch
     }
 
     /// Returns the shortest literal length [#analyze] would search the normalized `regexp` for:
-    /// the length of its literal, or of the shortest member of its literal set, as
+    /// the length of its literal, as
     /// [#minimumLiteralLength] counts it, or zero when it has none, without a compiled program. It
     /// also returns zero when the expression has a prefix or a folded run the compiler could scan
     /// for, a conservative exclusion: the compiler leaves out a leading run where vectors hold 64
@@ -418,12 +353,11 @@ final class InnerLiteralSearch
         if (foldedLiteral != null) {
             return foldedLiteral.bytes().length;
         }
-        return Arrays.stream(innerLiteral.literals()).mapToInt(literal -> literal.length).min().orElseThrow();
+        return innerLiteral.literals()[0].length;
     }
 
     // The inner literal of the normalized `regexp` and the prefix before it: a single literal, the
-    // members of a literal set with their filter, or the members of a class pair with its sides'
-    // bytes, the byte gate after it, and what a count needs to end a match at the literal's end,
+    // byte gate after it, and what a count needs to end a match at the literal's end,
     // from the top-level concatenation's element `firstElement` on. With `classRunProof` false,
     // the class-run proof admits no prefix. With `allowsFoldedKernelOnlyLiterals` false, a
     // case-insensitive literal without a searched head is judged by its own element, as without
@@ -439,9 +373,8 @@ final class InnerLiteralSearch
         List<Regexp> children = new ArrayList<>();
         addConcatenationElements(regexp, children, 0);
         // As in the crate, the first element is skipped, since a literal there would have given a
-        // prefix acceleration, and the first literal or literal set found decides. A set the
-        // filter cannot search is skipped, as the crate skips a prefilter that is not fast, and so
-        // is a class pair, or a case-insensitive literal without a searched head, that no proof
+        // prefix acceleration, and the first literal found decides. An element without a literal is
+        // skipped, and so is a case-insensitive literal without a searched head that no proof
         // admits.
         for (int index = firstElement; index < children.size(); index++) {
             // Case-insensitive ASCII elements extend the literal. Its exact head, the bytes before
@@ -460,8 +393,6 @@ final class InnerLiteralSearch
             }
             byte[] literal = foldedLiteral != null ? searchedHead : asciiLiteral(children.get(index));
             byte[][] literals;
-            StartLiteralFilter literalSetFilter = null;
-            ClassPair classPair = null;
             boolean lettersEitherCase = false;
             if (foldedLiteral != null) {
                 lettersEitherCase = foldedLiteral.head().length == 0;
@@ -474,51 +405,35 @@ final class InnerLiteralSearch
                 literals = new byte[][] {literal};
             }
             else {
-                literals = asciiLiteralSet(children.get(index));
-                literalSetFilter = literals == null ? null : buildLiteralSetFilter(literals);
-                if (literalSetFilter == null) {
-                    classPair = asciiClassPair(children, index);
-                    if (classPair == null) {
-                        continue;
-                    }
-                    literals = classPair.members();
-                }
+                continue;
             }
             Regexp prefix = index == 1 ? children.get(0) : Regexp.concat(regexp.parseFlags(), children.subList(0, index));
-            boolean provenOtherwise = hasNoEarlierMatch(prefix, literals, lettersEitherCase, caseFolding) || (classPair != null && hasNoEarlierMatchAcrossLastByte(prefix, literals));
+            boolean provenOtherwise = hasNoEarlierMatch(prefix, literals, lettersEitherCase, caseFolding);
             boolean behindClassRun = !provenOtherwise && classRunProof && isClassRunPrefix(prefix);
             if (!provenOtherwise && !behindClassRun) {
-                // As a class pair does, a case-insensitive literal without a searched head gives
-                // way to the elements after it.
-                if (classPair != null || InnerLiteral.searchedOnlyByFoldedKernel(foldedLiteral, literal)) {
+                // A case-insensitive literal without a searched head gives way to the elements
+                // after it.
+                if (InnerLiteral.searchedOnlyByFoldedKernel(foldedLiteral, literal)) {
                     continue;
                 }
                 return null;
             }
-            // The byte after the literal, and the match end, are known only when every member has
-            // one length.
-            ByteGate suffixGate = ByteGate.NONE;
-            CountEnd countEnd = null;
-            if (hasOneLength(literals)) {
-                int literalElements = foldedLiteral != null ? foldedLiteral.elements() : classPair != null ? 2 : 1;
-                ByteGate lastBytes = literalEdgeBytes(literals, foldedLiteral, true);
-                suffixGate = suffixGate(children, index + literalElements, lastBytes).unlessHolding(lastBytes);
-                countEnd = countEnd(children, index + literalElements, lastBytes, prefix, literals, foldedLiteral, classPair != null, behindClassRun, caseFolding);
-            }
-            return new InnerLiteral(index, prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), behindClassRun, suffixGate, countEnd);
+            int literalElements = foldedLiteral != null ? foldedLiteral.elements() : 1;
+            ByteGate lastBytes = literalEdgeBytes(literals, foldedLiteral, true);
+            ByteGate suffixGate = suffixGate(children, index + literalElements, lastBytes).unlessHolding(lastBytes);
+            CountEnd countEnd = countEnd(children, index + literalElements, lastBytes, prefix, literals, foldedLiteral, behindClassRun, caseFolding);
+            return new InnerLiteral(index, prefix, literal, literals, foldedLiteral, behindClassRun, suffixGate, countEnd);
         }
         return null;
     }
 
-    // `literal` is the single literal, or null for a set, whose filter is `literalSetFilter`, or
-    // for a class pair, whose sides' bytes are `classPairBytes`; `literals` holds the single
-    // literal or the members. A case-insensitive literal's `literal` is its searched exact head,
+    // `literal` is the single literal and `literals` holds it. A case-insensitive literal's `literal` is its searched exact head,
     // or null without one, `literals` holds what the proofs checked, and `foldedLiteral` holds the
     // whole literal, or is null. `suffixGate` holds the bytes the byte after a hit may be, or is
     // `ByteGate.NONE` for no gate. `behindClassRun` says that only the class-run proof admits the
     // prefix. `countEnd` says what a count needs to end a match at the literal's end, or is null
     // when it may not. `element` is the literal's first element in the top-level concatenation.
-    private record InnerLiteral(int element, Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, boolean behindClassRun, ByteGate suffixGate, CountEnd countEnd)
+    private record InnerLiteral(int element, Regexp prefix, byte[] literal, byte[][] literals, FoldedLiteral foldedLiteral, boolean behindClassRun, ByteGate suffixGate, CountEnd countEnd)
     {
         // Whether this is a case-insensitive literal without a searched head, which only the
         // folded pair kernel searches.
@@ -538,7 +453,7 @@ final class InnerLiteralSearch
         // InnerLiteralSearch.minimumSearchBytes.
         int minimumSearchBytes()
         {
-            return InnerLiteralSearch.minimumSearchBytes(literalSetFilter != null, classPairBytes != null, foldedLiteral != null, literal == null ? 0 : literal.length, behindClassRun);
+            return InnerLiteralSearch.minimumSearchBytes(foldedLiteral != null, literal == null ? 0 : literal.length);
         }
     }
 
@@ -571,18 +486,14 @@ final class InnerLiteralSearch
         }
     }
 
-    /// The literal, or the members of the literal set in alternation order, or for a class pair in
-    /// class order. A case-insensitive
-    /// literal has its case-insensitive letters lowered and its exact bytes unchanged.
+    /// The literal, as the one member. A case-insensitive literal has its case-insensitive letters
+    /// lowered and its exact bytes unchanged.
     byte[][] literals()
     {
         if (foldedBytes != null) {
             return new byte[][] {foldedBytes.clone()};
         }
-        if (literalSearch != null) {
-            return new byte[][] {literalSearch.literal()};
-        }
-        return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
+        return new byte[][] {literalSearch.literal()};
     }
 
     /// The masks of a case-insensitive literal, `0x20` at each case-insensitive letter of its one
@@ -590,12 +501,6 @@ final class InnerLiteralSearch
     byte[] foldedMasks()
     {
         return foldedMasks == null ? null : foldedMasks.clone();
-    }
-
-    /// The filter a literal set's search scans for its members with, or null for any other search.
-    StartLiteralFilter literalSetFilterForDiagnostics()
-    {
-        return literalSetFilter;
     }
 
     /// Whether only the class-run proof gives the pattern an inner literal search: without that
@@ -681,7 +586,7 @@ final class InnerLiteralSearch
         return bytes.toString();
     }
 
-    /// The literal's length, or the length of the shortest member of the literal set. A
+    /// The literal's length. A
     /// case-insensitive literal counts its whole length, since each hit is checked for the whole
     /// literal before any engine runs.
     int minimumLiteralLength()
@@ -691,40 +596,28 @@ final class InnerLiteralSearch
 
     /// The fewest bytes of a find's search window that its callers run the search on where the
     /// alternative is the ordinary engine:
-    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a class pair or a one-byte literal,
-    /// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES] for a longer or case-insensitive single literal,
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a one-byte literal,
+    /// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES] for a longer or case-insensitive single literal, and
     /// [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] for a case-insensitive literal without a searched
-    /// head, which only the folded pair kernel searches, and
-    /// [#MINIMUM_LITERAL_SET_SEARCH_BYTES] for a literal set, or
-    /// [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] for one behind a class run that only the
-    /// class-run proof admits. A pattern with a short-search fixed-width matcher, whose shorter
-    /// counts and matcher finds run that matcher instead, runs the search from
-    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], and a search that
+    /// head, which only the folded pair kernel searches. A pattern with a short-search fixed-width
+    /// matcher, whose shorter counts and matcher finds run that matcher instead, runs the search
+    /// from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], and a search that
     /// [checks short windows][#checksShortWindows] runs on them too; see
     /// [CompiledPattern#searchesInnerLiteralWindow].
     int minimumSearchBytes()
     {
-        return minimumSearchBytes(literalSetFilter != null, classPairBytes != null, foldedBytes != null, literalSearch == null ? 0 : literalSearch.literalLength(), behindClassRun);
+        return minimumSearchBytes(foldedBytes != null, literalSearch == null ? 0 : literalSearch.literalLength());
     }
 
     // The fewest bytes of a find window a search runs on, by its kind, which an inner literal
-    // knows before its search is built: a literal set, a class pair, a case-insensitive literal,
-    // or a single literal, of which `literalLength` is the length of the literal or searched head
-    // a kernel scans for, or zero for none.
-    private static int minimumSearchBytes(boolean literalSet, boolean classPair, boolean folded, int literalLength, boolean behindClassRun)
+    // knows before its search is built: a case-insensitive literal, or a single literal, of which
+    // `literalLength` is the length of the literal or searched head a kernel scans for, or zero for
+    // none.
+    private static int minimumSearchBytes(boolean folded, int literalLength)
     {
-        // A short window costs a literal set's scalar filter more than the DFA it would replace,
-        // and behind a class run, which only the class-run proof admits, a set's search lost to
-        // the DFA up to the vector scan's cutoff. A class pair's scan and a one-byte literal's
-        // beat the DFA from 64 bytes. A case-insensitive literal is a single one, searched below
-        // the vector cutoff by its searched head, and without one left to the ordinary engine
-        // there.
-        if (literalSet) {
-            return behindClassRun ? Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES : MINIMUM_LITERAL_SET_SEARCH_BYTES;
-        }
-        if (classPair) {
-            return CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
-        }
+        // A one-byte literal's scan beats the DFA from 64 bytes. A case-insensitive literal is a
+        // single one, searched below the vector cutoff by its searched head, and without one left
+        // to the ordinary engine there.
         if (folded) {
             return literalLength > 0 ? MINIMUM_SINGLE_LITERAL_SEARCH_BYTES : Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
         }
@@ -768,17 +661,12 @@ final class InnerLiteralSearch
     }
 
     /// The fewest bytes of a whole-text count's text that it runs the search on where the
-    /// alternative is the ordinary engine: [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a literal
-    /// set not behind a class run, whose one search continues across the count's matches, and
-    /// [#minimumSearchBytes] for every other kind. A pattern with a short-search fixed-width
-    /// matcher counts through the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES].
+    /// alternative is the ordinary engine: [#minimumSearchBytes]. A pattern with a short-search
+    /// fixed-width matcher counts through the search from
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES].
     int minimumCountBytes()
     {
-        // One count search continues across many matches, so a set's scan pays off sooner there
-        // than in a find, which starts a fresh search: counts of `[a-z](?:ing|ment)` on 64- and
-        // 128-byte texts took 1.09 to 1.22 times the search's time on the DFA on r9g, and 0.90 to
-        // 0.95 times on r8i.
-        return literalSetFilter != null && !behindClassRun ? CompiledPattern.MINIMUM_LONG_SEARCH_BYTES : minimumSearchBytes();
+        return minimumSearchBytes();
     }
 
     /// The reversed program of the prefix before the literal, whose longest-match DFA finds a
@@ -796,7 +684,7 @@ final class InnerLiteralSearch
 
     long estimatedRetainedSize()
     {
-        return retainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, reversePrefixProgram, deeperPrefixGates);
+        return retainedSize(literalSearch, foldedBytes, foldedMasks, reversePrefixProgram, deeperPrefixGates);
     }
 
     /// What this search retains now: [#estimatedRetainedSize()] charges its reverse-prefix program
@@ -804,46 +692,37 @@ final class InnerLiteralSearch
     /// and the DFAs it has built. The forward program belongs to the pattern.
     long currentRetainedSize()
     {
-        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes) + reversePrefixProgram.estimatedRetainedSize() + SizeOf.sizeOf(deeperPrefixGates);
+        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks) + reversePrefixProgram.estimatedRetainedSize() + SizeOf.sizeOf(deeperPrefixGates);
     }
 
     // What a search of these parts retains, for the budget check as it is built and for its
     // report afterward.
-    private static long retainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, Prog reversePrefixProgram, long[] deeperPrefixGates)
+    private static long retainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, Prog reversePrefixProgram, long[] deeperPrefixGates)
     {
-        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory() + SizeOf.sizeOf(deeperPrefixGates);
+        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory() + SizeOf.sizeOf(deeperPrefixGates);
     }
 
     // The folded arrays are null unless the literal is case-insensitive, which has no kernel
-    // without a searched head, and a set has either its filter or its class pair bytes.
-    private static long literalRetainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes)
+    // without a searched head.
+    private static long literalRetainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks)
     {
         if (foldedBytes != null) {
             return (literalSearch == null ? 0 : literalSearch.estimatedRetainedSize()) + SizeOf.sizeOf(foldedBytes) + SizeOf.sizeOf(foldedMasks);
         }
-        if (literalSearch != null) {
-            return literalSearch.estimatedRetainedSize();
-        }
-        long filterSize = classPairBytes != null ? SizeOf.sizeOf(classPairBytes) : literalSetFilter.estimatedRetainedSize();
-        long size = filterSize + SizeOf.sizeOfObjectArray(literalSet.length);
-        for (byte[] literal : literalSet) {
-            size += SizeOf.sizeOf(literal);
-        }
-        return size;
+        return literalSearch.estimatedRetainedSize();
     }
 
     /// Whether a search of `[start, end)` of `text` falls back because its first candidate lies
     /// near the start. It reads at most `MINIMUM_SKIPPED_BYTES - 1` bytes plus the longest
     /// literal's length, and one byte past that for the gate after a hit, and the gates before a
-    /// hit read only bytes of the window. Within that read a shorter member of a set can start
-    /// past the near bytes, where the search does not fall back. As in the search, a hit that
+    /// hit read only bytes of the window. As in the search, a hit that
     /// fails the byte gates is no candidate, so the check looks past it. It does not count such
     /// hits, so where a [dense run][#MINIMUM_DENSE_REJECTED_HITS] of them makes the search fall
     /// back, the check can still report no near candidate, and a count hands back to the search
     /// at the next match end.
     boolean fallsBackNearStart(Slice text, int start, int end)
     {
-        int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + maximumLiteralLength);
+        int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + minimumLiteralLength);
         int literalStart = findLiteral(text, start, length);
         while (hasByteGates && literalStart >= 0 && !passesByteGates(text, start, literalStart, end)) {
             int next = literalStart + 1;
@@ -960,7 +839,7 @@ final class InnerLiteralSearch
                 minimumLiteralStart = Dfa.anchoredStopPosition(candidate);
             }
             scanStart = literalStart + 1;
-            minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
+            minimumMatchStart = literalStart + minimumLiteralLength;
         }
         return Dfa.SEARCH_NO_MATCH;
     }
@@ -1081,7 +960,7 @@ final class InnerLiteralSearch
             if (candidate != Dfa.SEARCH_NO_MATCH) {
                 minimumLiteralStart = Dfa.anchoredStopPosition(candidate);
             }
-            minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
+            minimumMatchStart = literalStart + minimumLiteralLength;
         }
         return Dfa.SEARCH_NO_MATCH;
     }
@@ -1144,9 +1023,6 @@ final class InnerLiteralSearch
     {
         if (foldedBytes != null) {
             return findFoldedLiteral(text, offset, length);
-        }
-        if (literalSearch == null) {
-            return classPairBytes != null ? findClassPairMember(text, offset, length) : findLiteralSetMember(text, offset, length);
         }
         if (usesVectorSearch(length)) {
             return findLiteralVector(text, offset, length);
@@ -1250,151 +1126,10 @@ final class InnerLiteralSearch
         return found < 0 ? -1 : found - dataOffset;
     }
 
-    // The filter accepts a superset of the positions where a member starts, so each hit is
-    // checked for a member, and a false hit continues the scan past it. As for the DFA's start
-    // literal filter, a short range skips the vector setup.
-    private int findLiteralSetMember(Slice text, int offset, int length)
-    {
-        byte[] data = text.byteArray();
-        int dataOffset = text.byteArrayOffset();
-        int position = dataOffset + offset;
-        int end = position + length;
-        while (position < end) {
-            int remaining = end - position;
-            int hit = VectorSupport.isAvailable() && remaining >= Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES
-                    ? VectorByteSetScanner.findLiteralSet(data, position, remaining, literalSetFilter)
-                    : literalSetFilter.find(data, position, remaining);
-            if (hit < 0) {
-                return -1;
-            }
-            if (setMemberLength(data, hit, end) > 0) {
-                return hit - dataOffset;
-            }
-            position = hit + 1;
-        }
-        return -1;
-    }
-
-    // A class pair set is searched by its two sides' bytes, without a filter, and every hit is a
-    // member. As for the filter, a short range skips the vector setup.
-    private int findClassPairMember(Slice text, int offset, int length)
-    {
-        byte[] data = text.byteArray();
-        int dataOffset = text.byteArrayOffset();
-        int position = dataOffset + offset;
-        int hit;
-        if (VectorSupport.isAvailable() && length >= Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
-            hit = VectorSupport.SVE_128
-                    ? VectorByteSetScanner.findClassPairSve(data, position, length, classPairBytes)
-                    : VectorByteSetScanner.findClassPair(data, position, length, classPairBytes);
-        }
-        else {
-            hit = findClassPair(data, position, length, classPairBytes);
-        }
-        return hit < 0 ? -1 : hit - dataOffset;
-    }
-
-    // The first position in `[offset, offset + length - 1)` whose byte is in slots 0 to 2 of
-    // `bytes` and whose next byte is in slots 3 to 5, or -1.
-    static int findClassPair(byte[] data, int offset, int length, byte[] bytes)
-    {
-        byte first0 = bytes[0];
-        byte first1 = bytes[1];
-        byte first2 = bytes[2];
-        byte second0 = bytes[3];
-        byte second1 = bytes[4];
-        byte second2 = bytes[5];
-        int end = offset + length - 1;
-        for (int position = offset; position < end; position++) {
-            byte first = data[position];
-            if (first == first0 || first == first1 || first == first2) {
-                byte second = data[position + 1];
-                if (second == second0 || second == second1 || second == second2) {
-                    return position;
-                }
-            }
-        }
-        return -1;
-    }
-
-    // The length of the literal found at `literalStart` in `[literalStart, end)`. For a set this
-    // is the first member in alternation order, as the crate's Teddy reports the leftmost-first
-    // literal, and for a set whose members share one length, such as a class pair, that length.
-    private int matchedLength(Slice text, int literalStart, int end)
-    {
-        if (literalSet == null || minimumLiteralLength == maximumLiteralLength) {
-            return minimumLiteralLength;
-        }
-        int dataOffset = text.byteArrayOffset();
-        return setMemberLength(text.byteArray(), dataOffset + literalStart, dataOffset + end);
-    }
-
-    // The length of the first member, in alternation order, at `position` and ending by `end`, or
-    // zero when none is.
-    private int setMemberLength(byte[] data, int position, int end)
-    {
-        for (byte[] literal : literalSet) {
-            if (literal.length <= end - position && Arrays.equals(data, position, position + literal.length, literal, 0, literal.length)) {
-                return literal.length;
-            }
-        }
-        return 0;
-    }
-
     // A single letter, digit, or whitespace occurs too often for its scan to beat the DFA.
     private static boolean isCommonByte(byte value)
     {
         return Character.isLetterOrDigit(value) || Character.isWhitespace(value);
-    }
-
-    // An alternation of two to eight literals, each ASCII, not folded, and three to
-    // MAXIMUM_LITERAL_LENGTH bytes long, as its members in alternation order.
-    private static byte[][] asciiLiteralSet(Regexp regexp)
-    {
-        while (regexp.op() == RegexpOp.CAPTURE) {
-            regexp = regexp.child(0);
-        }
-        if (regexp.op() != RegexpOp.ALTERNATE || regexp.childCount() > MAXIMUM_SET_MEMBERS) {
-            return null;
-        }
-        byte[][] literals = new byte[regexp.childCount()][];
-        for (int index = 0; index < literals.length; index++) {
-            byte[] literal = asciiLiteral(regexp.child(index));
-            if (literal == null || literal.length < MINIMUM_SET_MEMBER_LENGTH || literal.length > MAXIMUM_LITERAL_LENGTH) {
-                return null;
-            }
-            literals[index] = literal;
-        }
-        return literals;
-    }
-
-    // The elements at `index` and `index + 1`, when each consumes exactly one ASCII byte from at
-    // most three, at least one of them matches more than one byte, and English text rarely holds
-    // the pair, or null. Two literals are already a literal string.
-    private static ClassPair asciiClassPair(List<Regexp> children, int index)
-    {
-        if (index + 1 >= children.size()) {
-            return null;
-        }
-        byte[] first = asciiByteSet(children.get(index), MAXIMUM_CLASS_PAIR_SIDE_BYTES);
-        byte[] second = asciiByteSet(children.get(index + 1), MAXIMUM_CLASS_PAIR_SIDE_BYTES);
-        if (first == null || second == null || first.length * second.length < 2) {
-            return null;
-        }
-        ByteFrequencies frequencies = ByteFrequencies.englishText();
-        if (probability(frequencies, first) * probability(frequencies, second) >= MAXIMUM_CLASS_PAIR_PROBABILITY) {
-            return null;
-        }
-        return new ClassPair(first, second);
-    }
-
-    private static double probability(ByteFrequencies frequencies, byte[] bytes)
-    {
-        double probability = 0;
-        for (byte value : bytes) {
-            probability += frequencies.probability(value);
-        }
-        return probability;
     }
 
     // The bytes, in class order, of an element that consumes exactly one ASCII byte: an ASCII
@@ -1428,52 +1163,6 @@ final class InnerLiteralSearch
             }
         }
         return count == 0 ? null : Arrays.copyOf(bytes, count);
-    }
-
-    // The bytes each side of a class pair matches, in class order.
-    private record ClassPair(byte[] first, byte[] second)
-    {
-        // Every first byte followed by every second byte, the first byte major.
-        byte[][] members()
-        {
-            byte[][] members = new byte[first.length * second.length][];
-            for (int firstIndex = 0; firstIndex < first.length; firstIndex++) {
-                for (int secondIndex = 0; secondIndex < second.length; secondIndex++) {
-                    members[firstIndex * second.length + secondIndex] = new byte[] {first[firstIndex], second[secondIndex]};
-                }
-            }
-            return members;
-        }
-
-        // Each side's bytes in three slots, a side with fewer repeating its last byte.
-        byte[] scanBytes()
-        {
-            byte[] bytes = new byte[2 * MAXIMUM_CLASS_PAIR_SIDE_BYTES];
-            for (int slot = 0; slot < MAXIMUM_CLASS_PAIR_SIDE_BYTES; slot++) {
-                bytes[slot] = first[Math.min(slot, first.length - 1)];
-                bytes[MAXIMUM_CLASS_PAIR_SIDE_BYTES + slot] = second[Math.min(slot, second.length - 1)];
-            }
-            return bytes;
-        }
-    }
-
-    // Each member is one path of byte sets, in the format Prog#buildStartPositionByteSets returns:
-    // the member's byte at each position it covers, and every byte past its end.
-    private static StartLiteralFilter buildLiteralSetFilter(byte[][] literals)
-    {
-        long[][] paths = new long[literals.length][StartLiteralFilter.PATH_POSITIONS * 4];
-        for (int index = 0; index < literals.length; index++) {
-            byte[] literal = literals[index];
-            long[] path = paths[index];
-            int positions = Math.min(literal.length, StartLiteralFilter.PATH_POSITIONS);
-            for (int position = 0; position < positions; position++) {
-                int value = literal[position] & 0xFF;
-                path[position * 4 + (value >>> 6)] |= 1L << value;
-            }
-            Arrays.fill(path, positions * 4, path.length, -1L);
-        }
-        // Groups of one bit, as this search's filter was measured with.
-        return StartLiteralFilter.build(paths, ByteFrequencies.englishText(), 1);
     }
 
     // The literal of the run of elements starting at `index` that are ASCII literals, folded or
@@ -1599,16 +1288,6 @@ final class InnerLiteralSearch
     {
         int lowerCase = value | 0x20;
         return lowerCase >= 'a' && lowerCase <= 'z' ? (byte) (value ^ 0x20) : value;
-    }
-
-    private static boolean hasOneLength(byte[][] literals)
-    {
-        for (byte[] literal : literals) {
-            if (literal.length != literals[0].length) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // The ASCII bytes allowed after the literal, whose members' last bytes are `lastBytes`: those
@@ -1809,7 +1488,7 @@ final class InnerLiteralSearch
     // all ASCII word bytes, which holds where the byte after the hit is an ASCII byte that is not
     // a word byte. A match that starts at or before a hit from which the reverse search finds a
     // start at or after the search position then has its literal at that hit under
-    // [#hasLiteralOrFixedLengthProof], the class-pair proof, the separator at the prefix's end
+    // [#hasLiteralOrFixedLengthProof], the separator at the prefix's end
     // where the byte before the hit is ASCII, and the class-run proof for a single literal before
     // a word boundary, when every ASCII byte of the run's class is a word byte. The separator at
     // the prefix's start, and the class-run proof without the boundary, bound only the match
@@ -1818,7 +1497,7 @@ final class InnerLiteralSearch
     // literal's end would end inside the match. Each proof compares the prefix with the literal's
     // exact bytes, so a case-insensitive literal, whose other cases they do not see, takes the
     // full confirmation.
-    private static CountEnd countEnd(List<Regexp> children, int suffixIndex, ByteGate lastBytes, Regexp prefix, byte[][] literals, FoldedLiteral foldedLiteral, boolean classPair, boolean behindClassRun, CaseFolding caseFolding)
+    private static CountEnd countEnd(List<Regexp> children, int suffixIndex, ByteGate lastBytes, Regexp prefix, byte[][] literals, FoldedLiteral foldedLiteral, boolean behindClassRun, CaseFolding caseFolding)
     {
         if (foldedLiteral != null) {
             return null;
@@ -1839,7 +1518,7 @@ final class InnerLiteralSearch
         if (behindClassRun) {
             return nonWordAfter && literals.length == 1 && hasAsciiWordRunClass(prefix) ? new CountEnd(false, true) : null;
         }
-        if (hasLiteralOrFixedLengthProof(prefix, literals, false, caseFolding) || (classPair && hasNoEarlierMatchAcrossLastByte(prefix, literals))) {
+        if (hasLiteralOrFixedLengthProof(prefix, literals, false, caseFolding)) {
             return new CountEnd(false, nonWordAfter);
         }
         return hasDisjointClassSeparator(prefix, literals, false, false) ? new CountEnd(true, nonWordAfter) : null;
@@ -1990,53 +1669,6 @@ final class InnerLiteralSearch
             case CHAR_CLASS -> !hasNonAscii(leaf.charClass());
             default -> false;
         };
-    }
-
-    // Not one of the crate's proofs. Used only for a class pair set, but sound for any set whose
-    // members share one length. Let C be the members' last bytes. No earlier match spans a later
-    // candidate when the first prefix element that does not match only the empty string consumes
-    // exactly one ASCII byte, every later prefix element is disjoint from C, and no member holds a
-    // byte of C before its last. Suppose the search confirms the candidate whose member of length
-    // len lies at x, with the start s <= x its reverse search finds, and an earlier match starts at
-    // s' < s with its own member at x' > x. That match consumes the candidate's last byte, a byte
-    // of C at q = x + len - 1, since s' < s <= x <= q < x' + len - 1. Its suffix starts past its
-    // member, and its member could hold q only before the member's last position, where no member
-    // holds a byte of C, so its prefix holds q. But the prefix's first element consumes only
-    // s' < q, the elements before it consume nothing, and every element after it is disjoint from
-    // C. An earlier match whose member lies at x is ruled out by the reverse search, which finds
-    // the earliest start, and one whose member lies before x by that member's own candidate, whose
-    // reverse search and confirmation would have found it first. In `["'][^"']{0,30}[?!.]["']`, C
-    // is the quotes, `["']` matches one byte, `[^"']{0,30}` excludes the quotes, and no member
-    // starts with one.
-    private static boolean hasNoEarlierMatchAcrossLastByte(Regexp prefix, byte[][] literals)
-    {
-        int length = literals[0].length;
-        boolean[] lastBytes = new boolean[0x80];
-        for (byte[] literal : literals) {
-            if (literal.length != length) {
-                return false;
-            }
-            lastBytes[literal[length - 1]] = true;
-        }
-        for (byte[] literal : literals) {
-            for (int position = 0; position < length - 1; position++) {
-                if (lastBytes[literal[position]]) {
-                    return false;
-                }
-            }
-        }
-        List<Regexp> elements = elementsAfterLeadingEmptyOnly(prefix);
-        if (elements.isEmpty() || asciiByteSet(elements.get(0), 0x80) == null) {
-            return false;
-        }
-        for (int index = 1; index < elements.size(); index++) {
-            for (int value = 0; value < lastBytes.length; value++) {
-                if (lastBytes[value] && canConsumeByte(elements.get(index), (byte) value, 0)) {
-                    return false;
-                }
-            }
-        }
-        return true;
     }
 
     // An occurrence that crosses the end of the prefix must overlap the match's own occurrence, and
