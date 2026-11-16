@@ -162,8 +162,8 @@ answer, or reject the input before any engine runs.
   `replaceAll` of such a pattern that has an exact required literal and
   whose matches all end with at least two exact ASCII bytes and no assertion
   after them; not for a program with assertions the DFA cannot run, such as
-  Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
-  lowered boolean program. Beside a route: a pattern kept from the check only
+  Java's final-terminator `$` and `\Z` and Trino's final line end. Beside a
+  route: a pattern kept from the check only
   by a route that starts where a match starts (a prefix scan, a transparent
   start literal, an inner literal search for a literal that begins every
   match, or a start literal filter) or by a scan plan checks long windows for
@@ -1290,14 +1290,11 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
 
 - **Origin:** Adapted from regex-automata's heuristic Unicode word
   boundaries, which quit on every non-ASCII byte ([hybrid/dfa.rs][ra-hybrid]);
-  Ported from RE2's word-boundary state flags ([dfa.cc][re2-dfa]); First
-  described by Hyperscan for lowering a final-line `$`
-  ([ComponentBoundary.cpp][hs-boundary], [buildstate.cpp][hs-buildstate]).
+  Ported from RE2's word-boundary state flags ([dfa.cc][re2-dfa]).
   Regulator: quitting only from states that need an assertion, Java and Trino
-  word characters on the DFA, the four-quit streak, settling the one literal
-  occurrence whose check quit and resuming the cursor after it, and the
-  separate lowered program with its group-zero conditions ([#64], [#76],
-  [#242], [design][d-trino-assertions]).
+  word characters on the DFA, the four-quit streak, and settling the one
+  literal occurrence whose check quit and resuming the cursor after it ([#64],
+  [#76], [#242], [design][d-trino-assertions]).
 - **Where:** `Dfa.DfaInstance.computeTransition`, `Dfa.DfaInstance.quits`,
   `Dfa.dfaEmptyFlags`, `Dfa.DfaInstance.startFlags`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
@@ -2979,8 +2976,6 @@ change is described.
 [hs-accel]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel.c#L138-L141
 [hs-accel-dfa]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel_dfa_build_strat.cpp#L517-L534
 [hs-accelcompile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accelcompile.cpp
-[hs-boundary]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/ComponentBoundary.cpp#L134-L140
-[hs-buildstate]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/buildstate.cpp#L234-L282
 [hs-castle-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/castle.c#L523-L612
 [hs-check-prefix]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L2496-L2505
 [hs-check-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L991-L1021

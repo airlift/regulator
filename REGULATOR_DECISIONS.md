@@ -2377,7 +2377,7 @@ ordinary engine: a match from the call's start cannot cross the first line feed,
 past which the matcher would search on for the literal. An unanchored call makes
 no long-window check, which for such a pattern would never shorten the search:
 its find plan is the contains plan, only a pattern that finds on the general
-engine or a lowered program checks long windows for a required literal, and the
+engine checks long windows for a required literal, and the
 matcher scans for the literal itself and stops at the region's end. The matcher
 calls the contains search itself, and `matchInto` calls the matcher. C2 limits
 inline depth below the method it compiles, and forwarding frames spend that
@@ -2436,8 +2436,8 @@ malformed input unspecified, keeps its engine's answer as its scan plans do. The
 plan does not check a gap's bytes. A leading or trailing gap can match empty, so
 it does not decide whether a match exists. The matcher's memory comes from the
 forward DFA budget, as Trino's ordered-literal subtype's does, so a pattern with
-a lowered boolean or tagged alternation program, or without room for the
-matcher, keeps the engine. Release 2.0 had no such plan outside Trino, and the
+a tagged alternation program, or without room for the matcher, keeps the
+engine. Release 2.0 had no such plan outside Trino, and the
 matcher [yields to the forward DFAs](#memory-budgets-and-dfa-caching). Trino's
 contains keeps its own ordered-literal subtype, which checks each `(?s:.)` gap
 against the characters the engine's dot accepts and asks the engine when one
@@ -3116,8 +3116,7 @@ end anchor (see
 and after the position automaton, which is charged to the forward program itself
 (see
 [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)),
-from the program that holds the forward DFA allowance (the lowered boolean
-program where there is one). It is kept only if every first-match and
+from the program that holds the forward DFA allowance. It is kept only if every first-match and
 longest-match DFA that could initialize before the charge, start-byte tables
 included, still can. Trino's ordered-literal matcher, which
 its frontend reserves later, takes its memory first, with the fact's memory
@@ -3527,8 +3526,8 @@ adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
 `,z`, scanned a 16 KiB chunk that ends in `,z` twice, 1.19 to 1.29 times as
 long. Where an inner literal search stands in for the check, the routes that
 skip it, BitState's capture of groups and a search that skips the DFA, scan the
-window for its literal when that is one exact literal. Neither its forward nor
-its lowered program has a prefix scan, a transparent start literal, or a
+window for its literal when that is one exact literal. Its forward program has
+no prefix scan, a transparent start literal, or a
 [start literal filter](#start-literal-filter) that its first-match DFA can run
 and that groups of one bit also give. As with the [fixed-width yield
 rule](#fixed-width-rare-class-candidates), the check was measured against
@@ -3620,7 +3619,7 @@ budget counts from where it starts, as a scan of the rest alone would.
 
 The handoff is sound because the ordinary engine's `find` reaches the inner
 literal search after its length reject and before any other deciding step: the
-pattern has no lowered program, pre-engine matcher, required prefix, anchor at
+pattern has no pre-engine matcher, required prefix, anchor at
 either end, assertion the DFA cannot run, or empty match, and the search's
 minimum window is at most 256 bytes. A hit before the handed one either does not
 exist or fails a gate, and a hit that fails a gate changes none of the search's
@@ -3809,10 +3808,7 @@ and longest-match spans and captures stay the same, provided no assertion of a
 match reads past the new end. No assertion of a match runs at its end, since
 none follows the suffix, and the assertions the DFA runs read at most one byte
 ahead. Java's final-terminator `$` and `\Z` and Trino's final line end read
-further, so a program with assertions the DFA cannot run takes no bound. Nor
-does a pattern with a lowered boolean program: it comes only from a final line
-end, which leaves no suffix, and its matches can end past the suffix after a
-final LF. Rust's Unicode word boundary is sound because the suffix is ASCII.
+further, so a program with assertions the DFA cannot run takes no bound. Rust's Unicode word boundary is sound because the suffix is ASCII.
 
 The bound's search is a reverse scan for the last occurrence, the forward
 literal scan mirrored: a vector pair scan from 1 KiB and a word scan below it,
@@ -6157,6 +6153,10 @@ route and do not allocate a matcher. The exact multiline begin-line expression
 uses a count-only plan that returns one for the input start plus the number of
 LF bytes before the final byte. Other operations retain the semantic program,
 and other nullable expressions retain ordinary matcher iteration.
+
+The simplification sweep removed the lowered boolean program described below; a
+compound expression with a terminal final-line `$` runs on the semantic program.
+The record describes the removed program.
 
 Boolean `find` and `lookingAt` operations use operation-specific plans:
 

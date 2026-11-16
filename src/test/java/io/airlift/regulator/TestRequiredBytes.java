@@ -1340,10 +1340,7 @@ public class TestRequiredBytes
     @Test
     public void testFinalLineDollarKeepsRequiredBytes()
     {
-        // Trino's final-line $ lowers the boolean program, which then holds the forward DFA budget
-        // and the required bytes' charge.
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("foo\\d+$"));
-        assertThat(regexp.re2().booleanProgramForDiagnostics()).isNotNull();
         assertThat(regexp.re2().requiredBytesForDiagnostics()).hasToString("foo");
         Slice without = utf8Slice("x fo12\n");
         assertThat(regexp.re2().shortWindowLacksRequiredBytes(without, 0, without.length())).isTrue();

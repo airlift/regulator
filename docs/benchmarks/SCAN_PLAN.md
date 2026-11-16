@@ -337,9 +337,7 @@ and from any other start both runs read the same characters to the same end.
 Other operations between the runs, a bounded or positive-minimum following run,
 or a following set that omits a leading member keep the one-character resume.
 Optional-leading plans, and plans led by any run other than a single character
-or a delimiter complement, remain on the ordinary engine. A lowered final-line
-plan retains precedence for a run-leading expression; a literal-leading scan
-keeps its candidate-byte route.
+or a delimiter complement, remain on the ordinary engine.
 
 ## RE2 patterns
 
@@ -652,7 +650,7 @@ interleaves twelve plans across simple and richer bodies. `LONG_OPTIONAL` adds a
 `RETRY_64`, `RETRY_127`, `RETRY_128`, `RETRY_256`, and `LONG_RETRY` use the
 four-optional expression with exact input byte lengths, including a 4 KiB case.
 They cover short-input routing and long-hostname scaling.
-`LOWERED_FALLBACK` protects the lowered unanchored final-LF boolean route.
+`LOWERED_FALLBACK` adds a terminal `$` to the fallback shape.
 `UNANCHORED_URL` and `UNANCHORED_END` vary prefix length, URL outcomes, Unicode,
 newline, and end behavior. `UNANCHORED_RUN` covers leading-run matches and
 failures, `LONG_UNANCHORED_RUN` uses 4 KiB digit runs, and
