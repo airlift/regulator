@@ -1063,8 +1063,8 @@ abstract sealed class CompiledPattern
         // UTF-8 sequences can take a few more instructions. The reverse prefix program takes half
         // the reverse budget, or less if the search would otherwise not fit beside that estimate,
         // and the search is left out unless its reverse prefix DFA can initialize. A pattern of the
-        // dot-star literal matcher's shape below, such as `.*literal.*` in RE2, Trino, Java, and
-        // Rust's string API, is left to that matcher: only the class-run proof admits its prefix
+        // dot-star literal matcher's shape below, such as `.*literal.*` in RE2, Trino, Java's
+        // `(?d)`, and Rust's string API, is left to that matcher: only the class-run proof admits its prefix
         // of dots, so the search is left out, as it was before that proof.
         if (requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
                 booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null) {

@@ -55,7 +55,7 @@ final class ExpressionAnalysis
         ONE_CODE_POINT,
         ONE_NON_NEWLINE_CODE_POINT,
         /// A character of a class that holds every character but a line feed and other stops,
-        /// which the sequence's [LiteralSequence#dotStops] name. A class of exactly `[^\n]` is
+        /// the same [DotStops] for every such gap of a sequence. A class of exactly `[^\n]` is
         /// ONE_NON_NEWLINE_CODE_POINT instead.
         ONE_NON_STOP_CODE_POINT,
         ZERO_OR_MORE_BYTES,
@@ -107,17 +107,14 @@ final class ExpressionAnalysis
     static final class LiteralSequence
     {
         private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSequence.class);
-        private static final int DOT_STOPS_INSTANCE_SIZE = SizeOf.instanceSize(DotStops.class);
-        private static final int RUNE_RANGE_INSTANCE_SIZE = SizeOf.instanceSize(RuneRange.class);
 
         private final List<byte[]> literals;
         private final List<Gap> gaps;
-        private final DotStops dotStops;
         private final boolean anchoredAtStart;
         private final boolean anchoredAtEnd;
         private final boolean finalLineEnd;
 
-        private LiteralSequence(List<byte[]> literals, List<Gap> gaps, DotStops dotStops, boolean anchoredAtStart, boolean anchoredAtEnd, boolean finalLineEnd)
+        private LiteralSequence(List<byte[]> literals, List<Gap> gaps, boolean anchoredAtStart, boolean anchoredAtEnd, boolean finalLineEnd)
         {
             List<byte[]> literalCopies = new ArrayList<>(literals.size());
             for (byte[] literal : literals) {
@@ -125,7 +122,6 @@ final class ExpressionAnalysis
             }
             this.literals = List.copyOf(literalCopies);
             this.gaps = List.copyOf(gaps);
-            this.dotStops = dotStops;
             this.anchoredAtStart = anchoredAtStart;
             this.anchoredAtEnd = anchoredAtEnd;
             this.finalLineEnd = finalLineEnd;
@@ -136,10 +132,6 @@ final class ExpressionAnalysis
             long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(literals) + RetainedSizeSupport.unmodifiableListSize(gaps);
             for (byte[] literal : literals) {
                 size += program.sharesPrefix(literal) ? 0 : SizeOf.sizeOf(literal);
-            }
-            if (dotStops != null) {
-                List<RuneRange> ranges = dotStops.ranges();
-                size += DOT_STOPS_INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(ranges) + (long) ranges.size() * RUNE_RANGE_INSTANCE_SIZE;
             }
             return size;
         }
@@ -179,15 +171,6 @@ final class ExpressionAnalysis
         Gap gapAfter(int literalIndex)
         {
             return gaps.get(literalIndex + 1);
-        }
-
-        /// Returns the stops of every [Gap#ONE_NON_STOP_CODE_POINT] and
-        /// [Gap#ZERO_OR_MORE_NON_STOP_CODE_POINTS] gap: those of the sequence's first class with
-        /// stops, or `null` when it has none. A gap whose class has other stops is
-        /// [Gap#REQUIRES_GENERAL_ENGINE], so the gaps share one set.
-        DotStops dotStops()
-        {
-            return dotStops;
         }
 
         boolean anchoredAtStart()
@@ -625,7 +608,7 @@ final class ExpressionAnalysis
             literals.set(literals.size() - 1, runBuffer.slice().getBytes());
         }
         gaps.add(pendingGap);
-        return new LiteralSequence(literals, gaps, sequenceStops, anchoredAtStart, anchoredAtEnd, hasFinalLineEnd && !hasExactEnd);
+        return new LiteralSequence(literals, gaps, anchoredAtStart, anchoredAtEnd, hasFinalLineEnd && !hasExactEnd);
     }
 
     private static Gap mergeGap(Gap left, Gap right)

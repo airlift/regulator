@@ -121,20 +121,19 @@ public class TestPublicEngineAgreement
     @Test
     public void testDotStarLiteralSpanRegions()
     {
-        // A group-zero matcher of `.*literal.*` finds on the dot-star literal matcher in RE2, Java,
-        // with and without UNIX_LINES, and Rust, with and without CRLF mode, in UTF-8 and bytes
-        // mode, and so do the unanchored one-shot searches of a range: find, findInto with group
-        // zero alone or with a second pair, and findResult. The second pair stays unset: it is
-        // group 1 for `(x){0}`, or unused storage for a pattern with only group 0. Their spans are
-        // those of the generic matcher of the pattern with the dots inside a capture, which keeps
-        // the program, in every region: a region end inside the trailing dots ends the match there,
-        // one inside the literal leaves no match, and the dots stop at a line feed, at the other
-        // stops of Java's default dot and Rust's CRLF dot, and, in UTF-8, at the malformed byte at
-        // the #. None of the one-shot searches runs the program. A pattern whose empty
-        // capture the simplifier removes keeps that capturing group, which no match sets, so its
-        // matcher takes no span search: in RE2 and Java, its finds reach the dot-star literal
-        // matcher through the program hook, with offsets relative to the region's start, and its
-        // one-shot searches reach it as every row's do. Rust drops the group.
+        // A group-zero matcher of `.*literal.*` finds on the dot-star literal matcher in RE2, Java
+        // with UNIX_LINES, and Rust, in UTF-8 and bytes mode, and so do the unanchored one-shot
+        // searches of a range: find, findInto with group zero alone or with a second pair, and
+        // findResult. The second pair stays unset: it is group 1 for `(x){0}`, or unused storage
+        // for a pattern with only group 0. Their spans are those of the generic matcher of the
+        // pattern with the dots inside a capture, which keeps the program, in every region: a
+        // region end inside the trailing dots ends the match there, one inside the literal leaves
+        // no match, and the dots stop at a line feed and, in UTF-8, at the malformed byte at the #.
+        // None of the one-shot searches runs the program. A pattern whose empty capture the
+        // simplifier removes keeps that capturing group, which no match sets, so its matcher takes
+        // no span search: in RE2 and Java, its finds reach the dot-star literal matcher through the
+        // program hook, with offsets relative to the region's start, and its one-shot searches
+        // reach it as every row's do. Rust drops the group.
         // The second input has short lines, a carriage return and multibyte characters on the
         // literal's line, a literal at a line's start, and the malformed byte between a line feed
         // and the literal. In it, a region that starts inside a line has a line feed before its
@@ -168,20 +167,15 @@ public class TestPublicEngineAgreement
                     new Row(Re2.compile(utf8Slice(".*ERROR.*")), Re2.compile(utf8Slice("(.*ERROR.*)"))),
                     new Row(Re2.compile(utf8Slice(".*ERROR.*"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*ERROR.*)"), Re2.Options.latin1())),
                     new Row(JavaRegexp.compile(utf8Slice("(?d).*ERROR.*")), JavaRegexp.compile(utf8Slice("(?d)(.*ERROR.*)"))),
-                    new Row(JavaRegexp.compile(utf8Slice(".*ERROR.*")), JavaRegexp.compile(utf8Slice("(.*ERROR.*)"))),
                     new Row(RustRegexp.compile(utf8Slice(".*ERROR.*")), RustRegexp.compile(utf8Slice("(.*ERROR.*)"))),
-                    new Row(RustRegexp.compile(utf8Slice("(?R).*ERROR.*")), RustRegexp.compile(utf8Slice("(?R)(.*ERROR.*)"))),
                     new Row(RustRegexp.compile(utf8Slice("(?-u).*ERROR.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?-u)(.*ERROR.*)"), RustRegexp.Options.bytes())),
-                    new Row(RustRegexp.compile(utf8Slice("(?R-u).*ERROR.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?R-u)(.*ERROR.*)"), RustRegexp.Options.bytes())),
                     new Row(Re2.compile(utf8Slice(".*ERROR.*(x){0}")), Re2.compile(utf8Slice("(.*ERROR.*)"))),
                     new Row(Re2.compile(utf8Slice(".*ERROR.*(x){0}"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*ERROR.*)"), Re2.Options.latin1())),
                     new Row(JavaRegexp.compile(utf8Slice("(?d).*ERROR.*(x){0}")), JavaRegexp.compile(utf8Slice("(?d)(.*ERROR.*)"))),
-                    new Row(JavaRegexp.compile(utf8Slice(".*ERROR.*(x){0}")), JavaRegexp.compile(utf8Slice("(.*ERROR.*)"))),
                     // A one-byte literal has no contains search, so these find it with Slice.indexOf,
                     // which must not find an R past the region's end.
                     new Row(Re2.compile(utf8Slice(".*R.*")), Re2.compile(utf8Slice("(.*R.*)"))),
                     new Row(JavaRegexp.compile(utf8Slice("(?d).*R.*")), JavaRegexp.compile(utf8Slice("(?d)(.*R.*)"))),
-                    new Row(JavaRegexp.compile(utf8Slice(".*R.*")), JavaRegexp.compile(utf8Slice("(.*R.*)"))),
                     new Row(RustRegexp.compile(utf8Slice(".*R.*")), RustRegexp.compile(utf8Slice("(.*R.*)"))));
             for (Row row : rows) {
                 CompiledPattern pattern = row.pattern();

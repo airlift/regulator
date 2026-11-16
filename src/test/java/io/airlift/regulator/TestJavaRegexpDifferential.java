@@ -341,7 +341,6 @@ public class TestJavaRegexpDifferential
                 JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
                 DotStarLiteralSpanMatcher spanMatcher = regexp.createDotStarLiteralSpanMatcher();
                 switch (mode) {
-                    case "" -> assertThat(spanMatcher).as(pattern).isExactlyInstanceOf(DotStarLiteralSpanMatcher.MultipleStops.class);
                     case "(?d)" -> assertThat(spanMatcher).as(pattern).isExactlyInstanceOf(DotStarLiteralSpanMatcher.class);
                     default -> assertThat(spanMatcher).as(pattern).isNull();
                 }

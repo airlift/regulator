@@ -131,7 +131,7 @@ public class TestBenchmarkPatternDispatch
                                 }
                                 assertNoProgramSearch(fresh, description);
                             }
-                            if (target.equals("DOT_STAR_LITERAL") && reference instanceof CompiledPattern) {
+                            if (target.equals("DOT_STAR_LITERAL") && (reference instanceof Re2 || reference instanceof RustRegexp)) {
                                 // A fresh pattern shows that the one-shot searches over these rows
                                 // run the dot-star literal matcher and never the program.
                                 CompiledPattern fresh = (CompiledPattern) interpreted(language, expression(target));
@@ -378,9 +378,16 @@ public class TestBenchmarkPatternDispatch
             }
             case "DOT_STAR_LITERAL" -> {
                 assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
-                // The literal kernel counts the dot-star spans, and the matcher finds them.
-                assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNotNull();
-                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createDotStarLiteralSpanMatcher());
+                // RE2 and Rust count the literal kernel's dot-star spans, and the matcher finds them.
+                // Java's dot also stops at `\r`, U+0085, U+2028, and U+2029, so it takes no matcher.
+                if (compiled instanceof JavaRegexp) {
+                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNull();
+                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isNull();
+                }
+                else {
+                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNotNull();
+                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createDotStarLiteralSpanMatcher());
+                }
             }
             case "SINGLE_BYTE" -> {
                 assertThat(compiled.sharedSingleByteMatcher()).as(description).isNotNull();

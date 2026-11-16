@@ -2121,9 +2121,8 @@ parameters, through which every one-shot search passes: C2 inlines no callee
 whose signature names a class not yet loaded, and a process that runs only exact
 literals may never load the engines' workspaces.
 
-The count of a `.*literal.*` pattern whose dots match any character but their
-stops, a line feed and at most seven others, a group-zero `RegexpMatcher.find()`
-of it within the matcher's region, and its unanchored one-shot searches run the
+The count of a `.*literal.*` pattern whose dots match any character but a line
+feed, a group-zero `RegexpMatcher.find()` of it within the matcher's region, and its unanchored one-shot searches run the
 dot-star literal matcher in RE2, Java, and Rust, as Trino's dot-star subtype
 does for its span operations: the literal's first occurrence, found with the
 pattern's contains search, or with `Slice.indexOf` in a window under 64 bytes
@@ -2161,17 +2160,11 @@ picks a table of character widths and the walk has no language branch. For
 ranges accept overlong three- and four-byte forms, encoded surrogates, and
 values above U+10FFFF, and reject bare continuation bytes, C0, C1, F5–FF, and
 cut-short sequences; RE2's Latin-1 option and Rust's bytes API with `(?-u)` read
-each byte as a character. The analysis names a dot's stops, the characters its
-class leaves out, so the matcher takes any dot that stops at a line feed and at
-most seven others, no more than two of them ASCII. Java's default dot also stops
-at `\r`, U+0085, U+2028, and U+2029, and Rust's CRLF dot at `\r`. Dots of
-exactly `[^\n]`, as in RE2, Trino, Rust, and Java's `(?d)`, keep the walk
-described above; other dots take a variant of it, whose ASCII runs and backward
-jump look for every ASCII stop, at most three, and which reads a non-ASCII
-character as the class's byte ranges do: a UTF-8 class that leaves out a
-non-ASCII character accepts exactly the encodings of its members, so Java's
-default dot rejects the overlong forms and values above U+10FFFF that `[^\n]`
-accepts. Rust's Unicode dot in bytes mode is a class of characters in a pattern
+each byte as a character. The matcher takes only dots of exactly `[^\n]`, as in
+RE2, Trino, Rust, and Java's `(?d)`. The simplification sweep removed the
+variant for dots with other stops, such as Java's default dot, which also stops
+at `\r`, U+0085, U+2028, and U+2029, and Rust's CRLF dot, which also stops at
+`\r`; such a pattern runs the ordinary engine. Rust's Unicode dot in bytes mode is a class of characters in a pattern
 that reads bytes, so the analysis takes no matcher for it.
 
 The matcher reserves its own size from the forward-DFA budget after the
@@ -3491,7 +3484,7 @@ assertions are judged at `s0` as for the earlier match. The prefix matches
 `[s0, h)`, so the reverse search from the first hit finds the leftmost start. An
 assertion after the run, or a second class, could fail on the shorter span. A
 pattern of the dot-star literal matcher's shape, as `.*coolfunctionname.*` is in
-RE2, Trino, Java, and Rust's string API, is left to that matcher: no other proof
+RE2, Trino, Java's `(?d)`, and Rust's string API, is left to that matcher: no other proof
 admits its prefix of dots, so it takes no inner literal search. A pattern that
 only this proof gives a search keeps its
 [long-window required literal check](#required-literal-absence-on-long-windows)
