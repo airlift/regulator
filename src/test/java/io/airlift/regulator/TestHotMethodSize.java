@@ -491,18 +491,18 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(517);
     }
 
-    /// Keeps the find loop's check of whether a search tries the inner or window literal first,
+    /// Keeps the find loop's check of whether a search tries the inner literal first,
     /// and the dispatch helpers it calls, BooleanPlans.hasLiteralSearch included, within
     /// MaxInlineSize, so that C2 inlines them into `RegexpMatcher.findGeneral` however often a
     /// find reaches them, and keeps the whole-text count's check the same way. The search methods
-    /// the helpers call, such as WindowLiteralSearch.fallsBackNearStart, are not held to it. Caps
+    /// the helpers call, such as InnerLiteralSearch.fallsBackNearStart, are not held to it. Caps
     /// the DFA count dispatch at 84 bytes, within which an out-of-line call to the literal counts
     /// keeps it.
     @Test
     public void testLiteralSearchGatesFitMaxInlineSize()
             throws ClassNotFoundException
     {
-        for (String method : List.of("searchesInnerLiteral", "searchesInnerLiteralWindow", "literalSearchFallsBackNearStart", "windowLiteralSearchFallsBackNearStart", "searchesInnerLiteralCount")) {
+        for (String method : List.of("searchesInnerLiteral", "searchesInnerLiteralWindow", "literalSearchFallsBackNearStart", "searchesInnerLiteralCount")) {
             assertThat(codeLength(CompiledPattern.class, method))
                     .as("CompiledPattern.%s bytecode bytes", method)
                     .isPositive()

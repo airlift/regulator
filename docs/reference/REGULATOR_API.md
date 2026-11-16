@@ -322,8 +322,7 @@ literal-neighbor matcher's scan for the literal of a pattern such as
 and last bytes of a longer one, nor the start literal filter of a pattern that
 begins with a few literals, the start class filter of one that begins with a few
 narrow classes, an inner literal search's set filter, its choice of a rare class
-pair, the window literal search's choice of its literal, such as `river` in
-`Tom.{10,25}river|river.{10,25}Tom`, the choice and short-window scan of the
+pair, the choice and short-window scan of the
 bytes every match holds, or a fixed-width pattern's choice of the position whose
 first bytes it scans for, which always estimate with English text frequencies,
 nor the bytes probed by the scan for the literal behind a leading assertion,
