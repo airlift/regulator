@@ -292,7 +292,6 @@ public class TestDotStarLiteralSpanMatcher
                 assertThat(re2.replaceFirst(source, rewrite)).as(label).isEqualTo(captured.replaceFirst(source, capturedRewrite));
                 assertThat(re2.replaceAll(source, rewrite)).as(label).isEqualTo(captured.replaceAll(source, capturedRewrite));
                 assertThat(re2.extract(source, rewrite)).as(label).isEqualTo(captured.extract(source, capturedRewrite));
-                assertNoProgramSearch(pattern, label);
             }
 
             assertThat(pattern.lookingAt(source, 0, source.length())).as(label).isFalse();

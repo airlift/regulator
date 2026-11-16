@@ -169,17 +169,9 @@ sealed class DotStarLiteralSpanMatcher
         return findSpanWithinLine(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
-    /// Returns [#findSpan(Slice,int,int)], adding its scans to `diagnostics` as
-    /// [#findSpanForDiagnostics(Slice,int,int,ScanDiagnostics)] counts them, unless it is `null`,
-    /// as every production search passes it. The literal-kernel searches call this overload.
-    long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
-    {
-        return findSpanWithinLine(input, start, end, diagnostics);
-    }
-
     // The walk behind every search, for dots whose only stop is a line feed. It calls the contains
     // search itself rather than through findLiteral, to keep the search's word reads within C2's
-    // inline depth below the public entries; see CompiledPattern.oneShotDotStarLiteral.
+    // inline depth below the public entries.
     private long findSpanWithinLine(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
         int literalStart = LiteralSearchKernel.searchesWindow(search, end - start) ? search.findContains(input, start, end - start) : indexOfLiteral(input, start, end);
@@ -511,12 +503,6 @@ sealed class DotStarLiteralSpanMatcher
         long findSpanForDiagnostics(Slice input, int start, int end, ScanDiagnostics diagnostics)
         {
             return findSpanBetweenStops(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
-        }
-
-        @Override
-        long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
-        {
-            return findSpanBetweenStops(input, start, end, diagnostics);
         }
 
         // The enclosing class's findSpanWithinLine for these dots, which calls the contains

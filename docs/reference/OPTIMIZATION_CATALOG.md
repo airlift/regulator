@@ -1795,21 +1795,17 @@ ordinary engine would.
   the hit to its line ([kwsearch.c][grep-kwsearch] `Fexecute`); Inspired by a
   gap against Joni on dot-star rows for the call-free literal search in the
   span ([#33]). Regulator: answering `.*lit.*` from the widened span with no
-  regex pass ([#1]), its counts in every language ([#126]), and its unanchored
-  one-shot searches ([#245], [design][d-trino-literal], [design][d-boolean]).
+  regex pass ([#1]), and its counts in every language ([#126],
+  [design][d-trino-literal], [design][d-boolean]).
 - **Where:** `DotStarLiteralSpanMatcher.analyze`,
   `DotStarLiteralSpanMatcher.findSpan`, `DotStarLiteralSpanMatcher.count`,
-  `DotStarLiteralSpanMatcher.MultipleStops`,
-  `CompiledPattern.oneShotDotStarLiteral`,
-  `CompiledPattern.matchInternalOnLiteralKernel`
+  `DotStarLiteralSpanMatcher.MultipleStops`
 - **Applies when:** Unanchored, capture-free patterns of one case-sensitive
   literal between greedy `.*` gaps whose dots match any character but a line
   feed and at most seven other stops, no more than two of them ASCII, such as
   Java's default dot and Rust's CRLF dot, in Trino span operations and in
-  these calls of RE2, Java, and Rust: counts, group-zero matcher finds, and
-  the unanchored `find` of a range, `findInto`, `findResult`, and RE2's
-  `replaceFirst`, `replaceAll`, and `extract`; anchored calls keep the engine,
-  and the matcher yields to the forward DFAs, as [Limits and
+  counts and group-zero matcher finds of RE2, Java, and Rust; the matcher
+  yields to the forward DFAs, as [Limits and
   defaults](REGULATOR_API.md#limits-and-defaults) describes
 - **What it does:** `.*lit.*` finds the literal's first occurrence with the
   pattern's contains search, then widens over the characters the dots match on
@@ -1827,9 +1823,7 @@ ordinary engine would.
   bytes left switches to the vector scan the DFA count uses to leave a `[^\n]`
   loop. Everyday `.*lit.*` counts in RE2 and Rust run in 0.26 to 0.32 of
   their earlier time, and rebar's cloud-flare `simplified` rows in 0.007 to
-  0.12 ([#126]). Everyday one-shot `findInto` searches of `.*lit.*` in RE2,
-  Java, and Rust run in 0.19 to 0.20 of their earlier time on short
-  single-line values and in 0.07 on a file of short subtitle lines ([#245]).
+  0.12 ([#126]).
 
 ### Ordered literals
 
@@ -2608,7 +2602,6 @@ change is described.
 [#241]: https://github.com/airlift/regulator/pull/241
 [#242]: https://github.com/airlift/regulator/pull/242
 [#244]: https://github.com/airlift/regulator/pull/244
-[#245]: https://github.com/airlift/regulator/pull/245
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor

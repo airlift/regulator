@@ -123,18 +123,15 @@ public class TestPublicEngineAgreement
     {
         // A group-zero matcher of `.*literal.*` finds on the dot-star literal matcher in RE2, Java,
         // with and without UNIX_LINES, and Rust, with and without CRLF mode, in UTF-8 and bytes
-        // mode, and so do the unanchored one-shot searches of a range: find, findInto with group
-        // zero alone or with a second pair, and findResult. The second pair stays unset: it is
-        // group 1 for `(x){0}`, or unused storage for a pattern with only group 0. Their spans are
-        // those of the generic matcher of the pattern with the dots inside a capture, which keeps
-        // the program, in every region: a region end inside the trailing dots ends the match there,
-        // one inside the literal leaves no match, and the dots stop at a line feed, at the other
+        // mode. Its spans, and those of the unanchored one-shot searches of a range (find, findInto
+        // with group zero alone or with a second pair, and findResult), are those of the generic
+        // matcher of the pattern with the dots inside a capture, which keeps the program, in every
+        // region: a region end inside the trailing dots ends the match there, one inside the
+        // literal leaves no match, and the dots stop at a line feed, at the other
         // stops of Java's default dot and Rust's CRLF dot, and, in UTF-8, at the malformed byte at
-        // the #. None of the one-shot searches runs the program. A pattern whose empty
-        // capture the simplifier removes keeps that capturing group, which no match sets, so its
-        // matcher takes no span search: in RE2 and Java, its finds reach the dot-star literal
-        // matcher through the program hook, with offsets relative to the region's start, and its
-        // one-shot searches reach it as every row's do. Rust drops the group.
+        // the #. A pattern whose empty capture the simplifier removes keeps that capturing group,
+        // which no match sets, so its matcher takes no span search and its finds run the program.
+        // Rust drops the group.
         // The second input has short lines, a carriage return and multibyte characters on the
         // literal's line, a literal at a line's start, and the malformed byte between a line feed
         // and the literal. In it, a region that starts inside a line has a line feed before its
@@ -188,6 +185,12 @@ public class TestPublicEngineAgreement
                 String label = label(pattern) + " on " + HEX_FORMAT.formatHex(input.getBytes());
                 assertThat(pattern.createDotStarLiteralSpanMatcher()).as(label).isNotNull();
                 assertThat(row.captured().createDotStarLiteralSpanMatcher()).as(label).isNull();
+                if (pattern.capturingGroupCount() == 0) {
+                    assertSpanSearchRegions(pattern, DotStarLiteralSpanMatcher.class, input, row.captured());
+                }
+                else {
+                    assertCapturingMatcherRegions(pattern, input, row.captured());
+                }
                 RegexpMatcher generic = row.captured().genericGroupZeroMatcherForDiagnostics(input);
                 for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
                     for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
@@ -198,13 +201,6 @@ public class TestPublicEngineAgreement
                     for (int[] region : longRegions) {
                         assertOneShotRegion(pattern, generic, longInput, region[0], region[1], label(pattern) + " on long input");
                     }
-                }
-                assertNoProgramSearch(pattern, label);
-                if (pattern.capturingGroupCount() == 0) {
-                    assertSpanSearchRegions(pattern, DotStarLiteralSpanMatcher.class, input, row.captured());
-                }
-                else {
-                    assertCapturingMatcherRegions(pattern, input, row.captured());
                 }
             }
         }
@@ -683,8 +679,8 @@ public class TestPublicEngineAgreement
     }
 
     /// Requires the matcher of `pattern`, whose one capturing group never participates, to take no
-    /// span search, to report the spans of `oracle`'s generic matcher with that group unset in
-    /// every region of `input`, and to run no program search.
+    /// span search, and to report the spans of `oracle`'s generic matcher with that group unset in
+    /// every region of `input`.
     private static void assertCapturingMatcherRegions(CompiledPattern pattern, Slice input, CompiledPattern oracle)
     {
         String label = label(pattern);
@@ -704,7 +700,6 @@ public class TestPublicEngineAgreement
                 assertThat(matcher.find()).as(region).isFalse();
             }
         }
-        assertNoProgramSearch(pattern, label);
     }
 
     private static List<String> findSpans(RegexpMatcher matcher)

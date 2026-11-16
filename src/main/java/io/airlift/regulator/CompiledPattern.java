@@ -1120,8 +1120,6 @@ abstract sealed class CompiledPattern
         // The matcher holds the plans' literal, the contains search, which reserved its memory
         // above, and a shared width table, so it reserves only its own instance from the forward
         // DFA budget, in Trino too, and yields to the forward DFAs; see costsDfaInitialization.
-        // The RE2, Java, and Rust literal-kernel classes also run their unanchored searches on it;
-        // see oneShotDotStarLiteral and matchInternalOnLiteralKernel.
         DotStarLiteralSpanMatcher dotStarLiteralMatcher = DotStarLiteralSpanMatcher.analyze(expressionAnalysis, booleanPlans.literal(), booleanPlans.literalSearch(), (flags & Regexp.LATIN1) != 0);
         if (dotStarLiteralMatcher != null && tryReserveBesideForwardDfas(semanticProgram, dotStarLiteralMatcher.estimatedRetainedSize())) {
             booleanPlans = booleanPlans.withDotStarLiteralMatcher(dotStarLiteralMatcher);
@@ -3394,10 +3392,7 @@ abstract sealed class CompiledPattern
 
     /// Creates a group-zero matcher without the class counter or the group-zero forward cursor.
     /// The candidate-start cursor, lowered search, and scan plans stay, and a compact pattern
-    /// still reaches its counter through [#matchRegionInto]. Its finds of a `.*literal.*` pattern
-    /// in RE2, Java, and Rust still take the dot-star literal matcher, so a test that needs the
-    /// engine's spans runs the same pattern with its dots inside a capture, which has no such
-    /// matcher.
+    /// still reaches its counter through [#matchRegionInto].
     RegexpMatcher genericGroupZeroMatcherForDiagnostics(Slice input)
     {
         return new RegexpMatcher(this, input, null, 0, false);
@@ -4321,8 +4316,8 @@ abstract sealed class CompiledPattern
     {
         requireNonNull(text, "text is null");
         validateRange(text, start, end);
-        // The one-shot unanchored searches come here, unless a literal-kernel or exact-literal
-        // override answers them first through oneShotDotStarLiteral or oneShotExactLiteral: find
+        // The one-shot unanchored searches come here, unless an exact-literal override answers
+        // them first through oneShotExactLiteral: find
         // and findInto of a range, findInto, findResult, RE2's replaceFirst and extract, and each
         // retry of a Rust search after an empty match that splits a character. A pattern with a
         // required literal never makes such a retry, since none of its matches is empty. None of
@@ -4418,44 +4413,18 @@ abstract sealed class CompiledPattern
         return false;
     }
 
-    /// The dot-star literal matcher that answers a one-shot [#matchInto] of a literal-kernel
-    /// pattern, after the checks that call makes, or `null` where the call takes the ordinary
-    /// route: an anchored call, as [#matchInternalOnLiteralKernel] explains, or a pattern without
-    /// the matcher. The one-shot unanchored searches come to matchInto: the range finds,
-    /// `findInto`, `findResult`, and RE2's `replaceFirst` and `extract`. The RE2, Java, and Rust
-    /// literal-kernel classes override matchInto to call this, then the matcher's span search
-    /// themselves, and [#setOneShotSpanGroups]. C2 limits inline depth below the method it
-    /// compiles, and forwarding frames spend that depth. A caller that inlines a public entry
-    /// spends part of it above the entry, so every frame between the entry and the contains
-    /// search's word reads costs the caller a frame of headroom: the route skips matchRegionInto,
-    /// the program hook and any helper around the span search. The route makes no long-window
-    /// check, which would never shorten the search: only a pattern that finds on the general
-    /// engine or a lowered program checks long windows for a required literal, and the matcher
-    /// finds the literal itself and stops at `end`.
-    final DotStarLiteralSpanMatcher oneShotDotStarLiteral(Slice text, int start, int end, Anchor anchor, int[] groups)
-    {
-        DotStarLiteralSpanMatcher dotStarLiteral = booleanPlans.dotStarLiteralMatcher();
-        if (anchor != Anchor.UNANCHORED || dotStarLiteral == null) {
-            return null;
-        }
-        requireNonNull(text, "text is null");
-        validateRange(text, start, end);
-        if (groups != null) {
-            checkGroupsLength(groups);
-        }
-        return dotStarLiteral;
-    }
-
     /// Whether a one-shot [#matchInto] of an exact-literal pattern, after the checks that call
     /// makes, runs [#findExactLiteralSpan(Slice,int,int)]: an unanchored call of a pattern without
     /// capturing groups, which reports only group zero. The literal has no assertions and reads
     /// no context, so the range alone decides. The RE2, Java, and Rust exact-literal classes
     /// override matchInto to call this, then the span search themselves, and
-    /// [#setOneShotSpanGroups], for the inline depth that [#oneShotDotStarLiteral] describes. They
-    /// override the overload without workspaces, through which every one-shot search passes: C2
-    /// inlines no callee whose signature names a class not yet loaded, and a process that runs
-    /// only such patterns may never load the engines' workspace classes. As there, the route makes
-    /// no long-window check, which would never shorten the search.
+    /// [#setOneShotSpanGroups]. C2 limits inline depth below the method it compiles, and
+    /// forwarding frames spend that depth, so the route skips matchRegionInto, the program hook,
+    /// and any helper around the span search. They override the overload without workspaces,
+    /// through which every one-shot search passes: C2 inlines no callee whose signature names a
+    /// class not yet loaded, and a process that runs only such patterns may never load the
+    /// engines' workspace classes. The route makes no long-window check, which would never
+    /// shorten the search.
     final boolean oneShotExactLiteral(Slice text, int start, int end, Anchor anchor, int[] groups)
     {
         if (anchor != Anchor.UNANCHORED || capturingGroupCount != 0) {
@@ -4788,9 +4757,7 @@ abstract sealed class CompiledPattern
     /// The engine hook through which every call of a program over a region runs: the ordinary
     /// engine. The class-run and scan-plan shapes override it, as do Trino's fixed-width shape,
     /// which runs the matcher where the pattern compiled no program, the literal-alternation
-    /// class of a pattern that compiled no program, which runs the literal set, and the RE2,
-    /// Java, and Rust literal-kernel classes, whose unanchored calls of the forward program run
-    /// the dot-star literal matcher where the pattern has one.
+    /// class of a pattern that compiled no program, which runs the literal set.
     boolean matchInternal(
             Prog prog,
             Slice text,
@@ -4838,33 +4805,6 @@ abstract sealed class CompiledPattern
     {
         if (prog == partialProg) {
             return matchLiteralSet(text, contextStart, start, end, anchor, groupOffsets, extendingLiterals);
-        }
-        return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
-    }
-
-    /// The [#matchInternal] route of a literal-kernel pattern. Where the pattern has a dot-star
-    /// literal matcher, every unanchored call of its forward program runs that matcher, which
-    /// reports group zero only, with groups relative to `contextStart`: the simplifier leaves the
-    /// pattern no participating capture, so its other groups stay unset. These calls are RE2's
-    /// `replaceAll`, and a matcher's finds where it has no span search of its own. The pattern
-    /// has no assertion, and the matcher reads nothing outside the region, so nothing outside it
-    /// reaches the result. The one-shot searches take the matcher before this hook; see
-    /// [#oneShotDotStarLiteral]. An anchored call runs the ordinary engine, whose match from
-    /// `start` cannot cross the first line feed, where the matcher would search on for the
-    /// literal, and so does every call of a pattern without the matcher.
-    final boolean matchInternalOnLiteralKernel(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
-    {
-        DotStarLiteralSpanMatcher dotStarLiteral = booleanPlans.dotStarLiteralMatcher();
-        if (prog == partialProg && anchor == Anchor.UNANCHORED && dotStarLiteral != null) {
-            long span = dotStarLiteral.findSpan(text, start, end, null);
-            if (span < 0) {
-                return false;
-            }
-            if (groupOffsets != null) {
-                groupOffsets[0] = (int) (span >>> 32) - contextStart;
-                groupOffsets[1] = (int) span - contextStart;
-            }
-            return true;
         }
         return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
     }
@@ -5633,9 +5573,7 @@ abstract sealed class CompiledPattern
             SingleByteMatcher byteRunMatcher,
             // Finds the spans of a `.*literal.*` pattern, whose dots match any character but a line
             // feed, for the count of the literal-kernel shape, every language's group-zero
-            // RegexpMatcher.find(), the unanchored one-shot searches and program calls of the RE2,
-            // Java, and Rust literal-kernel classes, and Trino's span operations; null leaves them
-            // on the program.
+            // RegexpMatcher.find(), and Trino's span operations; null leaves them on the program.
             DotStarLiteralSpanMatcher dotStarLiteralMatcher,
             // Answers full-Slice boolean find of the ORDERED_LITERALS plan; null for every other
             // plan.

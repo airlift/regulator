@@ -296,12 +296,11 @@ public class TestHotMethodSize
     /// each findSpan entry of the dot-star literal matcher calls only its own class's private walk,
     /// never another entry, which [DotStarLiteralSpanMatcher.MultipleStops] overrides, and the walk
     /// calls the contains search itself. A JVM that links the override stops inlining a walk
-    /// reached through an entry, and each frame between a public one-shot entry and the search's
-    /// word reads costs C2 inline depth.
+    /// reached through an entry, and each frame between a public entry and the search's word
+    /// reads costs C2 inline depth.
     @Test
-    public void testOneShotDotStarLiteralCallsContainsSearchDirectly()
+    public void testDotStarLiteralCallsContainsSearchDirectly()
     {
-        String findSpan = "findSpan" + MethodType.methodType(long.class, Slice.class, int.class, int.class, DotStarLiteralSpanMatcher.ScanDiagnostics.class).toMethodDescriptorString();
         for (Class<?> type : List.of(DotStarLiteralSpanMatcher.class, DotStarLiteralSpanMatcher.MultipleStops.class)) {
             String walk = type == DotStarLiteralSpanMatcher.class ? "findSpanWithinLine" : "findSpanBetweenStops";
             for (MethodModel entry : ClassFile.of().parse(classfile(type)).methods()) {
@@ -318,11 +317,6 @@ public class TestHotMethodSize
             assertThat(calledMethods(type, walk, LiteralSearchKernel.class))
                     .as("LiteralSearchKernel methods %s.%s calls", type.getSimpleName(), walk)
                     .contains("findContains");
-        }
-        for (Class<?> type : List.of(Re2.LiteralKernelRe2.class, JavaRegexp.LiteralKernelJavaRegexp.class, RustRegexp.LiteralKernelRustRegexp.class)) {
-            assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), DotStarLiteralSpanMatcher.class))
-                    .as("DotStarLiteralSpanMatcher methods %s.matchInto calls", type.getSimpleName())
-                    .containsExactly(findSpan);
         }
     }
 

@@ -2122,28 +2122,20 @@ whose signature names a class not yet loaded, and a process that runs only exact
 literals may never load the engines' workspaces.
 
 The count of a `.*literal.*` pattern whose dots match any character but their
-stops, a line feed and at most seven others, a group-zero `RegexpMatcher.find()`
-of it within the matcher's region, and its unanchored one-shot searches run the
-dot-star literal matcher in RE2, Java, and Rust, as Trino's dot-star subtype
-does for its span operations: the literal's first occurrence, found with the
-pattern's contains search, or with `Slice.indexOf` in a window under 64 bytes
-as [Trino Regexp Literal Searches](#trino-regexp-literal-searches) describes,
-widened over the characters the dots match on each side. The one-shot searches
-are `find` of a range, `findInto`, `findResult`, and RE2's `replaceFirst` and
-`extract`, which the literal-kernel classes answer from their one-shot
-`matchInto`, above the engine hook, and RE2's `replaceAll`, whose loop reaches
-the matcher through the engine hook. An anchored call keeps the
-ordinary engine: a match from the call's start cannot cross the first line feed,
-past which the matcher would search on for the literal. An unanchored call makes
-no long-window check, which for such a pattern would never shorten the search:
-its find plan is the contains plan, only a pattern that finds on the general
-engine or a lowered program checks long windows for a required literal, and the
-matcher scans for the literal itself and stops at the region's end. The matcher
-calls the contains search itself, and `matchInto` calls the matcher. C2 limits
-inline depth below the method it compiles, and forwarding frames spend that
-depth. A caller that inlines the public entry spends part of it above the
-entry, and past the limit the search's word reads ran out of line, at 3.6 times
-the instructions per word.
+stops, a line feed and at most seven others, and a group-zero
+`RegexpMatcher.find()` of it within the matcher's region run the dot-star
+literal matcher in RE2, Java, and Rust, as Trino's dot-star subtype does for its
+span operations: the literal's first occurrence, found with the pattern's
+contains search, or with `Slice.indexOf` in a window under 64 bytes as
+[Trino Regexp Literal Searches](#trino-regexp-literal-searches) describes,
+widened over the characters the dots match on each side. The simplification
+sweep removed the route by which its unanchored one-shot searches (`find` of a
+range, `findInto`, `findResult`, and RE2's `replaceFirst`, `replaceAll`, and
+`extract`) ran the matcher; they run the ordinary engine. The matcher calls the
+contains search itself. C2 limits inline depth below the method it compiles,
+and forwarding frames spend that depth. A caller that inlines the public entry
+spends part of it above the entry, and past the limit the search's word reads
+ran out of line, at 3.6 times the instructions per word.
 
 The walk that fixes the match start begins at the region start and, once it
 meets the first line feed, jumps to after the last one before the literal, found
