@@ -7,7 +7,7 @@
 
 Regulator is a high-performance regular-expression engine for UTF-8
 [Slice](https://github.com/airlift/slice) data. It supports five pattern
-languages: RE2, Java `Pattern`, the Rust `regex` crate, and Trino regular
+languages: the Rust `regex` crate, RE2, Java `Pattern`, and Trino regular
 expressions compile onto one engine, and Trino SQL `LIKE` has its own matcher.
 Each search runs in linear time with bounded memory, making it a good fit for
 data-processing systems that compile patterns once and apply them repeatedly.
@@ -25,10 +25,10 @@ text-processing workloads:
 <!-- benchmark-summary:start -->
 | Compared with | Everyday expressions | Text processing |
 |---|---:|---:|
+| Rust regex crate | 2.0× faster | 1.7× faster |
 | Native RE2 | 4.4× faster | 6.6× faster |
 | Java regex | 5.7× faster | 34.3× faster |
 | Trino regex (Joni) | 4.7× faster | 26.1× faster |
-| Rust regex crate | 2.0× faster | 1.7× faster |
 | Trino LIKE | 6.0× faster | — |
 
 _Source: Regulator 2.1 preliminary results `47eaddfd9abc40519b1349278716a2fc49ae7d5d`. R9g with native access enabled and patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
@@ -46,10 +46,10 @@ library's own input and output types. Input conversion is outside the timings.
 
 Regulator provides separate compilers for:
 
-- RE2 syntax
-- Trino regular-expression syntax
-- the regular subset of Java `Pattern`
 - the Rust `regex` crate's pattern language
+- RE2 syntax
+- the regular subset of Java `Pattern`
+- Trino regular-expression syntax
 - Trino SQL `LIKE` patterns
 
 ## Usage
@@ -83,10 +83,10 @@ Use the compiler matching the pattern's language:
 
 ```java
 Slice patternBytes = utf8Slice("[a-z]+");
-Re2 re2 = Re2.compile(patternBytes);
-TrinoRegexp trinoRegexp = TrinoRegexp.compile(patternBytes);
-JavaRegexp javaRegexp = JavaRegexp.compile(patternBytes);
 RustRegexp rustRegexp = RustRegexp.compile(patternBytes);
+Re2 re2 = Re2.compile(patternBytes);
+JavaRegexp javaRegexp = JavaRegexp.compile(patternBytes);
+TrinoRegexp trinoRegexp = TrinoRegexp.compile(patternBytes);
 TrinoLikePattern likePattern = TrinoLikePattern.compile(patternBytes);
 ```
 
@@ -176,10 +176,10 @@ current benefit of each flag.
 - [Why Regulator is fast](docs/WHY_FAST.md)
 - [API guide](docs/reference/REGULATOR_API.md)
 - [Pattern languages](docs/integrations/REGEXP_LANGUAGES.md)
-- [RE2 language](docs/reference/languages/RE2.md)
-- [Trino regular-expression language](docs/reference/languages/TRINO_REGEXP.md)
-- [Java regular-expression language](docs/reference/languages/JAVA_REGEXP.md)
 - [Rust regular-expression language](docs/reference/languages/RUST_REGEXP.md)
+- [RE2 language](docs/reference/languages/RE2.md)
+- [Java regular-expression language](docs/reference/languages/JAVA_REGEXP.md)
+- [Trino regular-expression language](docs/reference/languages/TRINO_REGEXP.md)
 - [Trino SQL LIKE language](docs/reference/languages/TRINO_LIKE.md)
 - [Unsupported features](docs/reference/languages/UNSUPPORTED_FEATURES.md)
 

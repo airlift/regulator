@@ -141,9 +141,9 @@ a pill means the row's whole setup runs at that budget.
 
 | Engine | Setting at the row's budget |
 |---|---|
-| Regulator (RE2, Java, Trino, Rust) | `setMaxMemory` |
-| Native RE2 | `RE2::Options::set_max_mem` |
+| Regulator (Rust, RE2, Java, Trino) | `setMaxMemory` |
 | Rust `regex` crate | `RegexBuilder::size_limit` and `dfa_size_limit`, each the full budget |
+| Native RE2 | `RE2::Options::set_max_mem` |
 | JDK `Pattern`, Joni | No memory limit |
 
 RE2's `max_mem` covers its programs and DFAs together, while the crate limits

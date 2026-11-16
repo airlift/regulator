@@ -5,11 +5,11 @@ benchmark report. The build writes a Pages-ready site to
 `target/benchmark-report/benchmarks/`.
 
 Each language page compares its Regulator API with the corresponding library:
-native RE2, JDK `Pattern`, Joni, the pinned Rust `regex` crate through its
-`str` and bytes APIs, or Trino's SQL LIKE route. The default uses
-native memory on R9g for release campaigns or C9g for historical
-captures. The URL fragment stores the language, CPU, and memory
-selection, even when opening a local file.
+the pinned Rust `regex` crate through its `str` and bytes APIs, native RE2,
+JDK `Pattern`, Joni, or Trino's SQL LIKE route. The default is the Rust page,
+or RE2 for captures without Rust, with native memory on R9g for release
+campaigns or C9g for historical captures. The URL fragment stores the
+language, CPU, and memory selection, even when opening a local file.
 
 Local checks require Node.js 22 or newer and Python 3.11 or newer on `PATH`.
 
@@ -262,9 +262,9 @@ each workload's find as not measured yet, with no times or ratio, and the
 download holds no find rows for them.
 
 The compiled patterns table has one row per pattern and operation. The
-comparator a specialized-pattern catalog row names selects its page: RE2 for
-native RE2, Java for JDK `Pattern`, Trino regex for Joni, Rust for the `regex`
-crate, and LIKE for Trino SQL LIKE. The table shows the comparator's time, the
+comparator a specialized-pattern catalog row names selects its page: Rust for
+the `regex` crate, RE2 for native RE2, Java for JDK `Pattern`, Trino regex for
+Joni, and LIKE for Trino SQL LIKE. The table shows the comparator's time, the
 uncompiled and compiled times, the uncompiled and compiled ratios against the
 comparator, and the compiled gain over uncompiled, which divides their
 comparator-relative ratios as the literal-probe table's tuned-versus-default

@@ -118,9 +118,9 @@ const currentHtml = renderToStaticMarkup(React.createElement(LanguageReport, { d
 assert.doesNotMatch(currentHtml, /R8g/);
 assert.doesNotMatch(currentHtml, /Rust regex/);
 const rustData = { ...currentData, languages: { ...currentData.languages, rust: { label: "Rust regex", comparator: "Rust regex crate" } } };
-assert.deepEqual(Array.from(exports.languageOrder(rustData)), ["re2", "java", "trino", "rust", "like"]);
-const rustHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: rustData,
-  selection: { language: "rust", cpu: "r9g", memory: "native" } }));
+assert.deepEqual(Array.from(exports.languageOrder(rustData)), ["rust", "re2", "java", "trino", "like"]);
+// A report with Rust opens on Rust.
+const rustHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: rustData }));
 assert.match(rustHtml, /Regulator vs Rust regex crate/);
 assert.match(rustHtml, /Regulator receives the input bytes in Slice\./);
 assert.match(rustHtml, /When the source turns Unicode off or the input is not valid UTF-8, the crate uses its bytes API and Regulator uses byte mode\. Otherwise the crate receives the same bytes as str\. UTF-8 validation is outside the timings\./);

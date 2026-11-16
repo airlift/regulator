@@ -18,10 +18,10 @@ separate.
 
 | Language | Regulator frontend | Headline comparator |
 |---|---|---|
+| Rust regular expressions | `RustRegexp` | The pinned Rust `regex` crate's `str` and bytes APIs |
 | RE2 | `Re2` | Pinned native RE2 |
 | Java regular expressions | `JavaRegexp` | The selected JDK's `java.util.regex.Pattern` |
 | Trino regular expressions | `TrinoRegexp` | Pinned Airlift Joni from the selected Trino revision |
-| Rust regular expressions | `RustRegexp` | The pinned Rust `regex` crate's `str` and bytes APIs |
 | Trino SQL LIKE | `TrinoLikePattern` | Trino's SQL LIKE execution route |
 
 LIKE compares directly with Trino's Slice-based matcher. For patterns eligible
@@ -30,13 +30,13 @@ settings, including single-use and reused measurements. SQL wrapper overhead
 and input conversion are excluded.
 
 Every report identifies the exact JDK build because `Pattern` implementation,
-Unicode data, and generated code are properties of that JDK. Native RE2, Trino,
-Joni, the Rust toolchain, and the `regex` crate revisions remain pinned as
-required by the qualification protocol.
+Unicode data, and generated code are properties of that JDK. The Rust
+toolchain, the `regex` crate, native RE2, Trino, and Joni revisions remain
+pinned as required by the qualification protocol.
 
 ## Shared regex workload
 
-The RE2, Java, Trino-regexp, and Rust sections use one shared logical workload
+The Rust, RE2, Java, and Trino-regexp sections use one shared logical workload
 registry. A logical case has a stable identifier, input corpus, operation,
 result demand, and normalized expected result. Each language entry records one
 of these mappings:
@@ -45,7 +45,7 @@ of these mappings:
 - **translated:** a recorded language-specific pattern has equivalent meaning
 - **not compatible:** an equivalent pattern or operation cannot be expressed
 
-One difference is allowed under identical: the Java, Trino, and Rust `\s`
+One difference is allowed under identical: the Rust, Java, and Trino `\s`
 also matches vertical tab, which RE2's does not. No frozen input for a pattern
 that uses `\s` or `\S` contains a vertical tab, so this difference cannot
 change a result.
@@ -77,17 +77,17 @@ different languages without relying on row position or display text.
 Each engine receives the representation its public API accepts:
 
 - Regulator receives precomputed `Slice` patterns and input bytes.
+- The pinned Rust `regex` crate receives the identical bytes as a `str`,
+  validated outside timing. A bulk case whose source turns Unicode mode off, or
+  whose input is not UTF-8, uses the crate's bytes API instead, and Regulator
+  compiles its pattern in byte mode, as RE2 switches to Latin-1 for a
+  Unicode-off source.
 - Native RE2 receives the identical pattern and input bytes where semantics
   permit.
 - JDK `Pattern` receives precomputed `String` patterns and inputs containing the
   same logical Unicode text.
 - Joni receives the precomputed byte representation used by the pinned Trino
   comparator.
-- The pinned Rust `regex` crate receives the identical bytes as a `str`,
-  validated outside timing. A bulk case whose source turns Unicode mode off, or
-  whose input is not UTF-8, uses the crate's bytes API instead, and Regulator
-  compiles its pattern in byte mode, as RE2 switches to Latin-1 for a
-  Unicode-off source.
 
 The default JDK timing excludes UTF-8-to-`String` conversion. If an integration
 needs to measure that cost, add a separate conversion-inclusive diagnostic.
@@ -188,10 +188,10 @@ language:
 
 | Language | Comparator |
 |---|---|
+| Rust regex | `regex` crate |
 | RE2 | Native RE2 |
 | Java regex | JDK `Pattern` |
 | Trino regexp | Joni |
-| Rust regex | `regex` crate |
 | LIKE | Trino |
 
 Exact lifecycle, operation, architecture, memory-mode, incompatible, and

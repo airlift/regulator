@@ -1,8 +1,8 @@
 # Regulator performance qualification plan
 
 This plan records the qualification requirements for a release campaign,
-which measures a published Regulator artifact on R9g and R8i for the RE2, Java,
-Trino, Rust, and LIKE languages.
+which measures a published Regulator artifact on R9g and R8i for the Rust, RE2,
+Java, Trino, and LIKE languages.
 
 Record the artifact checksum and release tag. Measure the campaign's workloads
 through public APIs with that artifact. The report publishes every row except
@@ -26,8 +26,8 @@ invalidate.
 
 The release campaign must answer four user-facing questions:
 
-1. How do reused public Slice operations compare with native RE2, JDK Pattern,
-   Joni, the Rust `regex` crate, and Trino LIKE?
+1. How do reused public Slice operations compare with the Rust `regex` crate,
+   native RE2, JDK Pattern, Joni, and Trino LIKE?
 2. What overhead do compilation, first use, and repeated use add?
 3. How do the Trino-compatible extraction, split, and replacement operations
    compare with Joni?
@@ -84,18 +84,18 @@ for changed code cannot qualify the new candidate without a rerun.
 Build and record exact revisions for the comparators used by the campaign's
 public workloads:
 
-1. pinned native RE2 at `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
-2. Regulator through the public Slice API
-3. Regulator through `TrinoRegexp`
-4. the Joni version used by the selected Trino revision
-5. Regulator through `JavaRegexp`, compared with the pinned JDK's
-   `java.util.regex.Pattern`
-6. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
-   route
-7. Regulator through `RustRegexp`, compared with the pinned Rust `regex`
+1. Regulator through `RustRegexp`, compared with the pinned Rust `regex`
    crate's `str` API on validated UTF-8, or its bytes API where `RustRegexp`
    uses byte mode (a source that turns Unicode off, or a haystack that is not
    UTF-8), built with the pinned Rust toolchain
+2. pinned native RE2 at `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
+3. Regulator through the public Slice API
+4. Regulator through `JavaRegexp`, compared with the pinned JDK's
+   `java.util.regex.Pattern`
+5. Regulator through `TrinoRegexp`
+6. the Joni version used by the selected Trino revision
+7. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
+   route
 
 Direct engine entry points belong to conditional diagnostics. Pin and record
 them when such a diagnostic is required; do not add them to the routine public
