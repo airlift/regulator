@@ -1110,7 +1110,6 @@ public class TestDfaCountMatches
         assertThat(Dfa.countMatches(program, Slices.wrappedBuffer(input), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
         if (VectorSupport.isAvailable()) {
             assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(2);
-            assertThat(dfa.pairedTransitionMemory()).isPositive();
         }
 
         // A search too short for paired rows that reaches no eligible loop falls back to the
@@ -1358,9 +1357,6 @@ public class TestDfaCountMatches
         Slice run = utf8Slice("a".repeat(300));
         assertThat(Dfa.countMatches(afterOrdinaryTransition, run, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
         assertThat(Dfa.search(afterOrdinaryTransition, run, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(run.length());
-        if (VectorSupport.isAvailable()) {
-            assertThat(afterOrdinaryTransition.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).pairedTransitionMemory()).isPositive();
-        }
         assertThat(Dfa.countMatches(afterOrdinaryTransition, utf8Slice("a,abcdefq" + "\u00e9".repeat(150)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
     }
 

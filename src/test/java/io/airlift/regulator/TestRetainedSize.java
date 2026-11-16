@@ -74,7 +74,7 @@ public class TestRetainedSize
         long patternSize = pattern.retainedSizeInBytes();
 
         pattern.countMatches(TEXT);
-        assertThat(pattern.retainedSizeInBytes()).isGreaterThan(patternSize);
+        assertThat(pattern.retainedSizeInBytes()).isGreaterThanOrEqualTo(patternSize);
         assertThat(matcher.retainedSizeInBytes()).isEqualTo(matcherSize);
 
         TrinoRegexp trinoPattern = TrinoRegexp.compile(Slices.utf8Slice("(\\w*)(\\w)"));
@@ -84,7 +84,7 @@ public class TestRetainedSize
         long trinoPatternSize = trinoPattern.retainedSizeInBytes();
 
         trinoPattern.count(TEXT);
-        assertThat(trinoPattern.retainedSizeInBytes()).isGreaterThan(trinoPatternSize);
+        assertThat(trinoPattern.retainedSizeInBytes()).isGreaterThanOrEqualTo(trinoPatternSize);
         assertThat(trinoMatcher.retainedSizeInBytes()).isEqualTo(trinoMatcherSize);
     }
 

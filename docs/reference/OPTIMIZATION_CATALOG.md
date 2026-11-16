@@ -1567,7 +1567,7 @@ authoritative.
   of the row's address or offset, so the
   loop tests a tag instead of loading the state's data, and the reverse DFA
   walks the same table. Eligible searches under 256 bytes use an existing
-  table at once, and request one after 16 such searches. The first allocation
+  table at once, and request one at the first such search. The first allocation
   waits once while paired rows are still possible and no transition is
   computed. The native table ran DFA rows in 0.71 to 0.78 of object rows'
   time ([design][d-native]); without native access, the heap form runs
