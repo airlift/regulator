@@ -80,7 +80,8 @@ public class TestDfaReverseSearch
         // that leaves only on `=`, a newline, or in UTF-8 a byte outside ASCII, so the search skips
         // to the last of them, once a search has computed the transitions the probe follows. UTF-8
         // takes the high-byte scan and Latin-1 the plain one. A 100-byte search takes the object
-        // loop, a 10,000-byte one the absolute-pointer loop.
+        // loop until short searches request the absolute-pointer table, a 10,000-byte one the
+        // absolute-pointer loop.
         for (int flags : new int[] {Regexp.LIKE_PERL, Regexp.LIKE_PERL | Regexp.LATIN1}) {
             ParseResult parsed = RegexpParser.parse(Slices.utf8Slice(".*.*=.*"), flags);
             Prog reverse = Compiler.compile(parsed.regexp(), true, 0);
@@ -97,9 +98,11 @@ public class TestDfaReverseSearch
                 assertReverseSkip(reverse, Slices.utf8Slice("=" + run), 1, Dfa.SEARCH_NO_MATCH, true);
                 // A match within the probe leaves the search as it was.
                 assertReverseSkip(reverse, Slices.utf8Slice(run + "="), 0, 0, false);
-                assertThat(dfa.absolutePointerBackwardSearchCount() > absolutePointerSearchCount)
-                        .as("flags=%s runLength=%s", flags, runLength)
-                        .isEqualTo(runLength == 10_000);
+                if (runLength == 10_000) {
+                    assertThat(dfa.absolutePointerBackwardSearchCount())
+                            .as("flags=%s runLength=%s", flags, runLength)
+                            .isGreaterThan(absolutePointerSearchCount);
+                }
             }
             // A search of the minimum 64 bytes skips, and a shorter one leaves the search as it was.
             assertReverseSkip(reverse, Slices.utf8Slice("=" + "x".repeat(63)), 0, 0, true);
