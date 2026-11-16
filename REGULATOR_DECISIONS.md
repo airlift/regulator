@@ -5361,21 +5361,29 @@ automaton, as every operation of an eligible alternation of 64 or fewer runs the
 trie. RE2, Java, and Rust search the automaton for a group-zero
 `RegexpMatcher.find()`, within the matcher's region; `matches`, `lookingAt`,
 anchored, and capture operations keep the program wherever it fits the budget,
-as described below. Full-Slice boolean `find` and count keep the forward DFA
-wherever it initializes beside the automaton: on text
-where most bytes lead a literal, the automaton's walk took several steps per
-byte, its root lookup, edge scan, and failure steps, to the DFA's one, and,
-before the dense rows below, measured 1.94x to 2.47x slower on r9g and 3.16x
-to 3.72x on r8i. Where the DFA
-cannot initialize, the automaton answers in its place. A boolean `find` runs the
-longest-match DFA and a count the first-match DFA, which needs less memory, so
-`english-10` under a 96 MiB budget finds on the automaton and counts on the
-DFA. A DFA count that gives up returns no count, and the matcher counts on the
-automaton. Trino checks the automaton against the forward-DFA budget before
-compiling a program, while the other languages charge it to that budget beside
-the program wherever the program fits. The compile applies the same rule in
-every language, but a Trino pattern never reaches it with an automaton that
-fits: the program's DFA budget is smaller than the forward budget Trino checked.
+as described below. Full-Slice boolean `find` keeps the forward DFA wherever it
+initializes beside the automaton: on text where most bytes lead a literal, the
+automaton's walk took several steps per byte, its root lookup, edge scan, and
+failure steps, to the DFA's one, and, before the dense rows below, measured
+1.94x to 2.47x slower on r9g and 3.16x to 3.72x on r8i. Full-Slice count runs on
+the automaton wherever it has its skip table, described below, even where the
+first-match DFA initializes, since the dense rows and the skip made the
+automaton's count the faster one, as the measurement below records; the
+first-match DFA is then never built for a count. Inputs too short for the skip
+count on the automaton too, which that measurement did not cover. An automaton
+without the skip table, as for a set with a literal shorter than 4 bytes, counts
+on the first-match DFA wherever it initializes. Where the DFA cannot initialize,
+the automaton answers in its place. A boolean `find` runs the longest-match DFA
+and a count the first-match DFA, which needs less memory, so between the two
+DFAs' least budgets such a set finds on the automaton and counts on the DFA, and
+`english-10` under a 96 MiB budget, which keeps its skip table, finds and counts
+on the automaton. A DFA count that gives up returns no count, and the matcher
+counts on the automaton. Trino checks the automaton against the forward-DFA
+budget before compiling a program, while the other languages charge it to that
+budget beside the program wherever the program fits. The compile applies the
+same rule in every language, but a Trino pattern never reaches it with an
+automaton that fits: the program's DFA budget is smaller than the forward budget
+Trino checked.
 
 RE2, Java, and Rust keep the program wherever it fits the budget, so
 `english-10` still retains about 14.7 MB under a 96 MiB budget: the program and
@@ -5395,11 +5403,13 @@ operation on the automaton, full-Slice count took 1.86x to 2.34x the time on r9g
 and 2.46x to 3.33x on r8i, find on short rows 7% to 12% more on r9g and 3.5% to
 5% more on r8i, and compile 8% to 15% more. Memory is saved only at a budget
 that would otherwise reject the pattern. Measured again after the dense rows
-below, `english-10` full-Slice count on the automaton alone took 0.40x to 0.60x
-the program's time on both platforms, so the count half of that measurement no
-longer holds. The find half still does: at a 32 MiB budget, which before the
-packed-instruction charge left `english-10` only the automaton, search took 4%
-to 6% more than at a 96 MiB budget on r9g and per-line find 4% more on r8i.
+and skip table below, `english-10` full-Slice count on the automaton alone took
+0.40x to 0.60x the program's time on both platforms, so the count half of that
+measurement was reversed: a set with its skip table counts on the automaton
+beside the program, as described above. The find half still holds: at a 32 MiB
+budget, which before the packed-instruction charge left `english-10` only the
+automaton, search took 4% to 6% more than at a 96 MiB budget on r9g and
+per-line find 4% more on r8i.
 
 Without a program, a search anchored at its start walks the automaton's goto
 transitions from the root and keeps the deepest state that holds its own

@@ -663,18 +663,20 @@ public sealed class RustRegexp
     static final class LiteralAlternationRustRegexp
             extends RustRegexp
     {
+        private final boolean literalSetFind;
         private final boolean literalSetCount;
 
         private LiteralAlternationRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
+            this.literalSetFind = analysis.literalSetFind();
             this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, literalSetFind);
         }
 
         @Override
@@ -713,7 +715,7 @@ public sealed class RustRegexp
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, true);
         }
 
         @Override
