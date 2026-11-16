@@ -1146,14 +1146,9 @@ exceptional byte to the existing paired decoder. This avoids repeatedly
 decoding a deliberately missing paired transition without adding another
 transition representation.
 
-The reverse search and the inner literal search's anchored confirmation scan a
-matching self-loop the same way, since their object rows hold no match
-transitions either. A reverse search probes for one after a match transition
-only when its program has a repetition loop or can match empty. A program
-without a loop that cannot match empty, such as one built only from counted
-repetitions like the reversed `\s[a-zA-Z]{0,12}` of `\s[a-zA-Z]{0,12}ing\s`,
-has none to find. Probing it after each match transition cost
-`ing-suffix-limited-space` about 2.7%, measured on the exploration build.
+The inner literal search's anchored confirmation scans a matching self-loop
+the same way, since its object rows hold no match transitions either. A reverse
+search on object rows steps each byte of a matching self-loop.
 
 Some eligible expressions produce repeated matches before pairing can amortize
 its entry and terminal handling. After 16 paired matches that end fewer than

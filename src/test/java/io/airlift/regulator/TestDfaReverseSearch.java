@@ -56,8 +56,6 @@ public class TestDfaReverseSearch
 
         assertThat(Dfa.search(reverse, text, 0, text.length(), true, Prog.MatchKind.LONGEST_MATCH, true))
                 .isZero();
-        assertThat(reverse.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchingSelfLoopScanCount())
-                .isPositive();
     }
 
     @Test
@@ -69,8 +67,6 @@ public class TestDfaReverseSearch
 
         assertThat(Dfa.search(reverse, text, 0, text.length(), true, Prog.MatchKind.LONGEST_MATCH, true))
                 .isEqualTo("before\n".length());
-        assertThat(reverse.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchingSelfLoopScanCount())
-                .isPositive();
     }
 
     @Test
@@ -123,8 +119,6 @@ public class TestDfaReverseSearch
         assertThat(reverse.hasLoop()).isTrue();
         assertThat(Dfa.search(reverse, text, 0, text.length(), true, Prog.MatchKind.LONGEST_MATCH, true))
                 .isZero();
-        assertThat(reverse.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchingSelfLoopScanCount())
-                .isPositive();
     }
 
     @Test

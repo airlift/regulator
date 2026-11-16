@@ -4033,25 +4033,6 @@ final class Dfa
         return position;
     }
 
-    private static int scanMatchingSelfLoopTransitionsBackward(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int scanBegin,
-            int position,
-            int stateOffset)
-    {
-        int matchingSelfLoop = stateOffset | T_MATCH_BIT;
-        int[] transitions = tables.transitions;
-        byte[] byteMap = dfa.bytemap;
-        for (; position > scanBegin; position--) {
-            if (getTransition(transitions, stateOffset + (byteMap[bytes[position - 1] & 0xFF] & 0xFF)) != matchingSelfLoop) {
-                break;
-            }
-        }
-        return position;
-    }
-
     private static long decodePairedTransition(CacheTables tables, int stateOffset, int firstClass, int secondClass)
     {
         int firstTransition = getTransition(tables.transitions, stateOffset + firstClass);
@@ -5034,21 +5015,6 @@ final class Dfa
                     return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, false);
                 }
                 position--;
-                // Object rows hold no match transitions, so each byte of a matching self-loop,
-                // such as the reversed `\w+` of `\w+\s+Holmes`, would leave the object loop. In
-                // this longest-match reverse search, a program without a loop, such as the reversed
-                // `\s[a-zA-Z]{0,12}` of `\s[a-zA-Z]{0,12}ing\s`, matches on a self-loop only
-                // through an unanchored search's leading loop, which needs a program that can match
-                // empty. Any other skips the probe, which would find nothing after each of its match
-                // transitions.
-                if (dfa.prog.hasLoop() || dfa.prog.canMatchEmpty()) {
-                    int matchingSelfLoopBegin = scanMatchingSelfLoopTransitionsBackward(dfa, tables, bytes, scanBegin, position, stateOffset);
-                    if (matchingSelfLoopBegin != position) {
-                        countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
-                        position = matchingSelfLoopBegin;
-                        lastMatchBoundary = position + 1;
-                    }
-                }
                 stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }

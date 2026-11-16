@@ -1182,9 +1182,8 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   `Dfa.DfaInstance.selfLoopExitByteSet`, `Dfa.DfaInstance.selfLoopStayRanges`,
   `VectorByteSetScanner.findOutsideRanges`,
   `Dfa.searchForwardSampledSelfLoops`, `Dfa.shouldSampleSelfLoopTransitions`,
-  `Dfa.scanMatchingSelfLoopTransitions`,
-  `Dfa.scanMatchingSelfLoopTransitionsBackward`, `Dfa.skipReverseSelfLoop`,
-  `Dfa.searchAnchoredWithStop`, `Prog.hasLoop`,
+  `Dfa.scanMatchingSelfLoopTransitions`, `Dfa.skipReverseSelfLoop`,
+  `Dfa.searchAnchoredWithStop`,
   `VectorByteSetScanner.findLast`, `VectorByteSetScanner.findLastHighBitOr`,
   `Dfa.searchForwardCountSelfLoopScan`,
   `Dfa.DfaInstance.countSelfLoopExitByteSet`,
@@ -1200,9 +1199,8 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   sampled cached transitions are at least 90% self-loops; forward matching
   self-loops in the paired continuation, candidate-start checks, and
   inner-literal confirmation; reverse searches of at least 64 bytes from a
-  non-matching start, with no byte limit and no earliest-match request, where
-  a reverse search looks for a matching self-loop only when the program has a
-  loop or can match empty; `count` of shapes such as `.*(x|y).*` or
+  non-matching start, with no byte limit and no earliest-match request;
+  `count` of shapes such as `.*(x|y).*` or
   `.*[^A-Z]|[A-Z]` from 64 bytes, which stops trying the scan after 8 searches
   in a row that reach no eligible loop or scan only stay runs under 16 bytes;
   a stopped scan uses an existing pointer table, where only a productive
