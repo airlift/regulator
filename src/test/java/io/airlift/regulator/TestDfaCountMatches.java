@@ -40,6 +40,7 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestDfaCountMatches
 {
@@ -452,7 +453,11 @@ public class TestDfaCountMatches
             assertThat(dfa.resetCount()).isZero();
 
             assertThat(pattern.countMatches(input)).isEqualTo(reference.count(input));
-            assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
+            // Without paired rows, no pending pairing request delays the table, and the long
+            // search resets only once.
+            if (Dfa.FLAT_PAIRED_ROWS) {
+                assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
+            }
             RegexpMatcher matcher = pattern.matcher(input);
             assertThat(findCount(matcher)).isEqualTo(findCount(reference.matcher(input)));
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
@@ -927,6 +932,7 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopScanRejectsUnrepresentableByteSets()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // The loop leaves on five digits and stays on more than four ranges around them.
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[02468].*"));
         assertThat(pattern.count(utf8Slice("a".repeat(32_768)))).isZero();
@@ -1023,6 +1029,7 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanCutoffSpansCallsSharingSampling()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // Calls sharing one sampling count one text, as the inner literal count's fallbacks do,
         // so the route stops after eight searches across them, and its unproductive hand-offs
         // keep the paired rows the ordinary search uses.
@@ -1073,6 +1080,7 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanRetriedSearchCountedOnce()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
@@ -1229,6 +1237,7 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanHandOffKeepsPairedTransitions()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         warmPairedTransitions(program, utf8Slice("\u00e9a".repeat(200)));
@@ -1250,6 +1259,7 @@ public class TestDfaCountMatches
     @Test
     public void testExclusiveCountRejectsPairedTransitions()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         String expression = ".*(x|y).*";
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
         Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
@@ -1273,6 +1283,7 @@ public class TestDfaCountMatches
     @Test
     public void testCountKeepsShortPairedSearchStreakUntilItEnds()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // Each search of `\b\w+n\b` ends at the next match, so over these words its paired searches
         // alternate between ending within 16 bytes, at `an`, and after, at the long word, then end
         // ten short searches in a row. The padding gives every search enough text for paired rows.
@@ -1329,6 +1340,7 @@ public class TestDfaCountMatches
     @Test
     public void testCountAddsStatesAfterPairedTransitionsAreBuilt()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // An ordinary search builds paired transitions for the first count's states. The second
         // count adds states before the table is rebuilt, and its paired search then follows a
         // match transition into one of them, past the end of the paired table.
@@ -1388,6 +1400,7 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanPairedMatchHandOffScansAsciiTail()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // With paired rows built first, the matching hand-off continues through the paired loop
         // rather than the pointer loop.
         Prog program = compile(".*(x|y).*");

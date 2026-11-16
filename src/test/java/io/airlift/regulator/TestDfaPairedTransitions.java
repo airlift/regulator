@@ -27,6 +27,7 @@ import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestDfaPairedTransitions
 {
@@ -53,6 +54,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedSearchAndFallback()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*ABC$");
         Slice matchingInput = utf8Slice("x".repeat(300) + "ABC");
 
@@ -69,9 +71,7 @@ public class TestDfaPairedTransitions
         Dfa.CacheTables tables = dfa.cacheTablesForTesting();
         Dfa.StateData start = dfa.analyzeStart(tables, matchingInput, textBegin, textEnd, false, true);
         byte[] bytes = matchingInput.byteArray();
-        assertThat(Dfa.FLAT_PAIRED_ROWS
-                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false)
-                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false))
+        assertThat(Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false))
                 .isEqualTo(matchingInput.length());
 
         assertThat(Dfa.search(program, matchingInput, false, Prog.MatchKind.FIRST_MATCH, true))
@@ -83,6 +83,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testRepeatedShortMatchesDisablePairedTransitions()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^x*(ab|a)");
         Slice warmingInput = utf8Slice("x".repeat(300) + "abz");
         Slice input = utf8Slice("ab" + "z".repeat(300));
@@ -121,6 +122,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testResetRebuildsPairedTransitions()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*ABC$");
         Slice input = utf8Slice("x".repeat(300) + "ABC");
         assertThat(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(input.length());
@@ -137,6 +139,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testFallbackBeforeEitherInputByte()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         for (int padding : List.of(299, 300)) {
             Prog program = compileProg("[ -~]*A");
             Slice input = utf8Slice("x".repeat(padding) + "Az");
@@ -159,6 +162,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testFirstSearchWithoutTransitionsDefersPointerTableOnce()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // The DFA quits when it evaluates Java's \b next to a byte outside ASCII, so a search that
         // starts at a byte-order mark ends before the DFA computes a transition. Two short searches
         // from different start contexts leave two start states with nothing computed, and the
@@ -191,6 +195,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testDeadTransitionFallsBackWithoutConsumingInput()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^[xy]*A");
         Slice input = utf8Slice("x".repeat(300) + "zq");
 
@@ -203,6 +208,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedMatchContinuationPreservesPriority()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^x*(ab|a)");
         Slice input = utf8Slice("x".repeat(300) + "abz");
 
@@ -216,6 +222,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedMatchContinuationAtSearchBoundary()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^x*(ab|a)");
         Slice endOfTextInput = utf8Slice("x".repeat(300) + "ab");
 
@@ -238,6 +245,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testMatchingSelfLoopUsesDirectScan()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg(".*.*=.*");
         Slice input = utf8Slice("key=" + "x".repeat(10_000));
 
@@ -282,6 +290,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testMatchingSelfLoopScanContinuesAfterCacheGrowth()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // The warm-ups build paired transitions and fill the cache tables to just below their next
         // growth. The long `x` run then passes the matching loop's stepped prefix, so the scan computes
         // the loop's exit-byte set; the loop stays on `x` and four digits, five ranges, and leaves on
@@ -306,6 +315,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testMatchingSelfLoopRunStepsOnGrownTables()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         // The warm-ups fill the cache tables to just below their next growth. The `y` sits past the
         // matching loop's stepped prefix, so the scan computes the loop's exit-byte set before the
         // run reaches it; the loop stays on `x`, `y`, and four digits, five ranges, so the set is
@@ -334,6 +344,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedMatchContinuationFallsBackFromPartialTable()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*(ABCDEFGHIJKLMNOPQRST|A)");
         Slice input = utf8Slice("x".repeat(32 * 1024) + "ABCDEFGHIJKLMNOPQRSTz");
 
@@ -349,6 +360,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedMatchContinuationSurvivesCacheExhaustion()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^x*(a[01]{200}|a)");
         program.setDfaMemory(64 * 1024);
         Slice warmingInput = utf8Slice("x".repeat(300) + "a0");
@@ -367,6 +379,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPartialPairingForHotSelfLoop()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ$");
         Slice input = utf8Slice("x".repeat(32 * 1024) + "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
 
@@ -394,6 +407,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedTransitionsUseAndReleaseDfaBudget()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         long dfaBudget = 34 * 1024;
         Prog program = compileProg("[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ$");
         // Forward programs divide their DFA memory equally between first- and
@@ -417,6 +431,7 @@ public class TestDfaPairedTransitions
     @Test
     public void testPairedTransitionMemoryIsChargedExactly()
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*ABC$");
         Slice shortInput = utf8Slice("x".repeat(200) + "ABC");
         Slice longInput = utf8Slice("x".repeat(300) + "ABC");
@@ -430,32 +445,23 @@ public class TestDfaPairedTransitions
         assertThat(dfa.pairedTransitionMemory()).isPositive();
         assertThat(memoryBeforePairing - dfa.availableStateMemory()).isEqualTo(dfa.pairedTransitionMemory());
 
-        // Unless a run forces the form, aarch64 hosts pair rows on the flat table and every other
-        // host on object rows.
+        // Unless a run forces the choice, aarch64 hosts pair rows on the flat table and every other
+        // host searches unpaired.
         if (System.getProperty("io.airlift.regulator.dfa.flat-paired-rows") == null) {
             assertThat(Dfa.FLAT_PAIRED_ROWS).isEqualTo("aarch64".equals(System.getProperty("os.arch")));
         }
 
         // The complete table pairs all six states, a seven-state limit with the unused state 0, in
-        // rows of 37 slots for six byte classes. The charge is the table the form holds, stated
-        // exactly so a change to the sizing goes red: the flat table's two int arrays, or the object
-        // rows counted with eight-byte references, 72 bytes for the outer array and 312 for each row.
+        // rows of 37 slots for six byte classes. The charge is stated exactly so a change to the
+        // sizing goes red: the flat table's two int arrays.
         Dfa.CacheTables tables = dfa.cacheTablesForTesting();
         assertThat(dfa.stateCount).isEqualTo(6);
         assertThat(dfa.nextSize).isEqualTo(6);
         assertThat(dfa.pairedTransitionRowCount()).isEqualTo(dfa.stateCount);
-        if (Dfa.FLAT_PAIRED_ROWS) {
-            assertThat(tables.pairedStateRefArrays).isNull();
-            assertThat(tables.pairedRowOffsets).hasSize(7);
-            assertThat(tables.flatPairedRows.byteSize()).isEqualTo(6L * 37 * Integer.BYTES);
-            // 952 bytes with 16-byte array headers.
-            assertThat(dfa.pairedTransitionMemory()).isEqualTo(sizeOfIntArray(7) + sizeOfIntArray(6 * 37));
-        }
-        else {
-            assertThat(tables.flatPairedRows).isNull();
-            assertThat(tables.pairedRowOffsets).isNull();
-            assertThat(dfa.pairedTransitionMemory()).isEqualTo(72 + (6 * 312));
-        }
+        assertThat(tables.pairedRowOffsets).hasSize(7);
+        assertThat(tables.flatPairedRows.byteSize()).isEqualTo(6L * 37 * Integer.BYTES);
+        // 952 bytes with 16-byte array headers.
+        assertThat(dfa.pairedTransitionMemory()).isEqualTo(sizeOfIntArray(7) + sizeOfIntArray(6 * 37));
     }
 
     @Test
@@ -515,6 +521,7 @@ public class TestDfaPairedTransitions
     public void testConcurrentSearchAndResetWithPairedTransitions()
             throws Exception
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("[ -~]*ABC$");
         Slice matchingInput = utf8Slice("x".repeat(300) + "ABC");
         Slice nonMatchingInput = utf8Slice("x".repeat(300) + "ABD");
@@ -554,6 +561,7 @@ public class TestDfaPairedTransitions
     public void testConcurrentSearchAndResetWithPairedMatchContinuation()
             throws Exception
     {
+        assumeTrue(Dfa.FLAT_PAIRED_ROWS, "requires paired rows");
         Prog program = compileProg("^x*(ab|a)");
         Slice matchingInput = utf8Slice("x".repeat(300) + "abz");
         Slice shorterMatchingInput = utf8Slice("x".repeat(300) + "aq");

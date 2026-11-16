@@ -100,11 +100,16 @@ public final class DfaAbsolutePointerProbe
         Dfa.DfaInstance latin1CountDfa = latin1CountProgram.getCachedDfa(FIRST_MATCH);
 
         exerciseCountSelfLoopMatchHandOff();
-        exerciseCountSelfLoopMatchHandOffWithPairedRows();
-        exerciseShortSearchesAfterPairedRejection();
-        exercisePairedRowReleaseDuringSearch();
+        // Only a DFA that pairs rows, on aarch64 or when a run forces it, has paired rows to test.
+        if (Dfa.FLAT_PAIRED_ROWS) {
+            exerciseCountSelfLoopMatchHandOffWithPairedRows();
+            exerciseShortSearchesAfterPairedRejection();
+            exercisePairedRowReleaseDuringSearch();
+        }
         exerciseOptionalStorageFailureAtomicity(true);
-        exerciseOptionalStorageFailureAtomicity(false);
+        if (Dfa.FLAT_PAIRED_ROWS) {
+            exerciseOptionalStorageFailureAtomicity(false);
+        }
         exerciseCacheGrowthAtomicity();
 
         // With native access the sidecar is native memory charged its bytes; without it, a heap
@@ -207,14 +212,16 @@ public final class DfaAbsolutePointerProbe
         exerciseWithheldPointerTable("[ -~]*" + suffix + "$", input, expectedNativeAccess);
         exerciseFailedGrowthAllocation(growingPattern, growthWarmupInput, growingInput, expectedNativeAccess);
 
-        runPairedTransitionTests();
+        if (Dfa.FLAT_PAIRED_ROWS) {
+            runPairedTransitionTests();
+        }
 
-        // The parent forces the paired form each way and checks the one this JVM ran.
+        // The parent forces pairing each way and checks the choice this JVM ran.
         System.out.println((expectedNativeAccess ? "OK enabled" : "OK disabled") + " flat-paired-rows=" + Dfa.FLAT_PAIRED_ROWS);
     }
 
-    // Runs every test of TestDfaPairedTransitions in this JVM's paired form, so their charge, cap,
-    // release, and loop checks run in both forms on every host. The class has no fields or
+    // Runs every test of TestDfaPairedTransitions in this JVM, so their charge, cap, release, and
+    // loop checks run on every host. The class has no fields or
     // lifecycle methods, so each test runs, in name order, on a fresh instance.
     private static void runPairedTransitionTests()
             throws ReflectiveOperationException
@@ -590,18 +597,13 @@ public final class DfaAbsolutePointerProbe
     // paired rows the search is reading, and the search must go on without them. The budgets at
     // which this happens move with unrelated changes, so each pattern sweeps a range around them.
     // The second pattern loops on a letter class instead of any byte, and its 20 byte classes make
-    // its paired rows about eight times larger, so it releases them at over twice the budget, in
-    // either form. The first pattern releases only its object rows: its flat table always leaves
-    // room for the states the search adds.
+    // its paired rows about eight times larger, so it releases them at over twice the budget. The
+    // first pattern never releases its flat table: it always leaves room for the states the search
+    // adds.
     private static void exercisePairedRowReleaseDuringSearch()
     {
         Slice anyByteInput = utf8Slice("x".repeat(64) + "a".repeat(256));
-        if (Dfa.FLAT_PAIRED_ROWS) {
-            exerciseFlatPairedTableKeptThroughSearch("(?s).*x", 16 * 1024, 40 * 1024, anyByteInput);
-        }
-        else {
-            exercisePairedRowReleaseSweep("(?s).*x", 19 * 1024, 24 * 1024, anyByteInput);
-        }
+        exerciseFlatPairedTableKeptThroughSearch("(?s).*x", 16 * 1024, 40 * 1024, anyByteInput);
         exercisePairedRowReleaseSweep(
                 "^(x*a[b-z]*(\\x01c|\\x02d|\\x03e|\\x04f|\\x05g|\\x06h|\\x07i|\\x08j)?|x*a)",
                 30 * 1024,

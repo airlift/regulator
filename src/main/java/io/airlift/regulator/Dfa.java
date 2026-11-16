@@ -48,24 +48,16 @@ import static java.util.Objects.requireNonNull;
 /// object rows remain authoritative for every fallback.
 final class Dfa
 {
-    // Whether paired rows live in one flat int table of pre-scaled byte offsets, read through a heap
-    // memory segment, rather than as an object row per state. Only on aarch64: the flat step ran
-    // 9-21% faster on r9g (Graviton 4) paired rows, while on r8i C2 carried the row offset through
-    // a vector register and the same rows ran 3-72% slower. Only those two hosts were measured:
-    // Graviton 2 and 3, Apple, and other aarch64 hosts get the flat form by `os.arch` without
-    // measurement, and every x86 host keeps the object rows, as do other platforms. "Bounded Paired
-    // DFA Transitions" in REGULATOR_DECISIONS.md records the measurements. The
-    // `io.airlift.regulator.dfa.flat-paired-rows` property overrides the form for a run; it is a
-    // testing and diagnostic switch, not supported configuration. Tests run both forms on every
-    // host by forcing it in child JVMs. C2 folds this constant, so each search compiles one form.
+    // Whether the DFA pairs rows, in one flat int table of pre-scaled byte offsets read through a
+    // heap memory segment. Only on aarch64, where the flat step ran 9-21% faster on r9g (Graviton 4);
+    // every other platform searches unpaired. "Bounded Paired DFA Transitions" in
+    // REGULATOR_DECISIONS.md records the measurements. The
+    // `io.airlift.regulator.dfa.flat-paired-rows` property overrides the choice for a run; it is a
+    // testing and diagnostic switch, not supported configuration. C2 folds this constant.
     static final boolean FLAT_PAIRED_ROWS = selectFlatPairedRows();
-    // The flat table's charge counts four-byte slots and no row header, where the object rows'
-    // charge counts eight-byte references and a header for each row, so the flat caps are half the
-    // object caps and still hold complete tables of more states. The DFA's free state budget, which
-    // limits the table when it is smaller, is not halved, so under a tight budget the flat table
-    // fits about twice the rows.
-    static final long MAX_PAIRED_TRANSITION_MEMORY = FLAT_PAIRED_ROWS ? 32 * 1024 : 64 * 1024;
-    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = FLAT_PAIRED_ROWS ? 8 * 1024 : 16 * 1024;
+    // The flat table's charge counts four-byte slots and no row header.
+    static final long MAX_PAIRED_TRANSITION_MEMORY = 32 * 1024;
+    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = 8 * 1024;
     private static final int CONSERVATIVE_REFERENCE_BYTES = Long.BYTES;
     private static final int MIN_PAIRED_SEARCH_BYTES = 256;
     private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
@@ -909,9 +901,7 @@ final class Dfa
                 if (!startIsMatch && textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
                     tables = dfa.requestPairedTransitions(tables);
                     if (dfa.hasPairedTransitions(tables, startOffset)) {
-                        return FLAT_PAIRED_ROWS
-                                ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false)
-                                : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false);
+                        return searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false);
                     }
                 }
                 return searchForward(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch);
@@ -1946,9 +1936,7 @@ final class Dfa
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
-                long result = FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true);
+                long result = searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true);
                 if (selfLoopScanNotApplicable) {
                     dfa.countSelfLoopUnproductiveCount++;
                 }
@@ -2127,9 +2115,7 @@ final class Dfa
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     // Measure from the search start so the short-search hint sees the whole search.
-                    long result = FLAT_PAIRED_ROWS
-                            ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true)
-                            : searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true);
+                    long result = searchForwardPairsFlat(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true);
                     recordCountSelfLoopScanProductivity(dfa, productive);
                     return result;
                 }
@@ -2168,9 +2154,7 @@ final class Dfa
             if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
-                    long result = FLAT_PAIRED_ROWS
-                            ? searchForwardPairsFlatFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false)
-                            : searchForwardPairsFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false);
+                    long result = searchForwardPairsFlatFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false);
                     recordCountSelfLoopScanProductivity(dfa, productive);
                     countRoute(dfa, COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE);
                     return result;
@@ -2400,9 +2384,7 @@ final class Dfa
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
-                return FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false);
+                return searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false);
             }
         }
         return searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
@@ -2913,17 +2895,10 @@ final class Dfa
         transitions[index] = value;
     }
 
-    private static Object[] pairedStateReferences(Object[][] pairedStateRefArrays, int stateIndex)
+    private static int pairedRowOffset(int[] pairedRowOffsets, int stateIndex)
     {
         // The table is built only when an exclusive search ends, so a state added since then has no
         // paired row, and once making room for a new state has released the table, no state has one.
-        return pairedStateRefArrays != null && stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
-    }
-
-    private static int pairedRowOffset(int[] pairedRowOffsets, int stateIndex)
-    {
-        // As for pairedStateReferences, a state added since the table was built has no paired row,
-        // nor does any state once the table was released.
         return pairedRowOffsets != null && stateIndex < pairedRowOffsets.length ? pairedRowOffsets[stateIndex] : NO_PAIRED_ROW;
     }
 
@@ -3405,286 +3380,8 @@ final class Dfa
     // The result is measured from resultBegin, which precedes textBegin when the caller has
     // already consumed part of the search. A search that ends at a paired first match records it
     // in the DFA's short paired search streak, or, when `countRecordsPairedMatch` is set, returns
-    // it with COUNT_PAIRED_MATCH_FLAG for the count to record. Copied as `searchForwardPairsFlat`;
-    // keep the copy in step. This object-row form keeps its measured decoding loop for x86; the
-    // count's flag adds one branch at the paired-match exit, outside the loop.
-    static long searchForwardPairs(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int textBegin,
-            int textEnd,
-            int ctxEnd,
-            int startOffset,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            boolean countRecordsPairedMatch)
-    {
-        Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-        byte[] byteMap = dfa.bytemap;
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        Object[] stateRefs = pairedStateRefArrays[dfa.stateIndex(startOffset)];
-        int position = textBegin;
-
-        while (position + 1 < textEnd) {
-            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
-                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            Object nextRef = getStateReference(stateRefs, pairedClass);
-            if (nextRef == null) {
-                return searchForwardPairsAfterMiss(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateRefs,
-                        endMatch,
-                        wantEarliestMatch,
-                        countRecordsPairedMatch);
-            }
-            stateRefs = (Object[]) nextRef;
-            position += 2;
-        }
-
-        // Paired rows are complete when published, so their row metadata needs no check.
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
-    }
-
-    // Copied as `searchForwardPairsFlatAfterMiss`; keep the copy in step.
-    private static long searchForwardPairsAfterMiss(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            Object[] stateRefs,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            boolean countRecordsPairedMatch)
-    {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        if (dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
-                !endMatch &&
-                !wantEarliestMatch) {
-            int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-            byte[] byteMap = dfa.bytemap;
-            long pairedTransition = decodePairedTransition(
-                    tables,
-                    stateOffset,
-                    byteMap[bytes[position] & 0xFF] & 0xFF,
-                    byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            int outcome = (int) pairedTransition;
-            if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
-                long result = searchForwardPairsAfterMatch(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        pairedTransition,
-                        endMatch,
-                        wantEarliestMatch);
-                if (result >= 0) {
-                    // A count records the match in its own streak; the flag needs a nonempty match.
-                    if (countRecordsPairedMatch && result > 0) {
-                        return result | COUNT_PAIRED_MATCH_FLAG;
-                    }
-                    dfa.recordPairedSearch((int) result);
-                }
-                return result;
-            }
-        }
-
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
-    }
-
-    // Copied as `searchForwardPairsFlatAfterMatch`; keep the copy in step.
-    private static long searchForwardPairsAfterMatch(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            long pairedTransition,
-            boolean endMatch,
-            boolean wantEarliestMatch)
-    {
-        int consumedBytes = (int) pairedTransition;
-        return searchForwardPairsFromState(
-                dfa,
-                tables,
-                bytes,
-                resultBegin,
-                position + consumedBytes,
-                textEnd,
-                ctxEnd,
-                (int) (pairedTransition >>> 32),
-                position + consumedBytes - 1,
-                endMatch,
-                wantEarliestMatch);
-    }
-
-    // Continues a first-match search from a state reached with a pending match, stepping two
-    // bytes at a time through match transitions. The result is measured from resultBegin.
-    // Copied as `searchForwardPairsFlatFromState`; keep the copy in step.
-    private static long searchForwardPairsFromState(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            int stateOffset,
-            int lastMatchBoundary,
-            boolean endMatch,
-            boolean wantEarliestMatch)
-    {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        long pairedTransition;
-        Object[] stateRefs;
-
-        while (true) {
-            int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position, textEnd, stateOffset);
-            // Computing the loop's exit bytes may have published grown tables.
-            tables = dfa.tablesAfterWrite(tables);
-            if (matchingSelfLoopEnd != position) {
-                countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
-                position = matchingSelfLoopEnd;
-                lastMatchBoundary = position - 1;
-            }
-
-            stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
-            if (stateRefs == null) {
-                return searchForwardContinuation(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateOffset,
-                        false,
-                        lastMatchBoundary,
-                        endMatch,
-                        wantEarliestMatch);
-            }
-            pairedTransition = 0;
-
-            while (position + 1 < textEnd) {
-                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
-                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
-                int pairedClass = (firstClass * nextSize) + secondClass;
-                Object nextRef = getStateReference(stateRefs, pairedClass);
-                if (nextRef != null) {
-                    stateRefs = (Object[]) nextRef;
-                    position += 2;
-                    continue;
-                }
-
-                stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-                pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
-                int outcome = (int) pairedTransition;
-                switch (outcome) {
-                    case PAIR_MATCH_FIRST, PAIR_MATCH_SECOND -> {}
-                    case PAIR_DEAD -> {
-                        return finalizeResult(resultBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                    case PAIR_FULL_MATCH -> {
-                        return finalizeResult(resultBegin, textEnd, endMatch, true, textEnd, true);
-                    }
-                    case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
-                        stateOffset = (int) (pairedTransition >>> 32);
-                        position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
-                        if (stateRefs == null) {
-                            return searchForwardContinuation(
-                                    dfa,
-                                    tables,
-                                    bytes,
-                                    resultBegin,
-                                    position,
-                                    textEnd,
-                                    ctxEnd,
-                                    stateOffset,
-                                    false,
-                                    lastMatchBoundary,
-                                    endMatch,
-                                    wantEarliestMatch);
-                        }
-                        pairedTransition = 0;
-                        continue;
-                    }
-                    case PAIR_UNCOMPUTED -> {
-                        return searchForwardContinuation(
-                                dfa,
-                                tables,
-                                bytes,
-                                resultBegin,
-                                position,
-                                textEnd,
-                                ctxEnd,
-                                stateOffset,
-                                false,
-                                lastMatchBoundary,
-                                endMatch,
-                                wantEarliestMatch);
-                    }
-                    default -> throw new AssertionError("Unexpected paired transition outcome: " + outcome);
-                }
-                break;
-            }
-
-            if (pairedTransition != 0) {
-                int consumedBytes = (int) pairedTransition;
-                stateOffset = (int) (pairedTransition >>> 32);
-                lastMatchBoundary = position + consumedBytes - 1;
-                position += consumedBytes;
-                continue;
-            }
-            stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-            return searchForwardContinuation(
-                    dfa,
-                    tables,
-                    bytes,
-                    resultBegin,
-                    position,
-                    textEnd,
-                    ctxEnd,
-                    stateOffset,
-                    false,
-                    lastMatchBoundary,
-                    endMatch,
-                    wantEarliestMatch);
-        }
-    }
-
-    // searchForwardPairs on the flat paired table that FLAT_PAIRED_ROWS selects. Each step adds
-    // the pair's byte offset to the row's and loads, with no scaling on the chain from one load to
-    // the next. Copied as `searchForwardPairs`; keep the copy in step.
+    // it with COUNT_PAIRED_MATCH_FLAG for the count to record. Each step adds the pair's byte
+    // offset to the row's and loads, with no scaling on the chain from one load to the next.
     static long searchForwardPairsFlat(
             DfaInstance dfa,
             CacheTables tables,
@@ -3820,7 +3517,8 @@ final class Dfa
                 wantEarliestMatch);
     }
 
-    // searchForwardPairsFromState on the flat paired table that FLAT_PAIRED_ROWS selects. Copied
+    // Continues a first-match search from a state reached with a pending match, stepping two
+    // bytes at a time through match transitions. The result is measured from resultBegin. Copied
     // as `searchForwardPairsFromState`; keep the copy in step.
     private static long searchForwardPairsFlatFromState(
             DfaInstance dfa,
@@ -5782,16 +5480,13 @@ final class Dfa
         // assertion that decodes the text have the second.
         final StateData[][] startAfterCarriageReturn;
         final StateData[][] startAfterNonAscii;
-        // Paired rows in the form FLAT_PAIRED_ROWS selects; the other form's fields stay null. The
-        // selected form is built whole before publication and never written after. The object rows,
-        // pairedStateRefArrays, are indexed by stateIndex and sized at the last rebuild; unselected
-        // rows are null. In the flat form, pairedRowOffsets is indexed the same way and holds the byte
-        // offset of the state's row in flatPairedRows, or NO_PAIRED_ROW for an unselected state.
+        // Paired rows, built whole before publication and never written after. pairedRowOffsets is
+        // indexed by stateIndex, sized at the last rebuild, and holds the byte offset of the state's
+        // row in flatPairedRows, or NO_PAIRED_ROW for an unselected state.
         // flatPairedRows, a segment over an int array, holds one row of `nextSize * nextSize + 1`
         // ints for each selected state: for each pair of byte classes the byte offset of the row that
         // pair reaches, or NO_PAIRED_ROW, then the state's offset in `transitions`. Byte offsets keep
         // the scaling off a step's chain of dependent loads.
-        final Object[][] pairedStateRefArrays;
         final int[] pairedRowOffsets;
         final MemorySegment flatPairedRows;
         final AbsolutePointerTransitions absolutePointerTransitions;
@@ -5808,7 +5503,6 @@ final class Dfa
                 StateData[][] startAfterNonWord,
                 StateData[][] startAfterCarriageReturn,
                 StateData[][] startAfterNonAscii,
-                Object[][] pairedStateRefArrays,
                 int[] pairedRowOffsets,
                 MemorySegment flatPairedRows,
                 AbsolutePointerTransitions absolutePointerTransitions)
@@ -5824,7 +5518,6 @@ final class Dfa
             this.startAfterNonWord = startAfterNonWord;
             this.startAfterCarriageReturn = startAfterCarriageReturn;
             this.startAfterNonAscii = startAfterNonAscii;
-            this.pairedStateRefArrays = pairedStateRefArrays;
             this.pairedRowOffsets = pairedRowOffsets;
             this.flatPairedRows = flatPairedRows;
             this.absolutePointerTransitions = absolutePointerTransitions;
@@ -5832,7 +5525,7 @@ final class Dfa
 
         private boolean hasPairedRows()
         {
-            return FLAT_PAIRED_ROWS ? flatPairedRows != null : pairedStateRefArrays != null;
+            return flatPairedRows != null;
         }
 
         // Empty tables sized for `stateCapacity` states: no states, start states, paired rows, or
@@ -5860,7 +5553,6 @@ final class Dfa
                     nonAsciiStarts ? new StateData[2][2] : null,
                     null,
                     null,
-                    null,
                     null);
         }
 
@@ -5878,13 +5570,12 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
                     pairedRowOffsets,
                     flatPairedRows,
                     absolutePointerTransitions);
         }
 
-        private CacheTables withPairedRows(Object[][] pairedStateRefArrays, int[] pairedRowOffsets, MemorySegment flatPairedRows)
+        private CacheTables withPairedRows(int[] pairedRowOffsets, MemorySegment flatPairedRows)
         {
             return new CacheTables(
                     transitions,
@@ -5898,7 +5589,6 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
                     pairedRowOffsets,
                     flatPairedRows,
                     absolutePointerTransitions);
@@ -5918,7 +5608,6 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
                     pairedRowOffsets,
                     flatPairedRows,
                     absolutePointerTransitions);
@@ -8119,7 +7808,7 @@ final class Dfa
             // superseded reference) follow it, and an error in them abandons the segment uncounted.
             CacheTables newTables = tables;
             if (releasePairedTransitions) {
-                newTables = newTables.withPairedRows(null, null, null);
+                newTables = newTables.withPairedRows(null, null);
             }
             if (absolutePointerGrowth != null) {
                 newTables = newTables.withAbsolutePointerTransitions(absolutePointerGrowth.transitions());
@@ -8176,9 +7865,7 @@ final class Dfa
 
         boolean hasPairedTransitions(CacheTables tables, int stateOffset)
         {
-            return FLAT_PAIRED_ROWS
-                    ? pairedRowOffset(tables.pairedRowOffsets, stateIndex(stateOffset)) >= 0
-                    : pairedStateReferences(tables.pairedStateRefArrays, stateIndex(stateOffset)) != null;
+            return pairedRowOffset(tables.pairedRowOffsets, stateIndex(stateOffset)) >= 0;
         }
 
         private void recordPairedSearch(int searchedBytes)
@@ -8224,7 +7911,8 @@ final class Dfa
         // Returns the tables the search reads next: these, or the current ones after a release.
         CacheTables requestPairedTransitions(CacheTables tables)
         {
-            if (pairedTransitionsRequested) {
+            // Only aarch64 pairs rows; elsewhere a search never requests them.
+            if (!FLAT_PAIRED_ROWS || pairedTransitionsRequested) {
                 return tables;
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
@@ -8372,23 +8060,7 @@ final class Dfa
                 }
                 return transitionCount;
             }
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
-                return 0;
-            }
-
-            int transitionCount = 0;
-            for (Object[] pairedStateRefArray : pairedStateRefArrays) {
-                if (pairedStateRefArray == null) {
-                    continue;
-                }
-                for (int pairedClass = 0; pairedClass < pairedClassCount; pairedClass++) {
-                    if (pairedStateRefArray[pairedClass] != null) {
-                        transitionCount++;
-                    }
-                }
-            }
-            return transitionCount;
+            return 0;
         }
 
         int selfLoopTransitionCount()
@@ -8428,7 +8100,7 @@ final class Dfa
             return continuationCount;
         }
 
-        // The offsets of the states with a paired row, in either form.
+        // The offsets of the states with a paired row.
         private int[] pairedRowStateOffsets(CacheTables tables)
         {
             MemorySegment flatPairedRows = tables.flatPairedRows;
@@ -8440,18 +8112,7 @@ final class Dfa
                 }
                 return stateOffsets;
             }
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
-                return new int[0];
-            }
-            int[] stateOffsets = new int[pairedStateRefArrays.length];
-            int rowCount = 0;
-            for (Object[] pairedStateRefs : pairedStateRefArrays) {
-                if (pairedStateRefs != null) {
-                    stateOffsets[rowCount++] = ((StateData) pairedStateRefs[nextSize * nextSize]).offset();
-                }
-            }
-            return Arrays.copyOf(stateOffsets, rowCount);
+            return new int[0];
         }
 
         int matchingSelfLoopScanCount()
@@ -8718,57 +8379,13 @@ final class Dfa
 
             // Allocate the new tables before charging, so a failed allocation leaves the charge
             // unchanged; the rows are complete before the tables publish them.
-            CacheTables pairedTables = FLAT_PAIRED_ROWS
-                    ? buildPairedRowOffsets(tables, stateLimit, selectedRows, selectedRowCount)
-                    : buildPairedStateRefArrays(tables, stateLimit, selectedRows);
+            CacheTables pairedTables = buildPairedRowOffsets(tables, stateLimit, selectedRows, selectedRowCount);
             if (pairedTables == null) {
                 return;
             }
             availableStateMemory -= memory;
             pairedTransitionMemory = memory;
             this.tables = pairedTables;
-        }
-
-        // Tables publishing object rows for the selected states, or null when no pair reaches a
-        // selected row.
-        private CacheTables buildPairedStateRefArrays(CacheTables tables, int stateLimit, boolean[] selectedRows)
-        {
-            StateData[] stateData = tables.stateData;
-            Object[][] stateRefArrays = tables.stateRefArrays;
-            int pairedClassCount = nextSize * nextSize;
-            Object[][] pairedRows = new Object[stateLimit][];
-            for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                if (selectedRows[stateIndex]) {
-                    pairedRows[stateIndex] = new Object[pairedClassCount + 1];
-                    pairedRows[stateIndex][pairedClassCount] = stateData[stateIndex];
-                }
-            }
-
-            int transitionCount = 0;
-
-            for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                Object[] source = stateRefArrays[stateIndex];
-                Object[] sourcePairs = pairedRows[stateIndex];
-                if (sourcePairs == null) {
-                    continue;
-                }
-                for (int firstClass = 0; firstClass < nextSize; firstClass++) {
-                    if (!(source[firstClass] instanceof Object[] intermediate)) {
-                        continue;
-                    }
-                    for (int secondClass = 0; secondClass < nextSize; secondClass++) {
-                        if (intermediate[secondClass] instanceof Object[] target) {
-                            StateData targetData = (StateData) target[nextSize];
-                            Object[] pairedTarget = pairedRows[stateIndex(targetData.offset())];
-                            sourcePairs[(firstClass * nextSize) + secondClass] = pairedTarget;
-                            if (pairedTarget != null) {
-                                transitionCount++;
-                            }
-                        }
-                    }
-                }
-            }
-            return transitionCount == 0 ? null : tables.withPairedRows(pairedRows, null, null);
         }
 
         // Tables publishing the flat paired table for the selected states, or null when no pair
@@ -8816,7 +8433,7 @@ final class Dfa
                     }
                 }
             }
-            return transitionCount == 0 ? null : tables.withPairedRows(null, pairedRowOffsets, MemorySegment.ofArray(flatPairedRows));
+            return transitionCount == 0 ? null : tables.withPairedRows(pairedRowOffsets, MemorySegment.ofArray(flatPairedRows));
         }
 
         // Allocates the requested pointer table, or allocates a withheld one again. Sizing that does
@@ -9194,10 +8811,8 @@ final class Dfa
         // most every state's.
         private int maximumPairedRows(int stateLimit, long maximumMemory)
         {
-            long rowMemory = FLAT_PAIRED_ROWS ? pairedRowBytes() : pairedRowMemory();
-            int maximumRows = (int) Math.min(stateCount, (maximumMemory - pairedTransitionMemory(stateLimit, 0)) / rowMemory);
-            // Aligning the flat table's size can add up to four bytes, less than one row; the object
-            // rows' charge is exact.
+            int maximumRows = (int) Math.min(stateCount, (maximumMemory - pairedTransitionMemory(stateLimit, 0)) / pairedRowBytes());
+            // Aligning the flat table's size can add up to four bytes, less than one row.
             if (pairedTransitionMemory(stateLimit, maximumRows) > maximumMemory) {
                 maximumRows--;
             }
@@ -9206,17 +8821,14 @@ final class Dfa
 
         // The charge for a paired table with `rowCount` rows for `stateLimit` states: the flat
         // table's two int arrays, without the segment view over the second, as for the heap pointer
-        // table, or the object rows counted with eight-byte references.
+        // table.
         private long pairedTransitionMemory(int stateLimit, int rowCount)
         {
-            if (FLAT_PAIRED_ROWS) {
-                return sizeOfIntArray(stateLimit) + sizeOfIntArray(rowCount * pairedRowLength());
-            }
-            return pairedOuterMemory(stateLimit) + (rowCount * pairedRowMemory());
+            return sizeOfIntArray(stateLimit) + sizeOfIntArray(rowCount * pairedRowLength());
         }
 
-        // A paired row: one slot for each pair of byte classes, then the state, which the flat form
-        // holds as its offset in `transitions`.
+        // A paired row: one slot for each pair of byte classes, then the state's offset in
+        // `transitions`.
         private int pairedRowLength()
         {
             return (nextSize * nextSize) + 1;
@@ -9227,22 +8839,11 @@ final class Dfa
             return pairedRowLength() * Integer.BYTES;
         }
 
-        private long pairedOuterMemory(int stateLimit)
-        {
-            return alignToEight(16L + (long) stateLimit * CONSERVATIVE_REFERENCE_BYTES);
-        }
-
-        private long pairedRowMemory()
-        {
-            int pairedClassCount = nextSize * nextSize;
-            return alignToEight(16L + ((long) pairedClassCount + 1) * CONSERVATIVE_REFERENCE_BYTES);
-        }
-
         private void clearPairedTransitions()
         {
             CacheTables tables = this.tables;
             if (tables.hasPairedRows()) {
-                this.tables = tables.withPairedRows(null, null, null);
+                this.tables = tables.withPairedRows(null, null);
                 // The rows' refund follows the tables without them, as in `allocateCachedState`.
                 // Only tables with paired rows carry their charge.
                 VarHandle.storeStoreFence();
@@ -9250,11 +8851,6 @@ final class Dfa
             availableStateMemory += pairedTransitionMemory;
             pairedTransitionMemory = 0;
             pairedContentVersion = -1;
-        }
-
-        private static long alignToEight(long value)
-        {
-            return (value + 7) & ~7L;
         }
 
         StateData analyzeStart(CacheTables tables, Slice context, int textBegin, int textEnd, boolean anchored, boolean runForward)
@@ -9869,7 +9465,7 @@ final class Dfa
                     cacheContentVersion,
                     availableStateMemory,
                     retainedStateMemory,
-                    FLAT_PAIRED_ROWS ? tables.flatPairedRows : tables.pairedStateRefArrays,
+                    tables.flatPairedRows,
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
                     pairedContentVersion,

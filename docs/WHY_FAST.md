@@ -176,12 +176,10 @@ forward searches can use a
 that holds the composed transition for each pair of byte classes (as in RE2,
 bytes the pattern treats alike share a class), so one load advances two bytes.
 
-For object rows, the whole table is built only when it fits an estimated
-64 KiB, or less when the DFA's budget has less room; otherwise the DFA pairs
-two rows within 16 KiB. On aarch64 the rows are one flat table of byte
-offsets, charged its real size, about half the object-row estimate, within
-32 KiB, or 8 KiB for two rows, so it pairs graphs the object-row estimate
-rejects. The two rows are chosen from the DFA's cached start states and the
+Only aarch64 pairs rows; x86 and other platforms search unpaired. The rows are
+one flat table of byte offsets, built whole only when it fits 32 KiB, or less
+when the DFA's budget has less room; otherwise the DFA pairs two rows within
+8 KiB. The two rows are chosen from the DFA's cached start states and the
 states that loop on themselves, but only when exactly two qualify or the
 budget has room for only two. Paired rows and the pointer table never run
 together: the pointer table waits while paired rows exist, and once a pointer
@@ -194,8 +192,8 @@ Brodie, Taylor, and Cytron first described the composed two-byte transition in
 and Hyperscan, none composes a general two-byte transition table; Hyperscan's
 McClellan wide states, which collapse linear chains of states, are the closest
 analog. On the Trino and Java Sherlock `word-ending-n` book-text searches with
-native access, paired rows took about 18% less time than the pointer table on
-Graviton, and a few percent less on Intel, on object rows.
+native access, paired object rows, since removed, took about 18% less time
+than the pointer table on Graviton, and a few percent less on Intel.
 
 **Self-loops.** Many searches spend long runs in a state that loops on itself,
 such as the `\C*` in RE2's `a\C*b` or UTF-8 `[^\n]*`. With the Vector API, a

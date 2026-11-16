@@ -1079,10 +1079,8 @@ for small DFA graphs. The table is demand-built only after a search of at least
 and is charged against the DFA state budget. Normal state allocation discards
 the table before reporting budget exhaustion.
 
-The table takes one of two forms, chosen once at class initialization by
-platform. On every platform but aarch64, each selected state has an object row
-holding the row each pair of byte classes reaches and then the state. On
-aarch64, the rows live in one flat `int` array, one row for each selected state
+Only aarch64 pairs rows, chosen once at class initialization by platform. The
+rows live in one flat `int` array, one row for each selected state
 holding the byte offset of the row each pair reaches and then the state's offset
 in the DFA's transitions, plus an array of each state's row offset. The search
 reads the flat array through a heap memory segment, as the heap pointer table
@@ -1094,40 +1092,30 @@ byte offset to the row's and loads, with no scaling between one load and the
 next. On r9g (Graviton 4) the flat step ran paired rows 9-21% faster than object
 rows, in rebar and in all four JMH languages. On r8i the same rows ran 3-72%
 slower, slow in 12 of 12 fresh JVMs, because C2 kept the loop-carried row offset
-in a vector register. Object rows on r8i run in a fast or a slow mode by launch;
-a flat table read as a plain `int` array, whose step scales each index, removed
-that variance but cost r9g 6-18%. No single form won on both hosts, so each of
-them keeps the form it runs faster. Only r9g and r8i were measured: Graviton 2
-and 3, Apple, and other aarch64 hosts get the flat form by `os.arch` without
-measurement, and every x86 host keeps object rows. The
-`io.airlift.regulator.dfa.flat-paired-rows` system property overrides the form
-for a run, as a testing and diagnostic switch. Tests run
-`TestDfaPairedTransitions`' cases in both forms on every host: child JVMs force
-the property each way.
+in a vector register, so x86 and every other platform search unpaired. Only r9g
+and r8i were measured: Graviton 2 and 3, Apple, and other aarch64 hosts pair by
+`os.arch` without measurement. The `io.airlift.regulator.dfa.flat-paired-rows`
+system property turns pairing on or off for a run, as a testing and diagnostic
+switch. Tests run `TestDfaPairedTransitions`' cases both ways on every host:
+child JVMs force the property each way, and cases that need paired rows skip
+when pairing is off.
 
-Object rows are charged a retained-size estimate with eight-byte references that
-includes each row's header, capped at 64 KiB. The flat table is charged its two
-arrays' sizes, capped at 32 KiB. Its segment view, about 72 bytes with
+The flat table is charged its two arrays' sizes, capped at 32 KiB. Its segment view, about 72 bytes with
 compressed oops (the `MemorySegment` and its heap session), is not charged, as
-the heap pointer table's is not. The flat slots take four bytes where the
-estimate counts eight, and the flat rows have no header, so under its cap the
-flat table pairs complete tables of more states. On the default 64-bit layout
-with compressed oops, at a `maxMemory` of 8 MiB, `^x*(a[01]{280}|a)` pairs all
-283 of its states on the flat table, charged 30,600 bytes, and none as object
-rows, whose estimate of 65,680 bytes exceeds 64 KiB. Where the DFA's free state
-budget is the smaller limit, both forms share it, so the flat table fits about
-twice the rows: at a `maxMemory` of 17 KiB, `(?s).*x` pairs all five of its
-states on the flat table and two as object rows. These absolute caps are
+the heap pointer table's is not. On the default 64-bit layout with compressed
+oops, at a `maxMemory` of 8 MiB, `^x*(a[01]{280}|a)` pairs all 283 of its
+states, charged 30,600 bytes. Where the DFA's free state budget is the smaller
+limit, it bounds the table: at a `maxMemory` of 17 KiB, `(?s).*x` pairs all
+five of its states. These absolute caps are
 independent of the configured memory budget: larger budgets must not enable
 cache-hostile global transition expansion. When the complete graph does not fit,
-partial pairing is limited to exactly two selected rows and 16 KiB of object
-rows or 8 KiB of flat table. Selection considers cached forward entry states
+partial pairing is limited to exactly two selected rows and 8 KiB. Selection considers cached forward entry states
 before states with observed self-loops. Broader and larger partial tables remain
 on the compact path to bound retained memory and avoid cache-hostile global
 transition expansion.
 
-The cache root holds both forms' fields on every platform, so the unused pair
-costs each DFA 8 bytes of state budget with compressed oops (16 without),
+The cache root holds the table's fields on every platform, so off aarch64 they
+cost each DFA 8 bytes of state budget with compressed oops (16 without),
 charged as fixed overhead.
 
 The paired loop decodes already-computed normal, dead, full-match, and match

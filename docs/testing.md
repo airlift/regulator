@@ -51,11 +51,11 @@ or protected matching loops require the benchmark evidence defined in
 `TestDfaCopyOnResetStress` runs for `-Dregulator.stress.seconds=N` seconds (default 5).
 
 `-Dregulator.vectorJvmArgument=-Dio.airlift.regulator.dfa.flat-paired-rows=false`
-(or `true`) runs the suite with DFA paired rows in that form instead of the
-host's. It takes the place of any vector-width argument CI passes in the same
+(or `true`) runs the suite with DFA paired rows off (or on) instead of the
+host's choice. It takes the place of any vector-width argument CI passes in the same
 property, so to set both, put them in one quoted value.
 `TestDfaAbsolutePointerTransitions` already runs `TestDfaPairedTransitions`'
-cases in both forms.
+cases both ways.
 
 `TestJavaRegexpFuzz`, `TestTrinoRegexpFuzz`, `TestRe2Fuzz`,
 `TestRustRegexpFuzz`, and `TestTrinoLikeFuzz` compare random patterns and inputs
