@@ -1199,7 +1199,7 @@ public class TestTrinoRegexpLanguage
 
         TrinoCompiledPattern fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).re2();
         assertThat(fullFold.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
-        assertThat(fullFold.reverseProgramSize()).isEqualTo(-1);
+        assertThat(fullFold.reverseProgramSize()).isGreaterThan(0);
 
         TrinoCompiledPattern simpleFold = TrinoRegexp.compile(utf8Slice("(?i)hello")).re2();
         assertThat(simpleFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();

@@ -5710,9 +5710,9 @@ database to a new Unicode version; do not remove newly supported folds merely
 to retain Joni's old table contents.
 
 Literals that require full folding compile to a shared-suffix graph whose size
-is linear in the folded literal length. Patterns
-that need only simple folding retain the ordinary compiler and reverse-program
-routes.
+is linear in the folded literal length, and the reverse program that finds
+match starts mirrors it. Patterns that need only simple folding retain the
+ordinary compiler and lowered-program routes.
 
 Case-insensitive character classes fold in Joni's order. A bracket class's
 members, nested classes, and set operations are evaluated without folding, and
@@ -5727,8 +5727,7 @@ of a member's multi-character fold, as Joni's class string alternatives do:
 class and never merges with adjacent pattern literals, so `(?i)[ß]s` does not
 match `sß`. A negated class consumes one character. Each spelling is built
 from plain classes rather than a full-fold literal, so a class such as
-`(?i)[ß]` keeps the reverse program and lowered program that full folding
-would disable.
+`(?i)[ß]` keeps the lowered program that full folding would disable.
 
 A run of literal characters written next to each other under the same
 case-insensitivity folds as one sequence: its Unicode 18.0 full case folding
