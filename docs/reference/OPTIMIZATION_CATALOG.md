@@ -1266,8 +1266,9 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   Trino final-line `$`, and Java `$` under `UNIX_LINES` (`(?d)`), with
   group-zero bounds only when the expression is nonempty and cannot consume
   LF. After 4 DFA quits in a row, a matcher skips the DFA for the rest of its
-  input. A quit is settled only in a pattern whose matches have a longest
-  length, by a cursor that searches the literal itself, and a settle the
+  input; its group-zero forward cursor counts toward the same streak and is
+  skipped with the DFA. A quit is settled only in a pattern whose matches have
+  a longest length, by a cursor that searches the literal itself, and a settle the
   cursor's work budget cannot cover falls back; a pattern with no longest
   match, such as `\bfoo\w*`, and a cursor that scans for a folded start run
   keep the streak. A transition that must quit throws before taking the lock and is never
@@ -1287,7 +1288,9 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   decoding engines and the cursor resumes after it, so one `É` beside an
   early occurrence no longer sends a count of `\bgot(?i)syou` over 899 KB of
   English to the NFA: it now runs at 0.0016 to 0.0027 of its earlier time on
-  Graviton and Intel, in Rust, Java, and Trino ([#242]).
+  Graviton and Intel, in Rust, Java, and Trino ([#242]). The group-zero forward
+  cursor runs these programs too, and a find whose cursor quits skips the
+  DFA on its fallback rather than running it again.
 
 ### Thrashing DFA skipped across calls
 
