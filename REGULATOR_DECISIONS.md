@@ -2069,8 +2069,10 @@ matcher](#fixed-width-rare-class-candidates), on a [large literal
 set](#large-literal-alternations) that compiled no program, whose every
 operation runs the automaton, on a capture-free exact literal in RE2, Java,
 and Rust, whose unanchored one-shot searches use its exact-literal span
-search, and on a `.*literal.*` pattern in RE2, Java, and Rust, whose
-unanchored searches run the dot-star literal matcher below. A
+search, on a fixed-width pattern in RE2, Java, and Rust, whose unanchored
+one-shot searches run the fixed-width matcher below, and on a `.*literal.*`
+pattern in RE2, Java, and Rust, whose unanchored searches run the dot-star
+literal matcher below. A
 group-zero matcher of a one-byte pattern finds on the single-byte table in every
 language, Trino's included, while fewer than 64 bytes are left; a longer search
 runs the group-zero forward cursor, whose vector byte scan the table replaced,
@@ -2089,6 +2091,11 @@ and runs through the compiled pattern, which holds the program it bails to. A
 group-zero `RegexpMatcher.find()` of a fixed-width pattern, or of
 a [large literal alternation](#large-literal-alternations), searches the same
 matcher in every language, while Trino's span subtypes iterate theirs directly.
+The unanchored one-shot searches of a fixed-width pattern in RE2, Java, and
+Rust, such as `findInto`, search it too. These calls paid the general engine's
+setup for the same span; on short everyday rows such as ISO dates, that was a
+literal scan whose hit was thrown away and one or two DFA entries. A search
+that bails runs again on the general engine from its start.
 A literal alternation's matcher searches by itself only while fewer than 64
 bytes are left, and a longer search takes the program's search, whose
 start-byte scan the matcher replaced: the DFA's candidate cursor, which the

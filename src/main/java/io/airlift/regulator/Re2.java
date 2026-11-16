@@ -933,6 +933,21 @@ public sealed class Re2
         {
             return countOnFixedWidth(text);
         }
+
+        @Override
+        boolean matchInto(Slice text, int start, int end, Anchor anchor, int[] groups)
+        {
+            // The span search runs here, not in a shared helper; see oneShotFixedWidth.
+            FixedWidthByteSpanMatcher fixedWidth = oneShotFixedWidth(text, start, end, anchor, groups);
+            if (fixedWidth == null) {
+                return super.matchInto(text, start, end, anchor, groups);
+            }
+            long span = fixedWidth.findSpanOrBail(text, start, end);
+            if (span == FixedWidthByteSpanMatcher.BAILED) {
+                return super.matchInto(text, start, end, anchor, groups);
+            }
+            return setOneShotSpanGroups(span, groups);
+        }
     }
 
     /// A pattern of the [class-run shape][Shape#CLASS_RUN].
