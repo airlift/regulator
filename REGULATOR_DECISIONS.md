@@ -2203,6 +2203,9 @@ contains keeps its own ordered-literal subtype, which reads any bytes in its
 `(?s:.)` gaps under its garbage-in, garbage-out rule; no Trino pattern takes the
 plan, since Trino reads only UTF-8 and has no dot that matches any byte.
 
+The simplification sweep removed the literal-neighbor plan below; such a pattern
+takes the ordinary engine. The record describes the removed plan.
+
 Full-Slice boolean `find` of a class run, a literal, and a class run, such as
 lh3lh3's email `([^ @]+)@([^ @]+)`, decides from the byte on each side of each
 hit of the literal, in every language. A match exists exactly where some hit
@@ -2565,10 +2568,7 @@ mixed line lengths, 1.06x the time without required bytes on r9g and 1.04–1.06
 on r8i for lh3lh3 lines under 128 bytes, although each length range alone tied.
 Where the pattern qualifies under `CompiledPattern.runsInnerLiteralSearchFirst`,
 a gated one-byte search, which checks every window, replaces the check of its
-own byte: it runs first in the ordinary engine's full-Slice boolean find, which,
-for a pattern on the [literal-neighbor
-plan](#boolean-partial-match-specializations), runs only when that matcher
-leaves the find undecided, and the pattern keeps no single required byte for it.
+own byte: it runs first in the ordinary engine's full-Slice boolean find, and the pattern keeps no single required byte for it.
 A check that passes never decides the line and costs about 100 instructions per
 line, so with it lh3lh3's date lines of 64 to 127 bytes, which hold `/`, took
 1.08–1.12x their time without the check, while the search's scan decides the
@@ -2804,8 +2804,7 @@ setup. An exact literal, or one-of bytes, of a pattern with no other literal
 route checks long windows too. A route that starts where a match starts, or a
 scan plan, keeps a pattern from that check, and such a pattern checks long
 windows instead for its rarest exact literal that the route does not already
-search for; the literal-neighbor find plan is no such route, since the
-pattern's other operations keep the ordinary engine. Both checks are
+search for. Both checks are
 described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
@@ -3249,9 +3248,6 @@ literal search but one that only the
 [class-run proof](#inner-literal-class-run-prefix) admits. Such a pattern
 decides as it would without that search, so the proof neither adds the check nor
 takes it away. Nor does the
-[literal-neighbor find plan](#boolean-partial-match-specializations) take the
-check away: it answers full-Slice boolean find alone, and the pattern's other
-operations keep the ordinary engine. Nor does the
 [window literal search](#window-literal-search): BitState's capture of groups
 and a find that skips the DFA never run it, and without the check
 `((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz` that the check

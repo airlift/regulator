@@ -28,7 +28,6 @@ import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
-import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -823,13 +822,11 @@ public class TestRequiredBytes
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
         }
 
-        // Nor is the literal-neighbor find plan, which answers full-Slice boolean find alone: the
-        // matcher and count reject a long window that lacks the literal before any engine runs, as
-        // without the plan.
+        // `[a-z]+aa[a-z]+` keeps the check too: the matcher and count reject a long window that
+        // lacks the literal before any engine runs.
         for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+aa[a-z]+").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
-            assertThat(pattern.findPlanForDiagnostics()).as(language).isEqualTo(LITERAL_NEIGHBORS);
             assertThat(pattern.longWindowRequiredLiteral()).as(language).isNotNull();
             assertThat(pattern.count(utf8Slice(LONG_FILLER))).as(language).isZero();
             assertNoForwardDfa(pattern, language + " [a-z]+aa[a-z]+ count");
@@ -842,7 +839,6 @@ public class TestRequiredBytes
         // RE2's longest-match `[a-z]+::[0-9]+` has no inner literal search, so without the check
         // its count would build the DFA.
         Re2 longest = Re2.compile(utf8Slice("[a-z]+::[0-9]+"), Re2.Options.defaults().setLongestMatch(true));
-        assertThat(longest.findPlanForDiagnostics()).isEqualTo(LITERAL_NEIGHBORS);
         assertThat(longest.innerLiteralSearchForDiagnostics()).isNull();
         assertThat(longest.longWindowRequiredLiteral()).isNotNull();
         assertThat(longest.count(utf8Slice("x".repeat(512)))).isZero();

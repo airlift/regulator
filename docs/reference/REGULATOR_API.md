@@ -219,8 +219,8 @@ Within the budget, compilation and matching keep these limits:
   not fit is dropped, and the pattern searches without one. A DFA that fails
   to initialize is remembered, so later searches do not try to build it again.
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
-  bytes outside Trino, the dot-star literal, byte-gap ordered-literal, and
-  literal-neighbor matchers, the root skip, dense rows, and skip table of a
+  bytes outside Trino, the dot-star literal and byte-gap ordered-literal
+  matchers, the root skip, dense rows, and skip table of a
   large literal set, OnePass tables needed only for Java's or Trino's final-line
   end anchors, the bit-parallel position automaton, which searches in place of
   the Pike NFA once the forward DFA cannot initialize or abandons a search, and
@@ -316,10 +316,7 @@ together in a window of at least 64 bytes when that search fits beside the
 forward DFAs and otherwise, as for a one-byte literal, uses `Slice.indexOf`,
 nor any language's dot-star literal spans, which share that search, nor ordered
 literals such as `a(?s:.*)b` in any language whose gaps there read any bytes,
-which use the same scan, nor the
-literal-neighbor matcher's scan for the literal of a pattern such as
-`([^ @]+)@([^ @]+)`, which scans for a one-byte literal's byte and for the first
-and last bytes of a longer one, nor the start literal filter of a pattern that
+which use the same scan, nor the start literal filter of a pattern that
 begins with a few literals, the start class filter of one that begins with a few
 narrow classes, an inner literal search's set filter, its choice of a rare class
 pair, the window literal search's choice of its literal, such as `river` in
