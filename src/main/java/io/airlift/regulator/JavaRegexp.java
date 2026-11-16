@@ -436,18 +436,20 @@ public sealed class JavaRegexp
     static final class LiteralAlternationJavaRegexp
             extends JavaRegexp
     {
+        private final boolean literalSetFind;
         private final boolean literalSetCount;
 
         private LiteralAlternationJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
+            this.literalSetFind = analysis.literalSetFind();
             this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, literalSetFind);
         }
 
         @Override
@@ -486,7 +488,7 @@ public sealed class JavaRegexp
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, true);
         }
 
         @Override

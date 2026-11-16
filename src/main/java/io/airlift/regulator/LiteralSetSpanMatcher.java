@@ -793,7 +793,7 @@ sealed class LiteralSetSpanMatcher
 
     /// Returns whether the set has a skip table, with which a search of at least
     /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] skips ahead by windows of its long literals.
-    final boolean skipsAheadForDiagnostics()
+    final boolean skipsAhead()
     {
         return skipTable != null;
     }

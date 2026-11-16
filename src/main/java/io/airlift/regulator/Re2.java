@@ -839,18 +839,20 @@ public sealed class Re2
     static final class LiteralAlternationRe2
             extends Re2
     {
+        private final boolean literalSetFind;
         private final boolean literalSetCount;
 
         private LiteralAlternationRe2(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
+            this.literalSetFind = analysis.literalSetFind();
             this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, literalSetFind);
         }
 
         @Override
@@ -889,7 +891,7 @@ public sealed class Re2
         @Override
         public boolean find(Slice input)
         {
-            return findOnLiteralAlternation(input);
+            return findOnLiteralAlternation(input, true);
         }
 
         @Override

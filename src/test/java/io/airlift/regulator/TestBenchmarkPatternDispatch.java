@@ -353,8 +353,9 @@ public class TestBenchmarkPatternDispatch
             // `[Kk]` simplifies to a folded literal, which keeps FOLDED_PAIR_SEQUENCE off the
             // fixed-width route in every language.
             case "GENERAL", "FOLDED_PAIR_SEQUENCE" -> ENGINE;
-            // The literal set serves only the matcher's find.
-            case "LITERAL_SET" -> ENGINE;
+            // The literal set serves the matcher's find and, with the skip table its long words
+            // give it, count; full-Slice find keeps the engine.
+            case "LITERAL_SET" -> LITERAL_ALTERNATION;
             // The ordered-literal find plan takes only gaps that match any bytes, and a UTF-8
             // `(?s:.)` matches no malformed UTF-8 in RE2, Java, or Rust, so these gaps keep the
             // general engine; ORDERED_LITERALS_BYTES reaches the plan.

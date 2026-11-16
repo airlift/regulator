@@ -2122,7 +2122,9 @@ ordinary engine would.
 - **Applies when:** A large literal set whose literals all have at least 4
   bytes, whose table has distance zero for at most a quarter of its hashes,
   and that fits the build's memory budget, on searches of 64 bytes or more;
-  none where the set yields its tables to the forward DFAs
+  none where the set yields its tables to the forward DFAs; in RE2, Java, and
+  Rust, a set with the table also answers full-Slice count beside its program,
+  in place of the first-match DFA
 - **What it does:** Each window, up to 16 bytes, hashes its last block of two
   or three bytes to the distance within which no literal starts, and a zero
   distance walks the trie from the window start. The walks may follow 4,096
@@ -2137,7 +2139,11 @@ ordinary engine would.
   those bytes, and a later handoff to the automaton restarts the short-scan
   count. `english-10` searches in 0.21 to 0.22 of the time without dense rows
   or a skip table, and 0.30 of the regex crate's time, at a 64 KiB table;
-  `english-15` in 0.07 to 0.15 of the time without them.
+  `english-15` in 0.07 to 0.15 of the time without them. With both, as
+  measured when the skip table landed, `english-10` full-Slice count on the
+  automaton took 0.40 to 0.60 of the program's time, so a set with the table
+  counts on it, including on inputs too short for its skip, which that
+  measurement did not cover.
 
 ### Word-run plan
 
