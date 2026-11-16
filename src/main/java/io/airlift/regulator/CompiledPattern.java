@@ -1073,7 +1073,7 @@ abstract sealed class CompiledPattern
             long searchMemory = reverseMemory - fullReverseMemory;
             long prefixMemory = Math.max(1, reverseMemory / 2);
             boolean dotStarLiteralShape = DotStarLiteralSpanMatcher.analyze(expressionAnalysis, booleanPlans.literal(), null, (flags & Regexp.LATIN1) != 0) != null;
-            InnerLiteralSearch innerLiteralSearch = dotStarLiteralShape ? null : InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding, byteFrequencies);
+            InnerLiteralSearch innerLiteralSearch = dotStarLiteralShape ? null : InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
             if (innerLiteralSearch != null) {
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }
@@ -1696,9 +1696,8 @@ abstract sealed class CompiledPattern
     }
 
     // The literals that a pattern's route searches for, which the long-window check beside it
-    // does not search for again: the scan plan's literal, which is exact, and the literal of an
-    // inner literal search for one literal, with its fold masks where it is case-insensitive,
-    // unless only the class-run proof adds that search. A leading inner literal is usually among
+    // does not search for again: the scan plan's literal and the literal of an inner literal
+    // search for one literal, both exact, unless only the class-run proof adds that search. A leading inner literal is usually among
     // the start bytes too, but their collection can stop before it, as at the assertion
     // alternation of `(?:\b|\B)Holmes.*?foobar`. The members of a literal set stay out: a search
     // for `the` or `and` does not make a check for `the` redundant, since a window may hold `and`
@@ -1710,7 +1709,7 @@ abstract sealed class CompiledPattern
         if (innerLiteralSearch != null && !innerLiteralSearch.addedByClassRunProof()) {
             byte[][] innerLiterals = innerLiteralSearch.literals();
             if (innerLiterals.length == 1) {
-                literals.add(new RequiredBytes.RouteLiteral(innerLiterals[0], innerLiteralSearch.foldedMasks()));
+                literals.add(new RequiredBytes.RouteLiteral(innerLiterals[0], null));
             }
         }
         ScanPlan scanPlan = booleanPlans.scanPlan();

@@ -20,12 +20,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Random;
-import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -132,27 +129,9 @@ public class TestInnerLiteralSearch
         assertThat(literal("\\s[a-zA-Z]{0,12}ing\\s")).isEqualTo("ing");
         assertThat(literal("\\w+(?:ab)?\\s+ing")).isEqualTo("ing");
         // Capturing groups in the top-level concatenation are looked through, as the crate's
-        // top_concat does, so an inner literal may sit inside a group. Case-insensitive ASCII
-        // letters extend the literal after its exact head, the exact bytes before the first
-        // case-insensitive letter; the literal is shown with those letters lowered.
-        assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
-        assertThat(literal("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
-        // A folded literal without an exact head, or with a head of one common byte, is searched
-        // only by the folded pair kernel, so it needs the Vector API; without it, a later literal
-        // decides. RE2's s also folds to the long s, so RE2's literal ends before it. Such a
-        // literal also gives way to a later one searched from shorter windows, as `@x` is, but not
-        // to a later element no proof admits, as the `x` after `\w+`.
-        InnerLiteralSearch commonHeadSearch = Re2.compile(utf8Slice("[a-z](?i: noqa)@x")).innerLiteralSearchForDiagnostics();
-        assertThat(literal(commonHeadSearch)).isEqualTo("@x");
-        for (Map.Entry<String, String> entry : List.of(
-                Map.entry("\\w+\\s(?i)holmes\\b", "holme"),
-                Map.entry("\\s+(?i:noqa)", "noqa"),
-                Map.entry("\\w+(?i:holmes)", "holme"),
-                Map.entry("\\w+\\s(?i:holmes)\\w+x", "holme"))) {
-            for (InnerLiteralSearch search : Arrays.asList(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics(), innerLiteralSearch(entry.getKey()))) {
-                assertThat(search == null ? null : literal(search)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable() ? entry.getValue() : null);
-            }
-        }
+        // top_concat does, so an inner literal may sit inside a group. A case-insensitive literal
+        // is no inner literal, so the exact bytes before it are searched.
+        assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# ");
         // A group that does not capture joins the top level too.
         assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
         assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
@@ -835,16 +814,8 @@ public class TestInnerLiteralSearch
                 new MinimumWindow("\\s[a-z]{0,12}(?:ing|ment)\\s", " moment ", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("[a-z](?:ing|ment)", "ament", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("\\w+\\s+Holmes", "a Holmes", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
-                new MinimumWindow("\\s*(?i:# noqa)", "# NoQA", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
                 new MinimumWindow("\\w+@", "a@", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("\\w+[?!.][\"']", "a?\"", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES)));
-        if (VectorSupport.isAvailable()) {
-            windows.add(new MinimumWindow("\\s+(?i:noqa)", " NoQa", Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES, Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES));
-            // A literal only the kernel searches gives way to a later one with a shorter minimum,
-            // here `@x`. Without the Vector API, the common byte that starts the folded group
-            // ends Java's and Rust's analysis, so they have no search there.
-            windows.add(new MinimumWindow("[a-z](?i: noqa)@x", "a NoQa@x", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES));
-        }
         for (MinimumWindow entry : windows) {
             String regex = entry.regex();
             String literal = entry.literal();
@@ -1018,19 +989,16 @@ public class TestInnerLiteralSearch
     {
         // A gated one-byte search that checks short windows runs first in the ordinary engine's
         // full-Slice find, and the pattern keeps no required bytes of its byte, which the search's
-        // scan checks: the date's `/` and the email's `@` in every language, and Trino's `=`. The
-        // email's full-Slice find reaches that route only where its literal-neighbor matcher
-        // leaves a hit undecided, or where the density sample finds its `@` dense. Elsewhere
-        // `[a-z]+=(?i:noqa)` searches for the folded `=noqa`
-        // from 96 bytes and keeps `=` as a single required byte, which checks every window shorter
-        // than 256 bytes.
+        // scan checks: the date's `/`, the email's `@`, and the `=` before a case-insensitive
+        // literal, in every language. The email's full-Slice find reaches that route only where
+        // its literal-neighbor matcher leaves a hit undecided, or where the density sample finds
+        // its `@` dense.
         for (String regex : List.of(DATE, EMAIL, NOQA_ASSIGNMENT)) {
             for (Language language : Language.values()) {
                 String description = "%s %s".formatted(language, regex);
                 CompiledPattern pattern = language.compiledPattern(regex);
-                boolean first = !regex.equals(NOQA_ASSIGNMENT) || language == Language.TRINO;
-                assertThat(Objects.toString(pattern.requiredBytesForDiagnostics(), null)).as(description).isEqualTo(first ? null : "one of =");
-                assertThat(pattern.findsInnerLiteralFirstForDiagnostics()).as(description).isEqualTo(first);
+                assertThat(pattern.requiredBytesForDiagnostics()).as(description).isNull();
+                assertThat(pattern.findsInnerLiteralFirstForDiagnostics()).as(description).isTrue();
             }
         }
         // A gated one-byte search for a byte other than the required one keeps the required byte
@@ -1101,21 +1069,12 @@ public class TestInnerLiteralSearch
         // ordinary engine in every language, as do its matcher and count routes: on lines without
         // the byte, with it where its gates fail, alone at the line's start or end, and in a match
         // near the start, where the search falls back, or at the end, at window lengths around the
-        // search's minimum, the folded `=noqa` minimum, and the required bytes' limit, beside
-        // malformed UTF-8, and in a Slice that starts and ends inside its array between bytes that
-        // would match. A case-insensitive pattern runs its search first only where it searches for
-        // `=` alone: in Trino for `noqa`, and where `s` and `k` fold to ſ and the Kelvin sign for
-        // `skip` and `kilo`. Elsewhere it searches for the folded literal and keeps `=` as a single
-        // required byte, a control. The email's full-Slice find runs its literal-neighbor matcher
+        // search's minimum and the required bytes' limit, beside malformed UTF-8, and in a Slice
+        // that starts and ends inside its array between bytes that would match. A case-insensitive
+        // pattern searches for the `=` before its literal, whether `s` and `k` fold to ſ and the
+        // Kelvin sign or not. The email's full-Slice find runs its literal-neighbor matcher
         // first, and the search-first route only where the matcher leaves a hit undecided, as
         // beside malformed UTF-8, or where the density sample finds its `@` dense.
-        Set<Language> unicodeFolding = EnumSet.complementOf(EnumSet.of(Language.JAVA, Language.RUST_BYTES_ASCII));
-        Map<String, Set<Language>> searchesFirst = Map.of(
-                DATE, EnumSet.allOf(Language.class),
-                EMAIL, EnumSet.allOf(Language.class),
-                NOQA_ASSIGNMENT, EnumSet.of(Language.TRINO),
-                "[a-z]+=(?i:skip)", unicodeFolding,
-                "[a-z]+=(?i:kilo)", unicodeFolding);
         Map<String, List<String>> pieces = Map.of(
                 DATE, List.of("1/2/33", "/", "a/b", "1/x", "12/25/2024", "3/4/"),
                 EMAIL, List.of("a@b", "@", " @ ", "a @b", "x@y.z"),
@@ -1127,7 +1086,7 @@ public class TestInnerLiteralSearch
             List<byte[]> lines = lines(entry.getValue(), 0, 1, 63, 64, 95, 96, 127, 128, 255, 256, 300);
             for (Language language : Language.values()) {
                 String description = "%s %s".formatted(language, regex);
-                assertThat(language.compiledPattern(regex).findsInnerLiteralFirstForDiagnostics()).as(description).isEqualTo(searchesFirst.get(regex).contains(language));
+                assertThat(language.compiledPattern(regex).findsInnerLiteralFirstForDiagnostics()).as(description).isTrue();
                 assertAgreesWithOrdinaryEngine(language, regex, entry.getValue().getFirst(), lines);
             }
         }
@@ -1288,18 +1247,6 @@ public class TestInnerLiteralSearch
             assertThat(search.usesVectorSearch(1_024)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
             assertThat(search.usesVectorSearch(1_025)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
         }
-        // A case-insensitive literal takes the folded pair kernel from 1024 bytes too, and below
-        // that its exact head's scan and folded check.
-        InnerLiteralSearch folded = Re2.compile(utf8Slice("(\\s*)((?i:# noqa)(?::\\s?([A-Z]+[0-9]+))?)")).innerLiteralSearchForDiagnostics();
-        assertThat(literal(folded)).isEqualTo("# noqa");
-        assertThat(folded.usesVectorSearch(1_023)).isFalse();
-        assertThat(folded.usesVectorSearch(1_024)).isEqualTo(VectorSupport.isAvailable());
-        // A kernel hit is checked again from the literal's first exact letter: `aaNOQA` passes
-        // the kernel's test for `Aanoqa`, which accepts either case of `A`, but fails the check,
-        // so the search never runs its reverse prefix.
-        CompiledPattern exactLetters = Re2.compile(utf8Slice("\\sAa(?i:noqa)"));
-        assertThat(exactLetters.find(utf8Slice("-".repeat(1_024) + " aaNOQA"))).isFalse();
-        assertThat(reversePrefixStateCount(exactLetters)).isZero();
     }
 
     @Test
