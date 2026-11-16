@@ -58,7 +58,7 @@ to avoid downloading objects. The source repository is read only; the pinned
 commit is archived and extracted beneath Regulator's `target/` directory.
 
 `BenchmarkEverydayTrinoJoni`, the application-shaped comparator, checks 14
-patterns against eight rotating short or medium Slice values apiece, including
+patterns against eight short or medium Slice values apiece, in order, including
 nonzero Slice offsets. Three cases are translated from the pinned Trino
 `BenchmarkRegexpFunctions`; its two synthetic single-character dot-star probes
 remain diagnostic-only and are recorded in the translation ledger. The

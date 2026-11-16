@@ -809,6 +809,19 @@ assert.match(releaseControlsHtml, /measurement follow-up/);
 for (const sources of [currentData.sources, { ...currentData.sources, releaseVersion: "1.1" }]) {
   assert.doesNotMatch(controlsHtml(currentData, sources), /native controls|measurement follow-up/);
 }
+// The harness overhead of the page's CPU renders in the methodology as a table, never as a comparison row;
+// a capture without null engines renders as before.
+const overhead = { r9g: [{ harness: "native-re2", operation: "reusedContains", caseId: "everyday/logLevel", medianNs: 1.25, hostMedianNs: [1.2, 1.25, 1.3] },
+  { harness: "jvm", operation: "reusedFind", caseId: "everyday/logLevel", medianNs: 2.5, hostMedianNs: [2.5, 2.5, 2.6] }],
+  r8i: [{ harness: "jvm", operation: "reusedFind", caseId: "everyday/logLevel", medianNs: 9.75, hostMedianNs: [9.75, 9.75, 9.75] }] };
+const overheadHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...currentData, harnessOverhead: overhead,
+  rows: [qualityRow, qualityReused].map(row => ({ ...row, platform: "r9g" })) }, selection: { language: "re2", cpu: "r9g", memory: "native" } }));
+assert.match(overheadHtml, /<summary>Harness overhead<\/summary>/);
+assert.match(overheadHtml, /<th>JMH \(Java engines\)<\/th><td>–<\/td><td>–<\/td><td>2\.50<\/td>/);
+assert.match(overheadHtml, /<th>Google Benchmark \(native RE2\)<\/th><td>1\.25<\/td>/);
+assert.doesNotMatch(overheadHtml, /9\.75/);
+assert.doesNotMatch(controlsHtml(currentData, currentData.sources), /Harness overhead/);
+
 // Expanded rows explain only applicable markers; unflagged measurements stay quiet.
 const flaggedDetails = detailsHtml(qualityRow);
 assert.match(flaggedDetails, /\* native RE2 timing uncertainty: 10.0%/);

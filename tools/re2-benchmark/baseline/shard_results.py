@@ -371,10 +371,12 @@ NATIVE_PARAMETER_PREFIX = "parameter."
 
 
 def native_repetitions(path, expected_repetitions):
-    """One Google Benchmark result file's repetition times, keyed by operation and row parameters.
+    """One Google Benchmark result file's repetition times per operation, keyed by operation and row parameters.
 
     The file must hold the planned selector's repetitions, so a dry run or a runner flag read
-    from the environment cannot stand in for the frozen protocol.
+    from the environment cannot stand in for the frozen protocol. Each repetition's iterations
+    pass over every input of the workload, as its inputs_per_iteration counter reports, so its
+    time per operation is its time divided by that count.
     """
     document = json.loads(path.read_text(encoding="utf-8"))
     context = document.get("context") if isinstance(document, dict) else None
@@ -410,7 +412,10 @@ def native_repetitions(path, expected_repetitions):
         if indices != list(range(expected_repetitions)):
             raise ValueError(f"Native result {key} in {path} has repetition indices {indices}, "
                              f"not 0 to {expected_repetitions - 1}")
-        real_times = [float(sample["real_time"]) for sample in samples]
+        inputs = [sample.get("inputs_per_iteration") for sample in samples]
+        if any(type(count) not in (int, float) or count < 1 or count != int(count) for count in inputs):
+            raise ValueError(f"Native result {key} in {path} does not report the inputs each iteration passes over")
+        real_times = [float(sample["real_time"]) / count for sample, count in zip(samples, inputs)]
         invalid = [value for value in real_times if not math.isfinite(value) or value <= 0]
         if invalid:
             raise ValueError(f"Native result {key} in {path} has non-finite or non-positive times {invalid}")

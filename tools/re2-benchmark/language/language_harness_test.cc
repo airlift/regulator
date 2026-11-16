@@ -12,8 +12,8 @@
 
 // A runner over a stand-in engine for testing the harness's own checks, never for timing. The engine
 // matches its pattern as a literal, and its find moves the end of a match by one once an input
-// comes round again, so only the second pass through the rotation sees wrong bounds, with the same
-// match or no match.
+// comes round again, so only the second pass through the inputs sees wrong bounds, with the same
+// match or no match. Its null engine likewise miscounts an input's length once the input comes round again.
 
 #include "language_harness.h"
 
@@ -56,16 +56,25 @@ struct DriftingFindEngine {
         return count;
     }
 };
+
+struct DriftingLength {
+    static size_t length(std::string_view input) {
+        static std::set<const char*> seen;
+        return input.size() + (seen.insert(input.data()).second ? 0 : 1);
+    }
+};
 } // namespace
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 4 || std::string(argv[1]) != "--verify-operation") {
-            throw std::runtime_error("usage: language_harness_test --verify-operation <workload> <operation>");
+        std::string mode = argc == 4 ? argv[1] : "";
+        if (mode != "--verify-operation" && mode != "--verify-null") {
+            throw std::runtime_error("usage: language_harness_test --verify-operation|--verify-null <workload> <operation>");
         }
         Inputs inputs = read_inputs(argv[2]);
         DriftingFindEngine::check(inputs);
-        verify_operation<DriftingFindEngine>(inputs, argv[3]);
+        if (mode == "--verify-null") verify_null<NullEngine<DriftingLength>>(inputs, argv[3]);
+        else verify_operation<DriftingFindEngine>(inputs, argv[3]);
         return 0;
     }
     catch (const std::exception& e) {

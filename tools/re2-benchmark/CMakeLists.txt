@@ -13,7 +13,8 @@ add_subdirectory("${ABSL_DIR}" abseil-cpp)
 add_subdirectory("${BENCHMARK_DIR}" benchmark)
 add_subdirectory("${RE2_DIR}" re2)
 
-add_executable(language_benchmark language/language_benchmark.cc)
+# The null engine has its own translation unit, so the runner's optimizer cannot see through it.
+add_executable(language_benchmark language/language_benchmark.cc language/language_null.cc)
 target_link_libraries(language_benchmark PRIVATE re2::re2 benchmark::benchmark)
 
 add_executable(language_bulk_benchmark language/language_bulk_benchmark.cc)

@@ -95,6 +95,13 @@ pub unsafe extern "C" fn language_rust_regex_is_match(regex: *const Regex, data:
     (*regex).is_match(text(data, length))
 }
 
+/// The runner's null engine: the input's length in bytes, borrowed as `&str` as every search borrows it, so its
+/// time per input is the runner's own overhead, including this crossing of the C interface.
+#[no_mangle]
+pub unsafe extern "C" fn language_rust_regex_null_length(data: *const u8, length: usize) -> usize {
+    text(data, length).len()
+}
+
 /// Finds the first match with the crate's `find` and writes its byte offsets through `start` and `end`.
 /// Returns false, writing nothing, when nothing matches.
 #[no_mangle]

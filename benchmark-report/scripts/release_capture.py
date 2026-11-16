@@ -9,7 +9,7 @@ import re
 import sys
 
 from baseline_data import baseline_rows, read_rows
-from language_data import CURRENT_PLATFORMS, LANGUAGES, MEMORY_MODES, digest, language_rows
+from language_data import CURRENT_PLATFORMS, LANGUAGES, MEMORY_MODES, digest, harness_overhead, language_rows
 from publication_data import RELEASE_VERSION
 from report_data import validate_report
 
@@ -115,8 +115,17 @@ def normalize_language(data, manifest, release, engine_tree, collector, receipts
     def identified(row):
         return {**row, 'logical_identity': identities[row['unit_attempt_id'], row['partition']]}
 
+    # A harness overhead entry restates one of its group's sampled null engine observations. An observation that did
+    # not finish or is not compatible has no samples, and an export from before the pass protocol has no entries.
+    overhead = data.get('harness_overhead', [])
+    if overhead:
+        sampled = {(*attempt_group(row), row['id']): row['samples_ns']
+                   for row in data['observations'] if 'samples_ns' in row}
+        if any(sampled.get((*attempt_group(row), row['observation'])) != row['samples_ns'] for row in overhead):
+            raise ValueError("language capture's harness overhead differs from its observations")
     return {'hosts': hosts, 'observations': [identified(row) for row in data['observations']],
-            'comparisons': [identified(row) for row in data['comparisons']]}
+            'comparisons': [identified(row) for row in data['comparisons']],
+            'harness_overhead': [identified(row) for row in overhead]}
 
 
 def validate_language_ledger(ledger, plans):
@@ -227,7 +236,7 @@ def build(plan_path):
         candidate = load_collector(plan['baseline'], plan, None)
         source_commit, engine_tree = candidate['candidate_commit'], candidate['engine_tree']
     collectors = {}
-    combined = {'hosts': [], 'observations': [], 'comparisons': []}
+    combined = {'hosts': [], 'observations': [], 'comparisons': [], 'harness_overhead': []}
     manifests, exports = [], []
     # Each plan's capture ran at the memory budgets its manifest recorded.
     plans = {Path(item['plan']): fleet.validate(Path(item['plan']), recorded_budgets=True) for item in plan['language']}
@@ -280,5 +289,8 @@ def build(plan_path):
                              'campaignPlanSha256': digest(plan_path)}}
     if release is not None:
         report['provenance']['releasedArtifact'] = release
+    overhead = harness_overhead(combined, CURRENT_PLATFORMS)
+    if overhead is not None:
+        report['harnessOverhead'] = overhead
     validate_report(report)
     return report

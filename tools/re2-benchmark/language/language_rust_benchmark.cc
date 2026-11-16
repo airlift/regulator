@@ -94,8 +94,13 @@ struct RustEngine {
                 trace == nullptr ? nullptr : +record, trace);
     }
 };
+
+// The null engine crosses the same C interface into the crate shim as every search.
+struct RustNullLength {
+    static size_t length(std::string_view input) { return language_rust_regex_null_length(input.data(), input.size()); }
+};
 } // namespace
 
 int main(int argc, char** argv) {
-    return run<RustEngine>(argc, argv, "language_rust_benchmark");
+    return run<RustEngine, RustNullLength>(argc, argv, "language_rust_benchmark");
 }

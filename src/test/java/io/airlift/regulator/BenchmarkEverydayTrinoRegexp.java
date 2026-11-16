@@ -20,12 +20,14 @@ import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
@@ -35,6 +37,12 @@ import java.util.function.Function;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 
+/// Times each Trino operation on each everyday workload. Each operation method is one pass over
+/// the workload's [#INPUTS] inputs in order, which JMH counts as one operation per input, and
+/// consumes each input's result, with the state it reads loaded into locals before the loop. The
+/// loop calls the operation's static method on each input, the one verification calls;
+/// `nullEngine` is that pass with no engine. The LIKE construction methods compile one pattern
+/// per operation.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -42,6 +50,9 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 @Measurement(iterations = 5, time = 1)
 public class BenchmarkEverydayTrinoRegexp
 {
+    /// The inputs of every workload, and so the operations of one invocation.
+    public static final int INPUTS = 8;
+
     private static final Slice LIKE_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha_bravo_charlie%");
     private static final Slice LIKE_UNICODE_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha_\u03C0_omega%");
     private static final Slice LIKE_ESCAPED_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha!__bravo_charlie%");
@@ -68,8 +79,7 @@ public class BenchmarkEverydayTrinoRegexp
         String workload;
 
         private TrinoRegexp regexp;
-        private List<TestingEverydayTrinoRegexpBenchmarkInputs.Source> sources;
-        private int sourceIndex;
+        Slice[] inputs;
         private Slice replacement;
         private Function<List<Slice>, Slice> lambdaReplacement;
 
@@ -79,10 +89,9 @@ public class BenchmarkEverydayTrinoRegexp
             TestingEverydayTrinoRegexpBenchmarkInputs.Input input =
                     TestingEverydayTrinoRegexpBenchmarkInputs.create(workload);
             regexp = TrinoRegexp.compile(input.pattern());
-            sources = input.sources();
+            inputs = inputs(input);
             replacement = Slices.utf8Slice("_");
             lambdaReplacement = _ -> replacement;
-            sourceIndex = 0;
         }
 
         public void setWorkload(String workload)
@@ -90,65 +99,198 @@ public class BenchmarkEverydayTrinoRegexp
             this.workload = workload;
         }
 
-        public void setSourceIndex(int sourceIndex)
+        // Each operation on input `index`, through the operation its benchmark method calls on each input, for tests and
+        // the Joni verifier.
+
+        public boolean contains(int index)
         {
-            this.sourceIndex = sourceIndex;
+            return containsOperation(regexp, inputs[index]);
         }
 
-        private Slice nextSource()
+        public long count(int index)
         {
-            Slice source = sources.get(sourceIndex).value();
-            sourceIndex = (sourceIndex + 1) & (sources.size() - 1);
-            return source;
+            return countOperation(regexp, inputs[index]);
+        }
+
+        public long positionThird(int index)
+        {
+            return positionThirdOperation(regexp, inputs[index]);
+        }
+
+        public Slice extract(int index)
+        {
+            return extractOperation(regexp, inputs[index]);
+        }
+
+        public List<Slice> extractAll(int index)
+        {
+            return extractAllOperation(regexp, inputs[index]);
+        }
+
+        public List<Slice> split(int index)
+        {
+            return splitOperation(regexp, inputs[index]);
+        }
+
+        public Slice replace(int index)
+        {
+            return replaceOperation(regexp, replacement, inputs[index]);
+        }
+
+        public Slice replaceLambda(int index)
+        {
+            return replaceLambdaOperation(regexp, lambdaReplacement, inputs[index]);
+        }
+    }
+
+    /// The input array every pass reads: the workload's sources in its order, which must be
+    /// [#INPUTS].
+    public static Slice[] inputs(TestingEverydayTrinoRegexpBenchmarkInputs.Input input)
+    {
+        if (input.sources().size() != INPUTS) {
+            throw new IllegalStateException("%s has %s inputs, not %s".formatted(input.workloadId(), input.sources().size(), INPUTS));
+        }
+        return input.sources().stream().map(TestingEverydayTrinoRegexpBenchmarkInputs.Source::value).toArray(Slice[]::new);
+    }
+
+    /// The null engine's operation: the input's byte length, with no matching, so its time per
+    /// input is the harness's own cost.
+    public static long nullOperation(Slice input)
+    {
+        return input.length();
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(INPUTS)
+    public void contains(BenchmarkData data, Blackhole blackhole)
+    {
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(containsOperation(regexp, input));
         }
     }
 
     @Benchmark
-    public boolean contains(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void count(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.contains(data.nextSource());
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(countOperation(regexp, input));
+        }
     }
 
     @Benchmark
-    public long count(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void positionThird(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.count(data.nextSource());
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(positionThirdOperation(regexp, input));
+        }
     }
 
     @Benchmark
-    public long positionThird(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extract(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.position(data.nextSource(), 1, 3);
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(extractOperation(regexp, input));
+        }
     }
 
     @Benchmark
-    public Slice extract(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractAll(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.extract(data.nextSource());
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(extractAllOperation(regexp, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> extractAll(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void split(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.extractAll(data.nextSource());
+        TrinoRegexp regexp = data.regexp;
+        for (Slice input : data.inputs) {
+            blackhole.consume(splitOperation(regexp, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> split(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void replace(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.split(data.nextSource());
+        TrinoRegexp regexp = data.regexp;
+        Slice replacement = data.replacement;
+        for (Slice input : data.inputs) {
+            blackhole.consume(replaceOperation(regexp, replacement, input));
+        }
     }
 
     @Benchmark
-    public Slice replace(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void replaceLambda(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.replace(data.nextSource(), data.replacement);
+        TrinoRegexp regexp = data.regexp;
+        Function<List<Slice>, Slice> replacement = data.lambdaReplacement;
+        for (Slice input : data.inputs) {
+            blackhole.consume(replaceLambdaOperation(regexp, replacement, input));
+        }
     }
 
     @Benchmark
-    public Slice replaceLambda(BenchmarkData data)
+    @OperationsPerInvocation(INPUTS)
+    public void nullEngine(BenchmarkData data, Blackhole blackhole)
     {
-        return data.regexp.replace(data.nextSource(), data.lambdaReplacement);
+        for (Slice input : data.inputs) {
+            blackhole.consume(nullOperation(input));
+        }
+    }
+
+    // Each operation on one input, as its benchmark method applies it to each input of a pass.
+
+    private static boolean containsOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.contains(input);
+    }
+
+    private static long countOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.count(input);
+    }
+
+    private static long positionThirdOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.position(input, 1, 3);
+    }
+
+    private static Slice extractOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.extract(input);
+    }
+
+    private static List<Slice> extractAllOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.extractAll(input);
+    }
+
+    private static List<Slice> splitOperation(TrinoRegexp regexp, Slice input)
+    {
+        return regexp.split(input);
+    }
+
+    private static Slice replaceOperation(TrinoRegexp regexp, Slice replacement, Slice input)
+    {
+        return regexp.replace(input, replacement);
+    }
+
+    private static Slice replaceLambdaOperation(TrinoRegexp regexp, Function<List<Slice>, Slice> replacement, Slice input)
+    {
+        return regexp.replace(input, replacement);
     }
 
     @Benchmark

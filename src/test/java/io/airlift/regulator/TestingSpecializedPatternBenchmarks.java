@@ -17,6 +17,10 @@ import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
 import io.airlift.slice.Slice;
+import org.openjdk.jmh.annotations.Param;
+import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.State;
 
 import java.lang.classfile.ClassFile;
 import java.lang.constant.ClassDesc;
@@ -28,8 +32,9 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Supplier;
+import java.util.function.IntFunction;
 
 import static java.lang.constant.ConstantDescs.CD_Class;
 import static java.lang.constant.ConstantDescs.CD_MethodHandle;
@@ -41,11 +46,18 @@ import static java.lang.constant.ConstantDescs.CD_int;
 import static java.lang.constant.ConstantDescs.CD_void;
 import static java.lang.constant.ConstantDescs.INIT_NAME;
 
-/// What every language's specialized-pattern benchmark shares: the rotation of a workload's
-/// sources, the variants tests and verifiers call, the const-bound caller of the compiled variant,
-/// and, for a language without a replacement call, the workloads each capture operation times.
+/// What every language's specialized-pattern benchmark shares: the input array of a workload, the
+/// null engine, the variants tests and verifiers call, the check of every pass, the const-bound
+/// caller of the compiled variant, and, for a language without a replacement call, the workloads
+/// each capture operation times. Every benchmark method is one pass over the workload's [#INPUTS]
+/// inputs in order, which JMH counts as one operation per input, and consumes each input's
+/// result, with the state it reads loaded into locals before the loop. The loop calls a static
+/// operation on each input, and the method's variant applies the same operation to one input.
 public final class TestingSpecializedPatternBenchmarks
 {
+    /// The inputs of every workload, and so the operations of one benchmark invocation.
+    public static final int INPUTS = 8;
+
     private TestingSpecializedPatternBenchmarks() {}
 
     /// The workloads whose [capture operation][Workload#captureOperation()] is `operation`, which a
@@ -64,81 +76,88 @@ public final class TestingSpecializedPatternBenchmarks
         }
     }
 
-    abstract static class Rotation
+    /// The input array every pass reads: the workload's sources in its order, which must be
+    /// [#INPUTS], the operations of one invocation.
+    public static Slice[] inputs(Workload workload)
+    {
+        if (workload.sources().size() != INPUTS) {
+            throw new IllegalStateException("%s has %s inputs, not %s".formatted(workload.workloadId(), workload.sources().size(), INPUTS));
+        }
+        return workload.sources().stream().map(Source::value).toArray(Slice[]::new);
+    }
+
+    /// The null engine's operation: the input's byte length, with no matching, so its time per
+    /// input is the harness's own cost.
+    public static long nullOperation(Slice input)
+    {
+        return input.length();
+    }
+
+    /// A workload and the input array its passes read.
+    abstract static class WorkloadInputs
     {
         Workload definition;
-        private List<Source> sources;
-        private int sourceIndex;
+        Slice[] inputs;
 
-        void rotate(Workload definition)
+        void readInputs(Workload definition)
         {
             this.definition = definition;
-            sources = definition.sources();
-            sourceIndex = 0;
-        }
-
-        public void setSourceIndex(int sourceIndex)
-        {
-            this.sourceIndex = sourceIndex;
-        }
-
-        Slice nextSource()
-        {
-            return sources.get(nextSourceIndex()).value();
-        }
-
-        /// Returns the index of the next source and advances the rotation past it.
-        int nextSourceIndex()
-        {
-            int index = sourceIndex;
-            sourceIndex = (sourceIndex + 1) & (sources.size() - 1);
-            return index;
+            inputs = inputs(definition);
         }
     }
 
-    /// One variant of a workload: its benchmark method and the state whose rotation that method
-    /// advances.
-    public static final class Variant
+    /// The inputs of any workload, for the null engine.
+    @State(Scope.Thread)
+    public static class NullData
+            extends WorkloadInputs
     {
-        private final String name;
-        private final Rotation state;
-        private final Supplier<Object> benchmark;
+        @Param({"clickbenchHost", "urlHostPort", "queryParameterNames", "keyValue", "quotedField"})
+        String workload;
 
-        Variant(String name, Rotation state, Supplier<Object> benchmark)
+        @Setup
+        public void setup()
         {
-            this.name = name;
-            this.state = state;
-            this.benchmark = benchmark;
+            readInputs(TestingSpecializedPatternBenchmarkInputs.create(workload));
         }
+    }
 
-        public String name()
+    /// One variant of a workload: the state its benchmark method takes, and the static operation
+    /// that method calls on each input, applied with the state's values to the input at an index.
+    public record Variant(String name, Object state, IntFunction<Object> operation)
+    {
+        /// Applies the operation to input `index`, as the benchmark method does in its pass.
+        public Object invoke(int index)
         {
-            return name;
+            return operation.apply(index);
         }
+    }
 
-        /// The state whose rotation the benchmark method advances, which holds the compile it uses.
-        Rotation state()
-        {
-            return state;
-        }
+    /// Sets up every variant of one workload, as a language's `variantsForTesting` does.
+    @FunctionalInterface
+    interface Variants
+    {
+        List<Variant> of(String workloadId)
+                throws ReflectiveOperationException;
+    }
 
-        public void setSourceIndex(int sourceIndex)
-        {
-            state.setSourceIndex(sourceIndex);
+    /// Checks every pass of `benchmark` with [TestingBenchmarkPasses#verifyPasses], over the
+    /// states of every variant of every workload and the null engine's state of every workload.
+    static void verifyPasses(Object benchmark, Variants variants)
+            throws Exception
+    {
+        List<Object> states = new ArrayList<>();
+        for (String workloadId : TestingSpecializedPatternBenchmarkInputs.workloadIds()) {
+            variants.of(workloadId).forEach(variant -> states.add(variant.state()));
+            NullData nullData = new NullData();
+            nullData.workload = workloadId;
+            nullData.setup();
+            states.add(nullData);
         }
-
-        /// Calls the benchmark method once, on the next source of the rotation.
-        public Object invoke()
-        {
-            return benchmark.get();
-        }
-
-        /// Calls the benchmark method on the source at `sourceIndex`.
-        public Object invoke(int sourceIndex)
-        {
-            setSourceIndex(sourceIndex);
-            return invoke();
-        }
+        TestingBenchmarkPasses.verifyPasses(benchmark, TestingBenchmarkPasses.byStateClass(states), state -> switch (state) {
+            case WorkloadInputs workload -> workload.inputs;
+            case BenchmarkSpecializedJavaRegexp.JdkData jdk -> jdk.inputs;
+            default -> throw new IllegalArgumentException("state without inputs: " + state.getClass().getName());
+        });
     }
 
     /// Returns an instance of a per-pattern hidden class implementing `type`, whose one

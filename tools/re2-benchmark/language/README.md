@@ -5,7 +5,7 @@ the four regex languages. Run it alongside the baseline Trino-operation,
 specialized-pattern, and LIKE shards, not instead of them.
 
 The current corpus is the 14 workloads in `everyday-trino-workloads.tsv`, with
-eight rotating inputs each. Each workload runs through:
+eight inputs each. Each workload runs through:
 
 | Language | Regulator API | Comparator |
 |---|---|---|
@@ -18,16 +18,27 @@ Regulator runs with native access enabled and disabled. The comparator runs
 once per language and host, and supplies the comparison for both modes.
 Each engine measures compilation, single-use contains and count, and reused
 contains, count, and find. That produces 1008 engine observations and 672 paired
-rows per architecture. These counts describe this additional suite, not the full
-qualification campaign.
+rows per architecture. The null engines of the JVM, native RE2, and crate
+harnesses add nine harness-overhead observations on the first case, `logLevel`,
+for the three reused operations; they are never paired or ranked. These counts
+describe this additional suite, not the full qualification campaign.
 
 ## Measurement contracts
 
 JDK patterns and inputs are decoded strictly to `String` before timing.
 Regulator, Joni, native RE2, and the `regex` crate receive identical UTF-8
 bytes. The Rust comparator validates them as UTF-8 when it loads the workload
-and borrows them as `str` during timing. Input rotation includes nonzero Slice
+and borrows them as `str` during timing. The inputs include nonzero Slice
 offsets. No encoding conversion is timed.
+
+Every engine follows the [harness protocol](../../../docs/benchmarks/METHODOLOGY.md#harness-protocol),
+pass-v1. One JMH invocation or one Google Benchmark iteration is one pass over
+the case's eight inputs in workload-file order, and one operation is one input.
+JMH divides by `@OperationsPerInvocation`; the native runners report
+`inputs_per_iteration`, and the collector divides `real_time` by it.
+Compilation is one compile per operation. Results under pass-v1 carry
+benchmark contract version 4 and the `public-pattern-lifecycle-pass-v1` work
+contract, so they never mix with earlier per-call rotation results.
 
 Single use includes compilation and one public operation. Reused measurements
 retain the compiled pattern. RE2, Java, and Rust counts use their public
@@ -102,7 +113,7 @@ benchmarks remain required. A recorded language translation must preserve this
 suite's operation contracts; successful parsing alone is insufficient.
 
 Compilation has no input-byte denominator. Other operations record the mean
-input size of the complete round-robin rotation, not a claim about how many
+input size of the case's eight inputs, not a claim about how many
 bytes the engine actually scans. Count operations also record the expected
 mean match count. Raw fork/iteration samples and allocation remain in the export
 so ratios, absolute deltas, uncertainty, and crossover estimates can be calculated
@@ -156,14 +167,14 @@ may choose among adapters from the case's inputs before timing, as the Rust
 bulk runner does. The harness owns input loading, the command line, phase
 markers, and benchmark registration. A lifecycle adapter supplies compile,
 contains, find, count with an optional match trace, and the input check; its harness
-rotates the inputs and runs the timed operations. A bulk adapter supplies
+makes each iteration one pass over the inputs and runs the timed operations. A bulk adapter supplies
 compile, the input check, per-search state allocated outside timing, and the
 timed loop that runs one Rebar model and optionally writes its trace.
 
 The lifecycle runners also time the native comparators of the baseline's
 [specialized-pattern shards](../baseline/SHARD_DISPATCH.md#route-handlers).
 `--specialized <inputs> <operation> <group> [benchmark flags]` times one
-operation over the rotating sources that `SpecializedPatternNativeInputs`
+operation over the sources that `SpecializedPatternNativeInputs`
 writes for a workload: `extract`, the group of the first match; `extractAll`,
 the group of every match; and, in the RE2 runner only, `replace`, which
 replaces every match with the group. The adapter supplies each operation over
@@ -172,6 +183,13 @@ per-pattern scratch state allocated before timing.
 each source without timing and prints the values it returns, one line per
 source. Before the shard times a native row, its semantic gate requires those
 lines to equal the values every Regulator variant returns.
+
+`--null <inputs> <operation> [benchmark flags]` times a reused operation with
+the runner's null engine, which returns each input's byte length through the
+same call boundary as the runner's engine: an out-of-line function in its own
+translation unit in the RE2 runner, and a C function in the crate's shim in the
+Rust runner. `--verify-null <inputs> <operation>` prints each input's byte
+length after checking two passes.
 
 Run deterministic verification without collecting timings:
 

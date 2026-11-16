@@ -179,6 +179,74 @@ sibling ran native RE2 and the Rust crate there at 96 MiB too. Those rows now
 run at each engine's default, so native RE2's and the Rust crate's times
 differ from those reports for the same reason.
 
+## Harness protocol
+
+Every harness that produces a report row charges each engine the same small,
+stated cost to reach its next input. Before this protocol, the JMH harnesses
+picked each input through a list, a record, and a modulo or mask, about 15–40
+cycles per input. The native runners spent about 4. On 30-byte inputs that
+difference was several nanoseconds, charged only to the JVM engines. Results
+measured under the earlier per-call rotation are not comparable with results
+under this protocol, and the language work contract records which applies.
+
+The protocol, pass-v1, applies to the language lifecycle, everyday Trino
+operation, and specialized-pattern harnesses, on the JVM and native sides alike:
+
+- Each case's inputs are prepared before timing as a flat array of the engine's
+  own input type: Slice for Regulator and Joni, String for the JDK, and a
+  byte-string view for native RE2 and the `regex` crate.
+- One JMH invocation, or one Google Benchmark iteration, is one pass over all
+  the case's inputs. One operation is one input: JMH divides by the input count
+  through `@OperationsPerInvocation`, and the native runners report
+  `inputs_per_iteration`, which the collectors divide by.
+- Every harness passes the same eight inputs in the same order, the order of the
+  workload file. Each engine's branch predictors therefore learn the same cycle.
+- Each result is consumed as it is produced: by a JMH `Blackhole` with compiler
+  blackholes, or by `benchmark::DoNotOptimize`. Nothing is accumulated.
+- Loop-invariant engine state, such as the pattern, matcher, capture group,
+  and scratch, is read before the loop. The loop body loads an input, calls the
+  engine, and consumes the result.
+- The engine call keeps the boundary a user's call has. JMH calls the
+  Regulator, JDK, and Joni APIs directly, and C2 may inline them into the pass
+  loop and load a pattern's tables once per pass, as it would in a user's loop
+  over many rows. The native runners call RE2 and the crate's C interface out
+  of line, with no link-time optimization across either boundary, so each call
+  reloads its own state, as a native caller's loop does, and the compiler
+  cannot hoist engine work across inputs or passes.
+- Compilation stays one compile per operation. Single use compiles once for
+  each input of the pass.
+
+These per-call costs belong to an engine's public API, so they stay inside
+timing:
+
+- The JDK's `Matcher.reset` for each input String.
+- Joni's construction of a matcher for each input, as Trino's byte-array route
+  does, and Joni's reading of the Slice's array, offset, and length.
+- Trino's own operation shapes, such as `contains`, `count`, and the reset
+  group-zero matcher for find.
+- Result construction: extracted values, lists, and replacement output.
+- The `regex` crate's C interface crossing, a call with no unwinding and no
+  UTF-8 recheck. The crate's inputs are validated once, when the workload loads.
+
+Picking each input through a list or record, modulo or mask arithmetic, and
+bounds checks on input views are harness costs, and the protocol removes them.
+Stepping through the input array remains, as does any dispatch on which engine
+is under test, but that dispatch happens once per pass, not once per input.
+
+Each pass-v1 harness has a null engine: it returns the input's byte length for
+every operation, without matching, through the same call boundary as the
+harness's engines. That is an ordinary method in the JVM, an opaque out-of-line
+function in the RE2 runner, and a C function in the crate's shim. Its time per
+input is that harness's own overhead. The language collector measures the null
+engine of the JVM, RE2, and crate harnesses on one case for the three reused
+operations. The report shows these times in its methodology, never as ranked
+rows. The lifecycle class selects its null engine with `engine=null`; every
+everyday and specialized JMH class has a `nullEngine` method for diagnostics.
+
+The bulk, TPC-H LIKE, and single-input LIKE harnesses are outside pass-v1.
+Their operations are already a whole workload, a whole column, or one fixed
+input, and both sides of each comparison run the same loop.
+
 ## Java benchmarks
 
 Representative JMH classes include:
@@ -205,7 +273,7 @@ Representative JMH classes include:
 | `BenchmarkRustScanPlan` | The `BenchmarkRe2ScanPlan` workloads and rows through public Rust operations, each pattern written in Rust syntax for the same match or, with `unicodePerlClasses=true`, keeping Rust's Unicode `\d` and `\w`, [with and without the scan plan](SCAN_PLAN.md#re2-patterns) and with [generated pattern classes](SCAN_PLAN.md#re2-java-and-rust-pattern-classes) |
 | `BenchmarkClickBenchRegexp` | [ClickBench URL pattern](CLICKBENCH_REGEXP.md): dot-all matching, capture, replacement, and host/path scaling |
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
-| `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |
+| `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations, one pass over each workload's eight Slice values |
 | `BenchmarkSpecializedTrinoRegexp` | [Specialized-pattern workloads](SCAN_PLAN.md#benchmarks): one Trino operation per workload with the regular engine, the specialized engine, and the compiled pattern const-bound the way an engine like Trino binds it, each pattern in its own JVM |
 | `BenchmarkSpecializedRe2` | The specialized-pattern workloads through public RE2 operations, in the same three variants, beside native RE2 |
 | `BenchmarkSpecializedJavaRegexp` | The specialized-pattern workloads through Java matcher operations, in the same three variants, beside JDK `Pattern` |
@@ -436,7 +504,9 @@ Keep cold compilation and steady-state matching in separate results.
 
 Use Google Benchmark with the same manifest, checksums, thread count, minimum
 duration, and at least five repetitions. Record JSON and exact release compiler
-flags. Consume match ranges or output checksums to prevent elimination.
+flags. Follow the [harness protocol](#harness-protocol): one iteration is one
+pass over the inputs, and each result is consumed with
+`benchmark::DoNotOptimize`.
 
 ### Statistics
 

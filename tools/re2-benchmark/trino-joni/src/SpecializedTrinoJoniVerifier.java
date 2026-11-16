@@ -14,6 +14,7 @@
 package io.trino.operator.scalar;
 
 import io.airlift.regulator.BenchmarkSpecializedTrinoRegexp;
+import io.airlift.regulator.TestingBenchmarkPasses;
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
@@ -25,6 +26,7 @@ import org.openjdk.jmh.annotations.Param;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
@@ -41,12 +43,12 @@ public final class SpecializedTrinoJoniVerifier
     private SpecializedTrinoJoniVerifier() {}
 
     public static void main(String[] args)
-            throws ReflectiveOperationException
+            throws Exception
     {
         verifyWorkloadParameters(Operation.REPLACE, BenchmarkSpecializedTrinoRegexp.ReplaceData.class, BenchmarkSpecializedTrinoJoni.ReplaceData.class);
         verifyWorkloadParameters(Operation.EXTRACT, BenchmarkSpecializedTrinoRegexp.ExtractData.class, BenchmarkSpecializedTrinoJoni.ExtractData.class);
         verifyWorkloadParameters(Operation.EXTRACT_ALL, BenchmarkSpecializedTrinoRegexp.ExtractAllData.class, BenchmarkSpecializedTrinoJoni.ExtractAllData.class);
-        BenchmarkSpecializedTrinoJoni joni = new BenchmarkSpecializedTrinoJoni();
+        verifyPasses();
         MessageDigest digest = sha256();
         int comparisonCount = 0;
 
@@ -58,28 +60,19 @@ public final class SpecializedTrinoJoniVerifier
                     BenchmarkSpecializedTrinoJoni.ReplaceData joniData = new BenchmarkSpecializedTrinoJoni.ReplaceData();
                     joniData.setWorkload(workloadId);
                     joniData.setup();
-                    yield index -> {
-                        joniData.setSourceIndex(index);
-                        return joni.replace(joniData);
-                    };
+                    yield joniData::replace;
                 }
                 case EXTRACT -> {
                     BenchmarkSpecializedTrinoJoni.ExtractData joniData = new BenchmarkSpecializedTrinoJoni.ExtractData();
                     joniData.setWorkload(workloadId);
                     joniData.setup();
-                    yield index -> {
-                        joniData.setSourceIndex(index);
-                        return joni.extract(joniData);
-                    };
+                    yield joniData::extract;
                 }
                 case EXTRACT_ALL -> {
                     BenchmarkSpecializedTrinoJoni.ExtractAllData joniData = new BenchmarkSpecializedTrinoJoni.ExtractAllData();
                     joniData.setWorkload(workloadId);
                     joniData.setup();
-                    yield index -> {
-                        joniData.setSourceIndex(index);
-                        return joni.extractAll(joniData);
-                    };
+                    yield joniData::extractAll;
                 }
             };
             JoniRegexp joniRegexp = JoniRegexpCasts.joniRegexp(workload.pattern());
@@ -116,6 +109,34 @@ public final class SpecializedTrinoJoniVerifier
         }
         System.out.println("Verified %s specialized Regulator/Joni operation results (SHA-256 %s)"
                 .formatted(comparisonCount, resultSha256));
+    }
+
+    /// Checks that every Joni pass hands each input of every workload to its operation, as the
+    /// Regulator passes' tests check theirs.
+    private static void verifyPasses()
+            throws Exception
+    {
+        List<Object> states = new ArrayList<>();
+        for (String workloadId : TestingSpecializedPatternBenchmarkInputs.workloadIds()) {
+            Operation operation = TestingSpecializedPatternBenchmarkInputs.create(workloadId).operation();
+            BenchmarkSpecializedTrinoJoni.WorkloadData data = switch (operation) {
+                case REPLACE -> new BenchmarkSpecializedTrinoJoni.ReplaceData();
+                case EXTRACT -> new BenchmarkSpecializedTrinoJoni.ExtractData();
+                case EXTRACT_ALL -> new BenchmarkSpecializedTrinoJoni.ExtractAllData();
+            };
+            // What each state's JMH setup does.
+            data.load(workloadId, operation);
+            states.add(data);
+            BenchmarkSpecializedTrinoJoni.NullData nullData = new BenchmarkSpecializedTrinoJoni.NullData();
+            nullData.workload = workloadId;
+            nullData.setup();
+            states.add(nullData);
+        }
+        TestingBenchmarkPasses.verifyPasses(new BenchmarkSpecializedTrinoJoni(), TestingBenchmarkPasses.byStateClass(states), state -> switch (state) {
+            case BenchmarkSpecializedTrinoJoni.WorkloadData data -> data.inputs;
+            case BenchmarkSpecializedTrinoJoni.NullData data -> data.inputs;
+            default -> throw new IllegalArgumentException("state without inputs: " + state.getClass().getName());
+        });
     }
 
     private static void verifyWorkloadParameters(Operation operation, Class<?>... states)

@@ -68,6 +68,13 @@ public class TestBenchmarkSpecializedJavaRegexp
     }
 
     @Test
+    public void testEveryPassHandsEachInputToItsOperation()
+            throws Exception
+    {
+        TestingSpecializedPatternBenchmarks.verifyPasses(new BenchmarkSpecializedJavaRegexp(), BenchmarkSpecializedJavaRegexp::variantsForTesting);
+    }
+
+    @Test
     public void testEveryVariantAndTheJdkProduceTheSameValues()
             throws ReflectiveOperationException
     {
@@ -89,13 +96,12 @@ public class TestBenchmarkSpecializedJavaRegexp
             disableOrdinaryEngine(compiled);
             disableInterpretedPlan(compiled);
 
-            // Started at the first source, each variant returns each source's values as its
-            // rotation advances and wraps around.
+            // Each variant returns each input's values in order, and the first's again after the
+            // last, so state it reuses from one input to the next changes no result.
             for (Variant variant : variants) {
-                variant.setSourceIndex(0);
                 for (int call = 0; call <= sources.size(); call++) {
                     int sourceIndex = call % sources.size();
-                    assertThat(SpecializedPatternNativeInputs.values(variant.invoke())).as("%s/%s %s", workloadId, sources.get(sourceIndex).sourceId(), variant.name()).isEqualTo(expected.get(sourceIndex));
+                    assertThat(SpecializedPatternNativeInputs.values(variant.invoke(sourceIndex))).as("%s/%s %s", workloadId, sources.get(sourceIndex).sourceId(), variant.name()).isEqualTo(expected.get(sourceIndex));
                 }
             }
         }

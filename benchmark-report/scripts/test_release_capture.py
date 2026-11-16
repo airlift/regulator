@@ -18,6 +18,10 @@ import collection
 import test_fleet
 from test_unit_session import UnitCampaign, UnitFixture
 
+# A row of the fixture's case, and a null engine row measured beside it.
+TIMED_ROW = 'example/java/java/safe/execute'
+NULL_ROW = 'example/java/null/safe/reusedCount'
+
 
 class TestReleaseCapture(unittest.TestCase):
     def setUp(self):
@@ -67,6 +71,43 @@ class TestReleaseCapture(unittest.TestCase):
         self.assertEqual(len(data['hosts']), 3)
         self.assertEqual({host['collector'] for host in data['hosts']}, {self.collector['candidate_commit']})
         self.assertNotEqual(self.collector['candidate_commit'], self.release['source_commit'])
+
+    def observe(self, outcome, overhead):
+        """Each host records a row with outcome, which has no samples, and the null engine's compared row, with or
+        without the harness overhead entry that restates it."""
+        rows = [TIMED_ROW, NULL_ROW]
+        self.units['unit']['owned'] = rows
+        self.units['unit']['groups'][0]['owned'] = rows
+        if overhead:
+            self.data['harness_overhead'] = []
+        for receipt in self.receipts:
+            group = {'unit_attempt_id': receipt['unit_attempt_id'], 'group_id': '1', 'partition': 'case-0000-java'}
+            timed = {**group, 'id': TIMED_ROW, 'outcome': outcome, 'reason': 'supported non-timing outcome'}
+            if outcome == 'did-not-finish':
+                timed['attempts'] = [{'outcome': outcome, 'phase': 'execution', 'limit_seconds': 30}] * 2
+            self.data['observations'] += [timed, {**group, 'id': NULL_ROW, 'outcome': 'compared', 'samples_ns': [[1, 2]]}]
+            if overhead:
+                self.data['harness_overhead'].append({**group, 'observation': NULL_ROW, 'samples_ns': [[1, 2]]})
+
+    def test_rows_without_samples_import_with_or_without_harness_overhead(self):
+        for outcome in ('not-compatible', 'did-not-finish'):
+            for overhead in (False, True):
+                with self.subTest(outcome=outcome, overhead=overhead):
+                    self.setUp()
+                    self.observe(outcome, overhead)
+                    data = self.normalize()
+                    self.assertEqual(len(data['observations']), 6)
+                    self.assertEqual(len(data['harness_overhead']), 3 if overhead else 0)
+
+    def test_harness_overhead_must_restate_a_sampled_observation(self):
+        # Other samples than the null engine row's, a row without samples, and a row no host recorded.
+        for observation, samples in ((NULL_ROW, [[1, 3]]), (TIMED_ROW, [[1, 2]]), ('unobserved', [[1, 2]])):
+            with self.subTest(observation=observation, samples=samples):
+                self.setUp()
+                self.observe('not-compatible', overhead=True)
+                self.data['harness_overhead'][0].update(observation=observation, samples_ns=samples)
+                with self.assertRaisesRegex(ValueError, 'harness overhead differs'):
+                    self.normalize()
 
     def test_lifecycle_r9g_uses_the_frozen_larger_allocation(self):
         self.manifest['suite'] = 'language-lifecycle'

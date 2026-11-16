@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "language_harness.h"
+#include "language_null.h"
 
 #include <re2/re2.h>
 
@@ -106,8 +107,12 @@ struct Re2Engine {
         return values;
     }
 };
+
+struct Re2NullLength {
+    static size_t length(std::string_view input) { return language_null_length(input); }
+};
 } // namespace
 
 int main(int argc, char** argv) {
-    return run<Re2Engine>(argc, argv, "language_benchmark");
+    return run<Re2Engine, Re2NullLength>(argc, argv, "language_benchmark");
 }
