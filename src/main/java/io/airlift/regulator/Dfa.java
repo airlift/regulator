@@ -6436,6 +6436,13 @@ final class Dfa
             startByteScanProductivityRejectedUntil = productive ? 0 : nextProductivityCheckPosition(position, textEnd);
             return productive;
         }
+
+        /// Whether the cursor's DFA can quit on a byte outside ASCII, so a matcher whose quit streak
+        /// reached its limit skips the cursor.
+        boolean quitsOnNonAscii()
+        {
+            return dfa.quitsOnNonAscii;
+        }
     }
 
     // A sample spreads its windows over the whole remaining text, so a sample taken this close to
