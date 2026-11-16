@@ -184,7 +184,7 @@ public class TestRequiredBytes
         assertThat(requiredSuffix("\\d+z")).isNull();
         assertThat(requiredSuffix("a+(?:,b){40}")).isEqualTo(",b".repeat(32));
 
-        // A pattern whose long windows are checked for its literal takes the bound in every
+        // A pattern with no other literal route takes the bound for its literal in every
         // language, unless an assertion the DFA cannot run reads past the next byte: Java's and
         // Trino's $ here. One beside another literal route, a prefix scan here, takes the check
         // without the bound.
@@ -195,34 +195,16 @@ public class TestRequiredBytes
         String finalTerminator = "(?:a$)?" + BOUNDED_STRINGS;
         Map.of("Java", JavaRegexp.compile(utf8Slice(finalTerminator)), "Trino", TrinoRegexp.compile(utf8Slice(finalTerminator)).re2()).forEach((language, pattern) -> {
             assertThat(pattern.forwardProgramForDiagnostics().hasDfaUnsupportedAssertions()).as(language).isTrue();
-            assertThat(pattern.requiredBytesForDiagnostics().searchesLongWindows()).as(language).isTrue();
             assertThat(pattern.requiredBytesForDiagnostics().boundsSearchEnd()).as(language).isFalse();
         });
         assertThat(Re2.compile(utf8Slice(finalTerminator)).requiredBytesForDiagnostics().boundsSearchEnd()).isTrue();
         compile(BOUNDED_STRINGS + WITHOUT_SUFFIX).forEach((language, pattern) -> {
-            assertThat(pattern.requiredBytesForDiagnostics().searchesLongWindows()).as(language).isTrue();
             assertThat(pattern.requiredBytesForDiagnostics().boundsSearchEnd()).as(language).isFalse();
         });
         compile("x(.*?,){3}z").forEach((language, pattern) -> {
             assertThat(pattern.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).as(language).isEqualTo(",z");
             assertThat(pattern.longWindowRequiredLiteral().boundsSearchEnd()).as(language).isFalse();
         });
-
-        // A suffix longer than the required literal needs a separate scanner, and its larger
-        // charge may not fit when the forward check does. From the smallest budget at which the
-        // first-match DFA initializes, the long-window search fits first, and the pattern keeps
-        // it without the bound.
-        String longer = "(.*?;){3}abcdefgh";
-        long initializes = smallestBudget(longer, TestRequiredBytes::firstMatchDfaInitializes);
-        long searched = firstBudget(initializes, budget -> {
-            RequiredBytes bytes = requiredBytesAt(longer, budget);
-            return bytes != null && bytes.searchesLongWindows();
-        });
-        RequiredBytes unbounded = requiredBytesAt(longer, searched);
-        assertThat(unbounded.boundsSearchEnd()).isFalse();
-        long bounded = firstBudget(searched, budget -> requiredBytesAt(longer, budget).boundsSearchEnd());
-        assertThat(bounded).isGreaterThan(searched);
-        assertThat(requiredBytesAt(longer, bounded).estimatedRetainedSize()).isGreaterThan(unbounded.estimatedRetainedSize());
     }
 
     @Test
@@ -312,32 +294,6 @@ public class TestRequiredBytes
                 for (int offset = 0; offset + spelling.getKey().length() <= length; offset++) {
                     assertOccursAt(oneByte, line(spelling.getKey(), length, offset), spelling.getKey(), offset, spelling.getValue());
                 }
-            }
-        }
-
-        // The long-window search for the one-of bytes finds the first of them at every offset of
-        // windows under and over the vector scan minimum, past a byte just before the window's
-        // start, and before a later one. The window lies in a Slice that starts past its array's
-        // first byte, which holds one of the bytes, and ends before the Slice's last byte, which
-        // holds another.
-        RequiredBytes oneOfSearch = Re2.compile(utf8Slice(URI_OR_EMAIL)).longWindowRequiredLiteral();
-        List<Integer> lengths = new ArrayList<>();
-        for (int length = 1; length < 40; length++) {
-            lengths.add(length);
-        }
-        lengths.add(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES + 37);
-        for (int length : lengths) {
-            for (int offset = -1; offset < length; offset++) {
-                char[] window = ("@" + "x".repeat(length)).toCharArray();
-                if (offset >= 0) {
-                    window[1 + offset] = '/';
-                    if (offset + 2 < length) {
-                        window[offset + 3] = '@';
-                    }
-                }
-                byte[] padded = ("/" + new String(window) + "@").getBytes(UTF_8);
-                Slice input = Slices.wrappedBuffer(padded, 1, padded.length - 1);
-                assertThat(oneOfSearch.indexIn(input, 1, input.length() - 1)).as("%s at %s", length, offset).isEqualTo(offset < 0 ? -1 : 1 + offset);
             }
         }
     }
@@ -440,10 +396,9 @@ public class TestRequiredBytes
         assertThat(SHORT_FILLER.length()).isBetween(RequiredBytes.SHORT_WINDOW_LIMIT, Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES - 1);
         assertThat(LONG_FILLER.length()).isGreaterThanOrEqualTo(Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES);
 
-        // A window of at least the short-window limit that lacks the literal is rejected before
-        // any engine runs, under and over the vector scan minimum: without the check, each search
-        // would build and cache a forward DFA. Only a literal wholly inside the window counts, so
-        // one cut by its end or start does not keep it, and a rejected findInto unsets the groups.
+        // A window of at least the short-window limit that lacks the literal holds no match, under
+        // and over the vector scan minimum. Only a literal wholly inside the window counts, so one
+        // cut by its end or start does not keep it, and a failed findInto unsets the groups.
         String match = BOUNDED_STRINGS_MATCH;
         String endsWithMatch = LONG_FILLER + match;
         String startsWithMatch = match + "\n" + LONG_FILLER;
@@ -453,7 +408,7 @@ public class TestRequiredBytes
                 new RegionCase(endsWithMatch, 0, endsWithMatch.length() - 1, List.of()),
                 new RegionCase(startsWithMatch, match.length() - 1, startsWithMatch.length(), List.of()));
         for (RegionCase window : windows) {
-            assertRejectsBeforeAnyEngine(BOUNDED_STRINGS, utf8Slice(window.text()), window.start(), window.end());
+            assertNoMatch(BOUNDED_STRINGS, utf8Slice(window.text()), window.start(), window.end());
         }
 
         // A window that holds the literal runs the engine, over and under the vector scan
@@ -500,20 +455,16 @@ public class TestRequiredBytes
             assertThat(pattern.count(offsetInput)).as(language).isEqualTo(1);
         }
 
-        // A literal set's search that only the class-run proof admits leaves the check as the
-        // pattern has it without that search, so the check rejects a window that lacks the literal
-        // and is shorter than the minimum a set behind a class run needs before its search runs.
+        // A window that lacks the literal and is shorter than the minimum a literal set behind a
+        // class run needs before its search runs holds no match.
         Slice names = utf8Slice(SHORT_FILLER + "Tom and Finn\n");
         for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(Tom|Finn)xyz").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isGreaterThan(names.length());
-            RegexpMatcher matcher = pattern.matcher(names);
-            assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            assertThat(pattern.matcher(names).find()).as(language).isFalse();
             assertThat(pattern.find(names)).as(language).isFalse();
             assertThat(pattern.count(names)).as(language).isZero();
-            assertNoForwardDfa(pattern, language + " names");
         }
     }
 
@@ -521,9 +472,9 @@ public class TestRequiredBytes
     public void testChecksLongWindowsForLongMatches()
     {
         // A pattern whose every match spans at least the short-window limit keeps its exact
-        // literal for the long-window check alone: each short-window hook rejects a shorter
-        // window on its length first. The 300 copies of the counted capture flatten as 13 do,
-        // so every match ends with `,z`, which also bounds a long search's end.
+        // literal for the search-end bound alone: each short-window hook rejects a shorter window
+        // on its length first. The 300 copies of the counted capture flatten as 13 do, so every
+        // match ends with `,z`, which bounds a long search's end.
         String expression = "(.*?,){300}z";
         String match = ",".repeat(300) + "z";
         Map<String, CompiledPattern> patterns = compile(expression);
@@ -535,24 +486,17 @@ public class TestRequiredBytes
             assertThat(literal).as(language).hasToString(",z");
             assertThat(literal.isLongWindowsOnly()).as(language).isTrue();
             assertThat(literal.boundsSearchEnd()).as(language).isTrue();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).isSameAs(literal);
         }
 
-        // A long window without the literal is rejected before any engine runs, under and over
-        // the vector scan minimum, by every hook.
+        // A long window without the literal holds no match, under and over the vector scan
+        // minimum, and count and the range searches reject it on the bound before any engine
+        // runs.
         for (String filler : List.of(SHORT_FILLER, LONG_FILLER)) {
             Slice input = utf8Slice(filler + ",".repeat(300));
             for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
                 String language = entry.getKey() + " " + input.length();
-                RegexpMatcher matcher = entry.getValue().matcher(input);
-                assertThat(matcher.find()).as(language).isFalse();
-                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-                assertNoForwardDfa(entry.getValue(), language + " matcher");
-            }
-            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
-                String language = entry.getKey() + " " + input.length();
+                assertThat(entry.getValue().matcher(input).find()).as(language).isFalse();
                 assertThat(entry.getValue().find(input)).as(language).isFalse();
-                assertNoForwardDfa(entry.getValue(), language + " find");
             }
             for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
                 String language = entry.getKey() + " " + input.length();
@@ -627,39 +571,32 @@ public class TestRequiredBytes
     {
         assertThat(SHORT_FILLER.length()).isBetween(RequiredBytes.SHORT_WINDOW_LIMIT, Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES - 1);
         assertThat(LONG_FILLER.length()).isGreaterThanOrEqualTo(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES);
-        for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
-            assertThat(entry.getValue().longWindowRequiredLiteral()).as(entry.getKey()).hasToString("one of /@");
-        }
 
-        // The one-of bytes of a pattern with no other literal route check long windows too, under
-        // and over the vector scan minimum, before any engine runs: without the check, each
-        // search would build and cache a forward DFA.
+        // A long window without any of the one-of bytes holds no match, under and over the vector
+        // scan minimum.
         for (String filler : List.of(SHORT_FILLER, LONG_FILLER)) {
             Slice input = utf8Slice(filler);
-            assertRejectsBeforeAnyEngine(URI_OR_EMAIL, input, 0, input.length());
+            assertNoMatch(URI_OR_EMAIL, input, 0, input.length());
 
-            // A window with one of the bytes runs the engine, which finds the matches around
-            // them; a find loop scans once per match, and the last finds none.
+            // A window with one of the bytes finds the matches around them.
             Slice matches = utf8Slice("mail a@b \n" + filler + "see http://x.y/z \n" + filler);
             for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
                 String language = entry.getKey() + " " + filler.length();
                 CompiledPattern pattern = entry.getValue();
                 RegexpMatcher matcher = pattern.matcher(matches);
                 assertThat(spans(matcher)).as(language).containsExactly(new Span(5, 8), new Span(14 + filler.length(), 26 + filler.length()));
-                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(3);
                 assertThat(pattern.find(matches)).as(language).isTrue();
                 assertThat(pattern.count(matches)).as(language).isEqualTo(2);
             }
         }
 
-        // A set of three distinct bytes searches a window over the vector scan minimum for each of
-        // them: the third holds the only match.
+        // Of a set of three distinct bytes, the third holds the only match in a window over the
+        // vector scan minimum.
         Slice thirdByte = utf8Slice(LONG_FILLER + " a#b ");
         Span thirdByteMatch = new Span(LONG_FILLER.length() + 1, LONG_FILLER.length() + 4);
         for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+://[^ ]+|[^ @]+@[^ @]+|[a-z]+#[a-z]+").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of /@#");
             assertThat(spans(pattern.matcher(thirdByte))).as(language).containsExactly(thirdByteMatch);
             assertThat(pattern.find(thirdByte)).as(language).isTrue();
             assertThat(pattern.count(thirdByte)).as(language).isEqualTo(1);
@@ -668,50 +605,38 @@ public class TestRequiredBytes
             assertThat(new Span(groups[0], groups[1])).as(language).isEqualTo(thirdByteMatch);
         }
 
-        // On a dense window, the scans stop after finding a byte near their start
-        // NEAR_REQUIRED_LITERAL_SCAN_LIMIT times in a row, as for a literal.
+        // A dense window finds every match.
         Slice dense = utf8Slice("a@b ".repeat(100));
         for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
-            RegexpMatcher matcher = entry.getValue().matcher(dense);
-            assertThat(spans(matcher)).as(entry.getKey()).hasSize(100);
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(entry.getKey()).isEqualTo(RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT);
+            assertThat(spans(entry.getValue().matcher(dense))).as(entry.getKey()).hasSize(100);
         }
 
-        // An inner literal search that only the class-run proof admits is no other route, as for
-        // a literal: the pattern checks long windows for its one-of bytes as it would without it,
-        // over the search's minimum and under it, where the search does not run.
+        // A pattern whose inner literal search only the class-run proof admits finds no match in a
+        // window without its one-of bytes, over the search's minimum and under it, where the
+        // search does not run.
         for (String filler : List.of(LONG_FILLER.substring(0, 512), LONG_FILLER)) {
             for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(ab@|cd#)").entrySet()) {
                 String language = entry.getKey() + " " + filler.length();
                 CompiledPattern pattern = entry.getValue();
                 assertThat(pattern.innerLiteralSearchForDiagnostics().addedByClassRunProof()).as(language).isTrue();
                 assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isBetween(513, LONG_FILLER.length());
-                assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of @#");
-                RegexpMatcher matcher = pattern.matcher(utf8Slice(filler));
-                assertThat(matcher.find()).as(language).isFalse();
-                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-                assertNoForwardDfa(pattern, language + " class run");
+                assertThat(pattern.matcher(utf8Slice(filler)).find()).as(language).isFalse();
             }
         }
 
-        // A start literal filter that only groups wider than one bit give is no other route, as
-        // for the fixed-width matcher's yield, since the check was measured against filters of
-        // one-bit groups. The a to g of [a-g]{3}://\S+|[a-g]{3}@[^ @]+ give its forward DFA such a
-        // filter: the pattern checks long windows for its / or @ before the DFA scans for the
-        // filter, and the DFA keeps the filter for a window that holds one.
+        // The a to g of [a-g]{3}://\S+|[a-g]{3}@[^ @]+ give its forward DFA a start literal filter
+        // that only groups wider than one bit give, and the DFA scans for it on a window that
+        // holds a match.
         Slice wideFilterMatch = utf8Slice(LONG_FILLER + "see abc@def ");
         for (Map.Entry<String, CompiledPattern> entry : compile("[a-g]{3}://\\S+|[a-g]{3}@[^ @]+").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             Prog program = pattern.forwardProgramForDiagnostics();
             assertThat(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1)).as(language).isNull();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of /@");
             RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
             assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
             Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
             assertThat(dfa.startLiteralFilter() != null).as(language).isEqualTo(VectorSupport.isAvailable());
-            assertThat(dfa.startLiteralFilterScanCount()).as(language).isZero();
             matcher.reset(wideFilterMatch);
             assertThat(spans(matcher)).as(language).containsExactly(new Span(LONG_FILLER.length() + 4, LONG_FILLER.length() + 11));
             assertThat(dfa.startLiteralFilterScanCount() > 0).as(language).isEqualTo(VectorSupport.isAvailable());
@@ -721,10 +646,11 @@ public class TestRequiredBytes
     @Test
     public void testScansForRequiredLiteralOncePerSearch()
     {
-        String match = BOUNDED_STRINGS_MATCH;
+        // A pattern that checks long windows for `,z` beside its prefix scan for x.
+        String match = "x" + BOUNDED_STRINGS_MATCH;
         Slice matches = utf8Slice((LONG_FILLER + match + "\n").repeat(3) + LONG_FILLER);
         Slice dense = utf8Slice(("\n" + match).repeat(100));
-        for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
+        for (Map.Entry<String, CompiledPattern> entry : compile("x" + BOUNDED_STRINGS).entrySet()) {
             String language = entry.getKey();
             // Each find of a loop scans from its start, the last finding no literal.
             RegexpMatcher matcher = entry.getValue().matcher(matches);
@@ -794,73 +720,56 @@ public class TestRequiredBytes
         }
 
         // A folded run that stands in for no prefix is no other route: Trino's (?i)Holmes, whose
-        // s also matches the long s, scans for its run and checks its literal with the search-end
-        // bound. With 64-byte vectors (?i)Holmes has no run, and checks its literal beside the
-        // two-literal start literal filter its rare start bytes take, without the bound. A run
-        // that replaces a prefix is a route too: RE2's (?i)password scans for word in place of
-        // pa, and checks `,#` beside it.
+        // s also matches the long s, scans for its run and takes the search-end bound alone. With
+        // 64-byte vectors (?i)Holmes has no run, and checks its literal beside the two-literal
+        // start literal filter its rare start bytes take, without the bound. A run that replaces
+        // a prefix is a route too: RE2's (?i)password scans for word in place of pa, and checks
+        // `,#` beside it.
         CompiledPattern holmes = TrinoRegexp.compile(utf8Slice("(?i)Holmes[^\\n]{0,40}\\(\\)")).re2();
         boolean holmesRun = !VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64;
         assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isEqualTo(holmesRun);
-        assertThat(holmes.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).isEqualTo("()");
-        assertThat(holmes.longWindowRequiredLiteral().boundsSearchEnd()).isEqualTo(holmesRun);
+        assertThat(holmes.requiredBytesForDiagnostics().boundsSearchEnd()).isEqualTo(holmesRun);
         RegexpMatcher holmesMatcher = holmes.matcher(utf8Slice(LONG_FILLER));
         assertThat(holmesMatcher.find()).isFalse();
-        assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
+        if (!holmesRun) {
+            assertThat(holmes.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).isEqualTo("()");
+            assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
+        }
         RequiredBytes password = Re2.compile(utf8Slice("(?i)password(?:.*?,){3}#")).longWindowRequiredLiteral();
         assertThat(password.longWindowLiteralForDiagnostics()).isEqualTo(",#");
         assertThat(password.boundsSearchEnd()).isFalse();
 
-        // An inner literal search that only the class-run proof admits is no other route: the
-        // pattern scans for its literal on long windows as it would without that search.
+        // Patterns with no other literal route find no match in a long window without their
+        // literal: one whose inner literal search only the class-run proof admits, ones on the
+        // literal-neighbor find plan, and one whose start literal filter no DFA search runs, as
+        // Java's $, an assertion the DFA cannot run, leaves it.
         for (Map.Entry<String, CompiledPattern> entry : compile("(\\w+)foobar(\\d)").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.innerLiteralSearchForDiagnostics()).as(language).isNotNull();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).isNotNull();
-            RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
-            assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            assertThat(pattern.matcher(utf8Slice(LONG_FILLER)).find()).as(language).isFalse();
         }
-
-        // Nor is the literal-neighbor find plan, which answers full-Slice boolean find alone: the
-        // matcher and count reject a long window that lacks the literal before any engine runs, as
-        // without the plan.
         for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+aa[a-z]+").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.findPlanForDiagnostics()).as(language).isEqualTo(LITERAL_NEIGHBORS);
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).isNotNull();
             assertThat(pattern.count(utf8Slice(LONG_FILLER))).as(language).isZero();
-            assertNoForwardDfa(pattern, language + " [a-z]+aa[a-z]+ count");
             RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
             assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
             matcher.reset(utf8Slice(LONG_FILLER + "baab"));
             assertThat(matcher.find()).as(language).isTrue();
         }
-        // RE2's longest-match `[a-z]+::[0-9]+` has no inner literal search, so without the check
-        // its count would build the DFA.
         Re2 longest = Re2.compile(utf8Slice("[a-z]+::[0-9]+"), Re2.Options.defaults().setLongestMatch(true));
         assertThat(longest.findPlanForDiagnostics()).isEqualTo(LITERAL_NEIGHBORS);
         assertThat(longest.innerLiteralSearchForDiagnostics()).isNull();
-        assertThat(longest.longWindowRequiredLiteral()).isNotNull();
         assertThat(longest.count(utf8Slice("x".repeat(512)))).isZero();
-        assertNoForwardDfa(longest, "Re2 longest-match [a-z]+::[0-9]+");
         assertThat(longest.count(utf8Slice("x".repeat(512) + " ab::12"))).isEqualTo(1);
-
-        // A start literal filter that no DFA search runs is no other route. Java's $ is an
-        // assertion the DFA cannot run, so the pattern scans for its literal before BitState
-        // would search the window.
         if (VectorSupport.isAvailable()) {
             CompiledPattern pattern = JavaRegexp.compile(utf8Slice("(?:abc|def)(?:[a-q],){40}z$"));
             Prog program = pattern.forwardProgramForDiagnostics();
             assertThat(program.hasDfaUnsupportedAssertions()).isTrue();
             assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).isTrue();
-            RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
-            assertThat(matcher.find()).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
-            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+            assertThat(pattern.matcher(utf8Slice(LONG_FILLER)).find()).isFalse();
         }
     }
 
@@ -868,20 +777,19 @@ public class TestRequiredBytes
     public void testHandsLongWindowLiteralToInnerLiteralSearch()
     {
         // Full-Slice find of a long window hands the required literal's first occurrence to the
-        // inner literal search where that search is for the literal itself, behind a class run,
-        // or for the literal less its last byte, which the gate after the search's literal admits
-        // alone. That second handoff has its own scan: matcher, count, and ranged searches keep
+        // inner literal search where that search is for the literal less its last byte, which the
+        // gate after the search's literal admits alone. That handoff has its own scan: matcher, count, and ranged searches keep
         // the long windows unchecked, and a long window without `,z` is rejected before any DFA.
         // A search beside a long-window search for another literal, `,` or `the` beside `,z`, hands
         // nothing off, nor does a folded search, nor a search for `,` that `\B` leaves without a
         // gate after it. The required bytes' charge takes in that scan of its own, which shares the
-        // literal's array, and the forward DFA budget gives up that charge; a handoff on the
-        // long-window search costs nothing more.
+        // literal's array, and the forward DFA budget gives up that charge. A search for the
+        // literal itself, behind a class run, hands nothing off.
         Map<String, Boolean> patterns = Map.of(
                 "\\w+,\\bz", true,
                 "(\\w+),(z)", true,
-                "(\\w+)foobar(\\d)", true,
-                "[a-zA-Z]+ing", true,
+                "(\\w+)foobar(\\d)", false,
+                "[a-zA-Z]+ing", false,
                 BOUNDED_STRINGS, false,
                 "\\bthe\\b.*?,z", false,
                 "(?i)\\w+foobar\\d", false,
@@ -906,7 +814,7 @@ public class TestRequiredBytes
                 assertThat(pattern.requiredBytesRetainedSizeForDiagnostics()).as(description).isEqualTo(bytes.withoutInnerLiteralHandoff().estimatedRetainedSize() + ownSearchSize);
             }
         }
-        for (String expression : List.of("\\w+,\\bz", "(\\w+)foobar(\\d)")) {
+        for (String expression : List.of("\\w+,\\bz", "(\\w+),(z)")) {
             Slice pattern = utf8Slice(expression);
             int flags = Re2.Options.defaults().parseFlags();
             ParseResult parsed = RegexpParser.parse(pattern, flags);
@@ -963,30 +871,23 @@ public class TestRequiredBytes
     }
 
     @Test
-    public void testWindowLiteralSearchKeepsLongWindowCheck()
+    public void testWindowLiteralSearchSkippingRoutesFindMatches()
     {
-        // A window literal search does not stand in for the long-window check, since the routes
-        // that skip the window search never search for its literal. For a search range small
-        // enough for BitState, a find with capture groups uses BitState and skips both DFAs and the
-        // window literal search, and a range without xyz is rejected with one scan before BitState
-        // starts.
+        // The routes that skip a window literal search never search for its literal. For a search
+        // range small enough for BitState, a find with capture groups uses BitState and skips both
+        // DFAs and the window literal search, and finds no match in a range without xyz.
         Slice letters = utf8Slice("a".repeat(8192));
         for (Map.Entry<String, CompiledPattern> entry : compile("((?:xy|z){0,2})xyz").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.windowLiteralSearchForDiagnostics()).as(language).isNotNull();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("xyz");
             assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), letters.length(), 2)).as(language).isTrue();
-            RegexpMatcher matcher = pattern.matcher(letters);
-            assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
+            assertThat(pattern.matcher(letters).find()).as(language).isFalse();
         }
         // A Unicode \B makes the DFA quit on a byte outside ASCII after xyz, and after
         // DFA_QUIT_STREAK_LIMIT finds in a row whose DFA quit, a matcher's finds skip the DFA and
         // the window search with it. The windows up to the last match are longer than BitState
-        // holds and run the NFA, and the last, which holds no xyz, is rejected before BitState
-        // would search it. Java's \B is Unicode only with (?U).
+        // holds and run the NFA. Java's \B is Unicode only with (?U).
         String boundary = "(?:yz|x){0,1}xyz\\B";
         Map<String, CompiledPattern> boundaries = Map.of(
                 "Java", JavaRegexp.compile(utf8Slice("(?U)" + boundary)),
@@ -997,7 +898,6 @@ public class TestRequiredBytes
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language).isTrue();
             assertThat(pattern.windowLiteralSearchForDiagnostics()).as(language).isNotNull();
-            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("xyz");
             String last = "\u00E9 ";
             int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - last.getBytes(UTF_8).length;
             int finds = CompiledPattern.DFA_QUIT_STREAK_LIMIT + 2;
@@ -1006,7 +906,6 @@ public class TestRequiredBytes
             assertThat(spans(matcher)).as(language).hasSize(finds);
             assertThat(matcher.dfaQuitStreak()).as(language).isGreaterThanOrEqualTo(CompiledPattern.DFA_QUIT_STREAK_LIMIT);
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(language).isTrue();
-            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
         }
     }
 
@@ -1054,24 +953,20 @@ public class TestRequiredBytes
         }
 
         // Where the bytes every match ends with do not hold the literal, a window holding them may
-        // still lack the literal, so it is checked for the literal too: one ending with them but
-        // holding no literal runs no engine.
+        // still lack the literal, and one ending with them but holding no literal has no match.
         String apart = "(.*?;){3}abcdefgh.*zz";
         Slice withoutLiteral = utf8Slice("a;b;c;zz\n".repeat(60).stripTrailing());
         for (Map.Entry<String, CompiledPattern> entry : compile(apart).entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.requiredBytesForDiagnostics().boundsSearchEnd()).as(language).isTrue();
-            assertThat(pattern.requiredBytesForDiagnostics().suffixHoldsLiteral()).as(language).isFalse();
             assertThat(pattern.count(withoutLiteral)).as(language).isZero();
             assertThat(pattern.find(withoutLiteral, 0, withoutLiteral.length())).as(language).isFalse();
             int[] groups = new int[2 * (pattern.capturingGroupCount() + 1)];
             assertThat(pattern.findInto(withoutLiteral, 0, withoutLiteral.length(), groups)).as(language).isFalse();
-            assertNoForwardDfa(pattern, language);
         }
         Re2 re2 = Re2.compile(utf8Slice(apart));
         assertThat(re2.replaceAll(withoutLiteral, utf8Slice("x"))).isEqualTo(new Re2.ReplaceAllResult(0, withoutLiteral));
-        assertNoForwardDfa(re2, "RE2 replaceAll");
     }
 
     @Test
@@ -1097,7 +992,8 @@ public class TestRequiredBytes
             for (String language : bounded.keySet()) {
                 String description = language + " " + suffixCase.expression();
                 assertThat(bounded.get(language).requiredBytesForDiagnostics().boundsSearchEnd()).as(description).isTrue();
-                assertThat(unbounded.get(language).requiredBytesForDiagnostics().boundsSearchEnd()).as(description).isFalse();
+                RequiredBytes unboundedBytes = unbounded.get(language).requiredBytesForDiagnostics();
+                assertThat(unboundedBytes == null || !unboundedBytes.boundsSearchEnd()).as(description).isTrue();
                 assertThat(spans(bounded.get(language).matcher(utf8Slice(match)))).as(description).containsExactly(new Span(0, match.length()));
                 for (String text : texts) {
                     Slice input = utf8Slice(text);
@@ -1218,13 +1114,13 @@ public class TestRequiredBytes
     @Test
     public void testReplaceAllBacksOffOnDenseText()
     {
-        // RE2's replaceAll runs the one-shot search once per match. For a pattern without the
-        // search-end bound, its loop checks the text from each search's start to its end for the
-        // literal, with a matcher's back-off. A text without the literal takes one scan and no
-        // engine.
-        String match = BOUNDED_STRINGS_MATCH;
+        // RE2's replaceAll runs the one-shot search once per match. For a pattern that checks long
+        // windows for `,z` beside its prefix scan for x, its loop checks the text from each
+        // search's start to its end for the literal, with a matcher's back-off. A text without
+        // the literal takes one scan and no engine.
+        String match = "x" + BOUNDED_STRINGS_MATCH;
         Slice rewrite = utf8Slice("x");
-        String expression = BOUNDED_STRINGS + WITHOUT_SUFFIX;
+        String expression = "x" + BOUNDED_STRINGS;
         Re2 pattern = Re2.compile(utf8Slice(expression));
         Slice noMatch = utf8Slice(LONG_FILLER_WITH_LITERAL);
         assertThat(pattern.replaceAll(noMatch, rewrite)).isEqualTo(new Re2.ReplaceAllResult(0, noMatch));
@@ -1264,12 +1160,11 @@ public class TestRequiredBytes
         assertThat(bounded.replaceAll(utf8Slice(dense), rewrite)).isEqualTo(new Re2.ReplaceAllResult(100, utf8Slice("\nx".repeat(100))));
         assertThat(bounded.replaceAllNearLiteralScansForDiagnostics(utf8Slice(dense), rewrite)).isZero();
 
-        // Where those bytes do not hold the literal, the bound stands in for no check, so the loop
-        // still scans: past the one match, the rest holds no literal and runs no search.
+        // Where those bytes do not hold the literal, the bound alone still ends every search.
         Re2 apart = Re2.compile(utf8Slice("(.*?;){3}abcdefgh.*zz"));
         Slice apartText = utf8Slice("a;b;c;abcdefghzz\n" + "a;b;c;zz\n".repeat(60).stripTrailing());
         assertThat(apart.replaceAll(apartText, rewrite).replacementCount()).isEqualTo(1);
-        assertThat(apart.replaceAllNearLiteralScansForDiagnostics(apartText, rewrite)).isEqualTo(-1);
+        assertThat(apart.replaceAllNearLiteralScansForDiagnostics(apartText, rewrite)).isZero();
     }
 
     @Test
@@ -1403,8 +1298,7 @@ public class TestRequiredBytes
     {
         // From the smallest budget at which the first-match DFA initializes beside the required
         // bytes' charge, that charge would cost the DFA, so none is kept. Further up, the
-        // short-window check's charge fits before the long-window literal's larger one, and the
-        // pattern keeps the check alone.
+        // short-window check's charge fits, and the pattern keeps the check alone.
         String expression = "(?s).*,z.*q";
         long compiledInitializes = smallestBudget(expression, TestRequiredBytes::firstMatchDfaInitializes);
         long compiledBudget = firstBudgetKeepingRequiredBytes(compiledInitializes, maxMemory -> compileWithMaxMemory(expression, maxMemory));
@@ -1425,8 +1319,7 @@ public class TestRequiredBytes
         assertThat(requiredBytesAt(longMatches, longMatchesInitializes)).isNull();
 
         // The same holds after compilation, where Trino's ordered-literal route is charged with
-        // the required bytes' charge handed back, and they are judged again beside it, although
-        // compiled without the route the pattern takes the long-window literal at that budget.
+        // the required bytes' charge handed back, and they are judged again beside it.
         Slice pattern = utf8Slice(expression);
         LongFunction<CompiledPattern> compileTrino = maxMemory -> compileTrinoWithMaxMemory(pattern, maxMemory).re2();
         long initializes = smallestBudget(maxMemory -> firstMatchDfaInitializes(compileTrino.apply(maxMemory)));
@@ -1436,9 +1329,6 @@ public class TestRequiredBytes
         RequiredBytes kept = regexp.re2().requiredBytesForDiagnostics();
         assertThat(kept).hasToString(",z");
         assertThat(kept.searchesLongWindows()).isFalse();
-        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        TrinoCompiledPattern withoutRoute = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, budget, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
-        assertThat(withoutRoute.requiredBytesForDiagnostics().searchesLongWindows()).isTrue();
         assertThat(regexp.contains(utf8Slice("x,z q"))).isTrue();
         assertThat(regexp.contains(utf8Slice("x, zq"))).isFalse();
     }
@@ -1637,41 +1527,23 @@ public class TestRequiredBytes
     // any engine runs, each on a newly compiled pattern: a matcher's find, which scans once, a
     // range find, and a range findInto, which unsets the groups, and, where the window is the
     // whole input, find and count.
-    private static void assertRejectsBeforeAnyEngine(String pattern, Slice input, int start, int end)
+    private static void assertNoMatch(String pattern, Slice input, int start, int end)
     {
         String description = "[%s, %s) of %s bytes".formatted(start, end, input.length());
         for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
             String language = entry.getKey() + " " + description;
-            RegexpMatcher matcher = entry.getValue().matcher(input);
+            CompiledPattern compiled = entry.getValue();
+            RegexpMatcher matcher = compiled.matcher(input);
             matcher.reset(input, start, end);
             assertThat(matcher.find()).as(language).isFalse();
-            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-            assertNoForwardDfa(entry.getValue(), language + " matcher");
-        }
-        for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
-            String language = entry.getKey() + " " + description;
-            assertThat(entry.getValue().find(input, start, end)).as(language).isFalse();
-            assertNoForwardDfa(entry.getValue(), language + " range find");
-        }
-        for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
-            String language = entry.getKey() + " " + description;
-            CompiledPattern compiled = entry.getValue();
+            assertThat(compiled.find(input, start, end)).as(language).isFalse();
             int[] groups = new int[2 * (compiled.capturingGroupCount() + 1)];
             Arrays.fill(groups, 7);
             assertThat(compiled.findInto(input, start, end, groups)).as(language).isFalse();
             assertThat(groups).as(language).containsOnly(-1);
-            assertNoForwardDfa(compiled, language + " range findInto");
-        }
-        if (start == 0 && end == input.length()) {
-            for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
-                String language = entry.getKey() + " " + description;
-                assertThat(entry.getValue().find(input)).as(language).isFalse();
-                assertNoForwardDfa(entry.getValue(), language + " find");
-            }
-            for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
-                String language = entry.getKey() + " " + description;
-                assertThat(entry.getValue().count(input)).as(language).isZero();
-                assertNoForwardDfa(entry.getValue(), language + " count");
+            if (start == 0 && end == input.length()) {
+                assertThat(compiled.find(input)).as(language).isFalse();
+                assertThat(compiled.count(input)).as(language).isZero();
             }
         }
     }

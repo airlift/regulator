@@ -33,14 +33,12 @@ import static java.util.Objects.requireNonNull;
 /// as `# noqa` in ruff's noqa comment pattern, or one of up to three bytes, such as `/` or `@` in
 /// `[a-z]+://\S+|[^ @]+@[^ @]+`. A search window without them holds no match, so a short window,
 /// such as one line of a line-by-line search, is rejected with one scan of its 8-byte words before
-/// any engine runs, as the Rust crate's prefilter runs before its engines. An exact literal, or
-/// the one-of-bytes shape, of a pattern that has no other literal route also rejects a long
-/// window, with the search of [#indexIn], as Hyperscan proves a literal absent before it runs its
-/// automaton. Where every match also ends with exact bytes, the last occurrence of those bytes
-/// bounds a long window's end, as Hyperscan bounds its scan; see [#lastIndexIn]. Where those
-/// bytes do not hold the literal, the window is still checked for the literal before that end. A
-/// pattern that another literal route keeps from that check searches long windows for its rarest
-/// exact literal instead, where the route does not already search for it; see
+/// any engine runs, as the Rust crate's prefilter runs before its engines. Where every match of
+/// an exact literal's pattern that has no other literal route also ends with exact bytes, the
+/// last occurrence of those bytes bounds a long window's end, as Hyperscan bounds its scan; see
+/// [#lastIndexIn]. A pattern with another literal route searches long windows for its rarest
+/// exact literal, with the search of [#indexIn], where the route does not already search for it,
+/// as Hyperscan proves a literal absent before it runs its automaton; see
 /// [#literalBesideRoutes]. Where the pattern's inner literal search is for the exact literal, or
 /// for the literal less a last byte that the search's gate admits alone after it, full-Slice find
 /// hands the literal's first occurrence in a long window to that search; see
@@ -113,9 +111,8 @@ final class RequiredBytes
     // LOW_BITS, read from a field so the word loops hold it in a register, as in
     // LiteralSearchKernel: on aarch64 C2 cannot encode -LOW_BITS as an immediate.
     private final long lowBits;
-    // The search of windows of SHORT_WINDOW_LIMIT bytes or more, for a pattern whose compile chose
-    // the long-window check, or null: for the exact literal `bytes`, which it shares, or for the
-    // literal beside a pattern's other literal route.
+    // The search of windows of SHORT_WINDOW_LIMIT bytes or more for the literal beside a pattern's
+    // other literal route, sharing `bytes` where it is that literal, or null.
     private final LiteralSearchKernel longWindowSearch;
     // The short-window check runs on windows shorter than this: SHORT_WINDOW_LIMIT, or, for a
     // one-of set of two or three distinct bytes beside an inner literal search, that search's
@@ -125,25 +122,16 @@ final class RequiredBytes
     // the search's single-byte scan: a check that changed with line length cost more on naturally
     // mixed line lengths, as CompiledPattern.build records.
     private final int windowLimit;
-    // Whether `suffix` holds the literal as a run of its bytes, for a literal with its search-end
-    // bound, so that a window holding the suffix holds the literal too.
-    private final boolean suffixHoldsLiteral;
     // The exact bytes every match ends with, from requiredSuffix, the literal's own array where
     // they are the literal, or null. Only the analysis and a literal whose compile chose the
     // search-end bound hold them.
     private final byte[] suffix;
     // The search for the last occurrence of `suffix`, for a pattern whose compile chose the
-    // search-end bound, or null. Where the suffix is the literal, it is also longWindowSearch.
+    // search-end bound, or null.
     private final LiteralSearchKernel suffixSearch;
     // Whether the literal serves the long-window check alone, for a pattern whose matches span at
     // least SHORT_WINDOW_LIMIT bytes.
     private final boolean longWindowsOnly;
-    // Whether the compile chose the long-window check for the one-of-bytes shape, whose search
-    // keeps nothing beyond the bytes.
-    private final boolean searchesOneOfOnLongWindows;
-    // The number of distinct bytes of the one-of-bytes shape, one to three, for its vector
-    // byte-set scan.
-    private final int oneOfByteCount;
     // The search whose first hit in a long window full-Slice find hands to the pattern's inner
     // literal search, for a pattern whose compile chose that handoff, or null: longWindowSearch,
     // where the literal is the inner literal, or a search of its own for `bytes`, which it
@@ -154,21 +142,20 @@ final class RequiredBytes
 
     private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch)
     {
-        this(oneOf, bytes, masks, longWindowSearch, false, suffix, suffixSearch, false, SHORT_WINDOW_LIMIT);
+        this(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, false, SHORT_WINDOW_LIMIT);
     }
 
-    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, boolean searchesOneOfOnLongWindows, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit)
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit)
     {
-        this(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit, null);
+        this(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, longWindowsOnly, windowLimit, null);
     }
 
-    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, boolean searchesOneOfOnLongWindows, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit, LiteralSearchKernel handoffSearch)
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit, LiteralSearchKernel handoffSearch)
     {
         this.oneOf = oneOf;
         this.bytes = requireNonNull(bytes, "bytes is null");
         this.masks = masks;
         this.longWindowSearch = longWindowSearch;
-        this.searchesOneOfOnLongWindows = searchesOneOfOnLongWindows;
         this.handoffSearch = handoffSearch;
         this.suffix = suffix;
         this.suffixSearch = suffixSearch;
@@ -176,8 +163,7 @@ final class RequiredBytes
         if (oneOf) {
             // The padding repeats the last byte, so each distinct byte after the first differs
             // from the one before it.
-            this.oneOfByteCount = 1 + (bytes[1] != bytes[0] ? 1 : 0) + (bytes[2] != bytes[1] ? 1 : 0);
-            this.singleByte = oneOfByteCount == 1;
+            this.singleByte = bytes[1] == bytes[0] && bytes[2] == bytes[1];
             this.firstBroadcast = singleByte ? broadcast(bytes[0]) : 0;
             this.lastBroadcast = 0;
             this.lastMask = 0;
@@ -186,7 +172,6 @@ final class RequiredBytes
         else {
             int last = bytes.length - 1;
             this.singleByte = false;
-            this.oneOfByteCount = 0;
             this.firstBroadcast = broadcast(bytes[0]);
             this.lastBroadcast = broadcast(bytes[last]);
             this.lastMask = broadcast(masks[last]);
@@ -194,7 +179,6 @@ final class RequiredBytes
         }
         this.lowBits = LOW_BITS;
         this.windowLimit = windowLimit;
-        this.suffixHoldsLiteral = suffixSearch != null && Slices.wrappedBuffer(suffix).indexOf(Slices.wrappedBuffer(bytes)) >= 0;
     }
 
     /// Returns the bytes every match of the `normalized` expression holds, for the short-window
@@ -208,7 +192,7 @@ final class RequiredBytes
     {
         RequiredBytes literal = analyzeLiteral(normalized, requiredSuffix(normalized));
         if (minimumMatchLength >= SHORT_WINDOW_LIMIT) {
-            return literal != null && literal.isExactLiteral() ? new RequiredBytes(false, literal.bytes, literal.masks, null, false, literal.suffix, null, true, SHORT_WINDOW_LIMIT) : null;
+            return literal != null && literal.isExactLiteral() ? new RequiredBytes(false, literal.bytes, literal.masks, null, literal.suffix, null, true, SHORT_WINDOW_LIMIT) : null;
         }
         if (literal != null) {
             return literal;
@@ -786,56 +770,27 @@ final class RequiredBytes
         return oneOf || isExactLiteral();
     }
 
-    /// Returns these bytes, an exact literal or the one-of-bytes shape, with the search
-    /// [#indexIn] runs on long windows.
-    RequiredBytes withLongWindowSearch()
-    {
-        if (!admitsLongWindowSearch()) {
-            throw new IllegalStateException("not an exact literal: " + this);
-        }
-        if (oneOf) {
-            return new RequiredBytes(true, bytes, masks, null, true, null, null, false, windowLimit);
-        }
-        return new RequiredBytes(false, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes)), false, null, null, longWindowsOnly, SHORT_WINDOW_LIMIT);
-    }
-
-    /// Returns these bytes with their long-window search and, for an exact literal where every
-    /// match ends with exact bytes, the search-end bound: the search [#lastIndexIn] runs for those
-    /// bytes. Where they are the literal, one search serves both. Bytes without such a suffix,
-    /// such as the one-of bytes, take no bound and get [#withLongWindowSearch].
-    RequiredBytes withLongWindowSearchAndBound()
+    /// Returns this exact literal with the search-end bound alone, the search [#lastIndexIn] runs
+    /// for the exact bytes every match ends with, or null where its matches end with no such bytes.
+    RequiredBytes withSearchEndBound()
     {
         if (suffix == null) {
-            return withLongWindowSearch();
+            return null;
         }
         if (!isExactLiteral()) {
             throw new IllegalStateException("not an exact literal: " + this);
         }
-        LiteralSearchKernel lastOccurrence = LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(suffix));
-        LiteralSearchKernel literalSearch = suffix == bytes ? lastOccurrence : LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes));
-        return new RequiredBytes(false, bytes, masks, literalSearch, false, suffix, lastOccurrence, longWindowsOnly, SHORT_WINDOW_LIMIT);
+        return new RequiredBytes(false, bytes, masks, null, suffix, LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(suffix)), longWindowsOnly, SHORT_WINDOW_LIMIT);
     }
 
     /// Returns these bytes, for the short-window check, with the search [#indexIn] runs on long
     /// windows for `literal`, an exact literal every match consumes that another literal route
     /// of the pattern does not search for; see [#literalBesideRoutes]. Such a search takes no
-    /// search-end bound.
+    /// search-end bound. Where `literal` is these bytes, the search shares their array.
     RequiredBytes withBesideRouteSearch(byte[] literal)
     {
-        if (isExactLiteral() && Arrays.equals(literal, bytes)) {
-            return withLongWindowSearch();
-        }
-        return new RequiredBytes(oneOf, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(literal)), false, null, null, longWindowsOnly, windowLimit);
-    }
-
-    /// Returns this literal with its long-window search but without the search-end bound
-    /// [#withLongWindowSearchAndBound] adds.
-    RequiredBytes withoutSearchEndBound()
-    {
-        if (!boundsSearchEnd()) {
-            throw new IllegalStateException("no search-end bound: " + this);
-        }
-        return withLongWindowSearch();
+        byte[] searched = isExactLiteral() && Arrays.equals(literal, bytes) ? bytes : literal;
+        return new RequiredBytes(oneOf, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(searched)), null, null, longWindowsOnly, windowLimit);
     }
 
     /// Returns these bytes without the long-window search, the search-end bound, and the
@@ -849,7 +804,7 @@ final class RequiredBytes
         if (!searchesLongWindows() && suffix == null && handoffSearch == null) {
             return this;
         }
-        return new RequiredBytes(oneOf, bytes, masks, null, false, null, null, false, windowLimit);
+        return new RequiredBytes(oneOf, bytes, masks, null, null, null, false, windowLimit);
     }
 
     /// Whether full-Slice find may hand the first occurrence of this literal in a long window to
@@ -884,13 +839,13 @@ final class RequiredBytes
     RequiredBytes withInnerLiteralHandoff()
     {
         LiteralSearchKernel search = longWindowSearch != null ? longWindowSearch : LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes));
-        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit, search);
+        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, longWindowsOnly, windowLimit, search);
     }
 
     /// Returns these bytes without the handoff [#withInnerLiteralHandoff] adds.
     RequiredBytes withoutInnerLiteralHandoff()
     {
-        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit);
+        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, longWindowsOnly, windowLimit);
     }
 
     /// Whether the compile chose the handoff for this literal; see [#withInnerLiteralHandoff].
@@ -923,24 +878,17 @@ final class RequiredBytes
         return longWindowSearch == null ? null : new String(longWindowSearch.literalBytes(), ISO_8859_1);
     }
 
-    /// Whether the compile chose the long-window check for these bytes; see [#indexIn].
+    /// Whether the compile chose the long-window check beside another literal route for these
+    /// bytes; see [#indexIn].
     boolean searchesLongWindows()
     {
-        return longWindowSearch != null || searchesOneOfOnLongWindows;
+        return longWindowSearch != null;
     }
 
     /// Whether the compile chose the search-end bound for this literal; see [#lastIndexIn].
     boolean boundsSearchEnd()
     {
         return suffixSearch != null;
-    }
-
-    /// Whether the bytes every match ends with hold the literal, for a literal with its search-end
-    /// bound. Where they do not, a window that holds them may still lack the literal, so a search
-    /// checks for it too; see `CompiledPattern.longWindowSearchEnd`.
-    boolean suffixHoldsLiteral()
-    {
-        return suffixHoldsLiteral;
     }
 
     /// The number of bytes every match ends with, for a literal with its search-end bound.
@@ -957,30 +905,15 @@ final class RequiredBytes
     }
 
     /// Returns the Slice offset of the first occurrence wholly inside `[start, end)` of `text` of
-    /// the long-window literal, or of any of the one-of bytes, or -1, for bytes with their
-    /// long-window search. A literal takes [Prog#findLiteral]: where vectors are available, a
-    /// window of at least [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] takes the vector pair scan, and
-    /// a shorter one, or any window without vectors, the call-free word-at-a-time search. The
-    /// one-of bytes take [VectorByteSetScanner#find] where vectors are available and the window
-    /// has at least [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES], and otherwise `indexOfOneOf`'s
-    /// word-at-a-time search.
+    /// the long-window literal, or -1, for bytes with their long-window search, by
+    /// [Prog#findLiteral]: where vectors are available, a window of at least
+    /// [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] takes the vector pair scan, and a shorter one, or
+    /// any window without vectors, the call-free word-at-a-time search.
     int indexIn(Slice text, int start, int end)
     {
-        byte[] data = text.byteArray();
         int base = text.byteArrayOffset();
-        int offset = base + start;
-        int length = end - start;
         LiteralSearchKernel search = longWindowSearch;
-        int found;
-        if (search != null) {
-            found = Prog.findLiteral(data, offset, length, search.literalBytes(), search);
-        }
-        else if (VectorSupport.isAvailable() && length >= Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
-            found = VectorByteSetScanner.find(data, offset, length, bytes[0], bytes[1], bytes[2], oneOfByteCount);
-        }
-        else {
-            found = indexOfOneOf(data, offset, length);
-        }
+        int found = Prog.findLiteral(text.byteArray(), base + start, end - start, search.literalBytes(), search);
         return found < 0 ? -1 : found - base;
     }
 
@@ -1060,7 +993,7 @@ final class RequiredBytes
         if (!oneOf || singleByte) {
             throw new IllegalStateException("not a one-of set of two or three distinct bytes: " + this);
         }
-        return new RequiredBytes(true, bytes, masks, null, false, null, null, false, limit);
+        return new RequiredBytes(true, bytes, masks, null, null, null, false, limit);
     }
 
     /// Whether `[start, end)` of `text` holds the literal wholly, or one of the bytes.
@@ -1199,47 +1132,6 @@ final class RequiredBytes
         return holdsAny((long) LONG_HANDLE.get(data, lastWord), first, second, third, low);
     }
 
-    // The first position of `[offset, offset + length)` that holds one of the three bytes, or -1:
-    // containsOneOf's words, with the lowest flagged byte of a word, which the zero-byte test
-    // flags exactly, as the position. A last word that overlaps the one before it flags none of
-    // the bytes already searched, since a byte flagged in error only follows one that matched.
-    private int indexOfOneOf(byte[] data, int offset, int length)
-    {
-        int end = offset + length;
-        if (length < Long.BYTES) {
-            for (int position = offset; position < end; position++) {
-                byte value = data[position];
-                if (value == bytes[0] || value == bytes[1] || value == bytes[2]) {
-                    return position;
-                }
-            }
-            return -1;
-        }
-        long first = broadcast(bytes[0]);
-        long second = broadcast(bytes[1]);
-        long third = broadcast(bytes[2]);
-        long low = lowBits;
-        int lastWord = end - Long.BYTES;
-        for (int position = offset; position < lastWord; position += Long.BYTES) {
-            long matches = oneOfByteMask((long) LONG_HANDLE.get(data, position), first, second, third, low);
-            if (matches != 0) {
-                return position + (Long.numberOfTrailingZeros(matches) >>> 3);
-            }
-        }
-        long matches = oneOfByteMask((long) LONG_HANDLE.get(data, lastWord), first, second, third, low);
-        return matches == 0 ? -1 : lastWord + (Long.numberOfTrailingZeros(matches) >>> 3);
-    }
-
-    // The high bit of each byte of `word` that equals one of the three bytes, exact up to the
-    // first such byte.
-    private static long oneOfByteMask(long word, long first, long second, long third, long low)
-    {
-        long firstDifference = word ^ first;
-        long secondDifference = word ^ second;
-        long thirdDifference = word ^ third;
-        return (((firstDifference - low) & ~firstDifference) | ((secondDifference - low) & ~secondDifference) | ((thirdDifference - low) & ~thirdDifference)) & HIGH_BITS;
-    }
-
     private static boolean holdsAny(long word, long first, long second, long third, long low)
     {
         long firstDifference = word ^ first;
@@ -1253,11 +1145,11 @@ final class RequiredBytes
     long estimatedRetainedSize()
     {
         // A long-window search for `bytes` shares that array, and the suffix search shares
-        // `suffix`. Their own estimates count those arrays too, so each is counted once here.
-        // Where the suffix is the literal, the two searches are one. A handoff search of its own
-        // shares `bytes` too, and one that is the long-window search costs nothing more.
+        // `suffix`. Their own estimates count those arrays too, so each is counted once here. A
+        // handoff search of its own shares `bytes` too, and one that is the long-window search
+        // costs nothing more.
         long suffixSize = suffix == null || suffix == bytes ? 0 : SizeOf.sizeOf(suffix);
-        long suffixSearchSize = suffixSearch == null || suffixSearch == longWindowSearch ? 0 : suffixSearch.estimatedRetainedSize() - suffixSize;
+        long suffixSearchSize = suffixSearch == null ? 0 : suffixSearch.estimatedRetainedSize() - (suffix == bytes ? SizeOf.sizeOf(suffix) : suffixSize);
         long searchSize = longWindowSearch == null ? 0 : longWindowSearch.estimatedRetainedSize() - (longWindowSearch.literalBytes() == bytes ? SizeOf.sizeOf(bytes) : 0);
         long handoffSize = hasOwnHandoffSearch() ? handoffSearch.estimatedRetainedSize() - SizeOf.sizeOf(bytes) : 0;
         return INSTANCE_SIZE + SizeOf.sizeOf(bytes) + SizeOf.sizeOf(masks) + suffixSize + suffixSearchSize + searchSize + handoffSize;

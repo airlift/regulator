@@ -1136,8 +1136,9 @@ public class TestInnerLiteralSearch
     @Test
     public void testRequiredLiteralHandoffFindAgreesWithOrdinaryEngine()
     {
-        // The full-Slice find of a long window that hands the required literal's first occurrence
-        // to the inner literal search agrees with the ordinary engine in every language, as do its
+        // The full-Slice find of a long window agrees with the ordinary engine in every language,
+        // where it hands the required literal's first occurrence to the inner literal search and
+        // where it does not, as do its
         // matcher and count routes, with the same lines as for a search that runs first, at
         // lengths around the window limit and the 1 KiB vector scan minimum, lines of `x` alone
         // among them: for the literal `,z`, whose search is for `,` with `z` its gate after, and
@@ -1153,7 +1154,7 @@ public class TestInnerLiteralSearch
             String regex = entry.getKey();
             List<byte[]> lines = lines(entry.getValue(), 255, 256, 300, 1023, 1024, 1100);
             for (Language language : Language.values()) {
-                assertThat(language.compiledPattern(regex).requiredBytesForDiagnostics().handsOffToInnerLiteralSearch()).as("%s %s", language, regex).isTrue();
+                assertThat(language.compiledPattern(regex).requiredBytesForDiagnostics().handsOffToInnerLiteralSearch()).as("%s %s", language, regex).isEqualTo(regex.contains(","));
                 assertAgreesWithOrdinaryEngine(language, regex, entry.getValue().getFirst(), lines);
             }
         }
@@ -1165,7 +1166,7 @@ public class TestInnerLiteralSearch
         // The handoff finds the first occurrence of the required literal, and a search started
         // there returns what the search of the whole window returns, and a window without one,
         // such as one without a `,` at all, has no match: for `,z` behind the gated search for
-        // `,`, and for the search's own literal behind a gated or ungated search. The literal lies
+        // `,`. A search for its own literal, gated or ungated, hands nothing off. The literal lies
         // at 63 and 64 bytes, around the near-start fallback, after commas the gate after `,`
         // rules out, after hits that fail a gate, and after a letter past ASCII or malformed UTF-8
         // where a word byte could be. In windows of at least 1 KiB, whose length keeps the scan for
@@ -1209,7 +1210,10 @@ public class TestInnerLiteralSearch
                 CompiledPattern pattern = language.compiledPattern(regex);
                 InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
                 RequiredBytes bytes = pattern.requiredBytesForDiagnostics();
-                assertThat(bytes.handsOffToInnerLiteralSearch()).as(description).isTrue();
+                assertThat(bytes.handsOffToInnerLiteralSearch()).as(description).isEqualTo(regex.contains(","));
+                if (!bytes.handsOffToInnerLiteralSearch()) {
+                    continue;
+                }
                 for (Slice text : texts) {
                     String textDescription = "%s on %s".formatted(description, text.toStringUtf8());
                     int length = text.length();

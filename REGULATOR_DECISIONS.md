@@ -3224,6 +3224,12 @@ literal yields at 64 lanes too; that step-aside is unmeasured.
 
 ## Required Literal Absence On Long Windows
 
+A pattern without another literal route no longer checks long windows for its
+own literal or one-of bytes: it keeps only the
+[search-end bound](#required-suffix-bound-on-long-windows), where it has one.
+The check below survives only beside another literal route. The rest of this
+section records the check as it was measured.
+
 rebar's `leipzig/bounded-strings-ending-z`, `(.*?,){13}z` over 16 MB of
 English news, has no match. Every language ran one forward DFA pass over the
 whole text, while Hyperscan, whose reverse vermicelli scan proves the literal
@@ -3528,10 +3534,9 @@ window holds no match, the engine still reads the whole tail: on rebar's
 `leipzig/bounded-strings-ending-z` with one `,z` in its first kilobyte, every
 language ran the forward DFA over all 16 MB. Hyperscan bounds such a scan by the
 last occurrence of the literal every match ends with. Regulator does the same
-with the search-end bound: a pattern that checks long windows for its own exact
-literal also bounds a long search's end by the last occurrence of its required
-suffix. A pattern that checks long windows beside another literal route takes
-no bound.
+with the search-end bound: a pattern with no other literal route bounds a long
+search's end by the last occurrence of its required suffix. A pattern that
+checks long windows beside another literal route takes no bound.
 
 The required suffix is exact ASCII bytes, at least two and at most the last 64,
 that every match ends with, with no zero-width op after its last byte at any
@@ -3565,10 +3570,9 @@ Count and the one-shot unanchored searches take the bound in place of the
 forward check: no occurrence counts or finds nothing, and otherwise the DFA
 count, or the engine, reads only up to the end of the last occurrence. Where the
 suffix does not hold the literal, as `zz` does not hold `abcdefgh` in
-`(.*?;){3}abcdefgh.*zz`, the window up to that end is still checked for the
-literal, and one without it holds no match. A pattern that only the [class-run
-proof](#inner-literal-class-run-prefix) gives an inner literal search keeps the
-check and so the bound, and its count through that search reads only up to the
+`(.*?;){3}abcdefgh.*zz`, the bound alone ends the search. A pattern that only
+the [class-run proof](#inner-literal-class-run-prefix) gives an inner literal
+search keeps the bound, and its count through that search reads only up to the
 same end, as the DFA count does. A one-shot search keeps the whole text as its
 context. RE2's `replaceAll` bounds the whole text once and ends each of its
 searches there. Where the suffix holds the literal, that bound stands in for its

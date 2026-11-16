@@ -112,7 +112,7 @@ answer, or reject the input before any engine runs.
   `CompiledPattern.longWindowLacksRequiredLiteral`,
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`,
   `CompiledPattern.nearRequiredLiteralScansInLoop`, `RequiredBytes.indexIn`,
-  `RequiredBytes.admitsLongWindowSearch`, `RequiredBytes.indexOfOneOf`,
+  `RequiredBytes.admitsLongWindowSearch`,
   `RequiredBytes.requiredSuffix`, `CompiledPattern.longWindowSearchEnd`,
   `Prog.findLastLiteral`, `LiteralSearchKernel.findLastContains`,
   `LiteralSearchKernel.findLastKmp`, `VectorPrefixScanner.findLast`,
@@ -146,18 +146,16 @@ answer, or reject the input before any engine runs.
   leaves the find undecided; they yield to the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
-  count, the one-shot range searches, and RE2's `replaceAll`, for unanchored
-  patterns whose required bytes are an exact literal, or one of up to three
-  bytes, and that have no other literal search. An inner literal search
-  counts as one unless only the class-run proof admits it, and the
-  [literal-neighbor](#literal-neighbors) find plan does not count, since the
-  pattern's other operations keep the ordinary engine. A
-  [window literal search](#window-literal-search) also keeps the long-window
-  check, because finds that use BitState for captures, or that skip the DFA,
-  never run the window search. A pattern whose every match spans at least 256
-  bytes keeps its literal for this check alone.
+  count, the one-shot range searches, and RE2's `replaceAll`, only beside
+  another literal route, as below. An inner literal search counts as such a
+  route unless only the class-run proof admits it, and the
+  [literal-neighbor](#literal-neighbors) find plan and a
+  [window literal search](#window-literal-search) do not count. A pattern
+  whose every match spans at least 256 bytes keeps its literal for the
+  long-window routes alone.
   Search-end bound: count, the one-shot range and capture searches, and
-  `replaceAll` of such a pattern that has an exact required literal and
+  `replaceAll` of an unanchored pattern without another literal route that
+  has an exact required literal and
   whose matches all end with at least two exact ASCII bytes and no assertion
   after them; not for a program with assertions the DFA cannot run, such as
   Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
@@ -202,9 +200,9 @@ answer, or reject the input before any engine runs.
   engine runs. The test reads 8-byte words; when the first byte is rare, it
   loads the last byte's word only for a word that holds the first byte. A
   single required byte takes the same scan as the inner literal search's
-  single-byte scan, two words a step. A longer window is searched for an exact
-  required literal instead, with the vector pair scan from 1 KiB, or for any
-  of the one-of bytes, with the vector byte-set scan from 1 KiB; where an
+  single-byte scan, two words a step. A longer window beside another literal
+  route is searched for an exact required literal instead, with the vector
+  pair scan from 1 KiB; where an
   inner literal search for one exact literal stands in for that check, the
   routes that skip the search, BitState capture of groups and a skipped DFA,
   scan the window for its literal instead. Under the handoff, full-Slice find
@@ -213,8 +211,7 @@ answer, or reject the input before any engine runs.
   search scans back from the window's end for the last occurrence of the bytes
   every match ends with, the forward scan mirrored: none means no match, and
   otherwise the search ends at that occurrence's end, since every match ends
-  at the end of one. Where those bytes do not hold the literal, the window up
-  to that end is still checked for the literal. `replaceAll` bounds the whole
+  at the end of one. `replaceAll` bounds the whole
   text once and ends each of its searches there. The same early answer comes
   from three other facts. A window shorter than the pattern's minimum match
   length fails before any engine setup, and so does a window longer than the
@@ -235,11 +232,9 @@ answer, or reject the input before any engine runs.
   bytes in 16-byte blocks, and ends the search if it does not. The
   required-byte reject takes ruff's `noqa` rows to 0.41 to 0.68 of their
   earlier time and lh3lh3's `uri-or-email` to 0.34 to 0.47
-  ([design][d-required-bytes]), and the long-window check takes the leipzig
-  `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to 0.48–0.57
-  ms, 0.021 to 0.039 of its earlier time, in all four languages on Graviton
-  and Intel ([#188]). With one `,z` placed in that text's first kilobyte,
-  where the forward check stops, the search-end bound takes its count to 0.014
+  ([design][d-required-bytes]). With one `,z` placed in the leipzig
+  `bounded-strings-ending-z` text's first kilobyte, the search-end bound
+  takes its count to 0.014
   to 0.026 of main's time on Intel and 0.040 on Graviton, on the first
   megabyte and on the whole 16 MB, in all four languages
   ([design][d-required-suffix]). On the leipzig `bounded-strings-ending-z`
