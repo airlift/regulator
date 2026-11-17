@@ -108,11 +108,11 @@ public final class DfaAbsolutePointerProbe
         exerciseCacheGrowthAtomicity();
 
         // With native access the sidecar is native memory charged its bytes; without it, a heap
-        // array charged its real size.
+        // array charged its real size and that of the class offsets the heap loops read.
         check(dfa.absolutePointerTransitionMemory() > 0, "search did not allocate a sidecar");
         MemorySegment segment = dfa.absolutePointerTransitionSegment();
         check(segment.isNative() == expectedNativeAccess, "sidecar memory does not follow native access");
-        long expectedMemory = expectedNativeAccess ? segment.byteSize() : sizeOfLongArray(toIntExact(segment.byteSize() / Long.BYTES));
+        long expectedMemory = expectedNativeAccess ? segment.byteSize() : sizeOfLongArray(toIntExact(segment.byteSize() / Long.BYTES)) + sizeOfLongArray(256);
         check(dfa.absolutePointerTransitionMemory() == expectedMemory, "sidecar was not charged its real size");
         check(dfa.absolutePointerTransitionMemory() < 1L << 20, "small DFA reserved a maximum-capacity sidecar");
         check(dfa.absolutePointerTransitionCount() > 0, "search did not populate pointer transitions");

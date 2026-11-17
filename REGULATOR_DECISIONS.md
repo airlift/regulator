@@ -1584,8 +1584,9 @@ Allocation, backfill, incremental writes, publication, and reset use the
 existing exclusive DFA cache mutation protocol.
 
 The current allocation is charged to the `DfaInstance` budget: a native table
-its bytes, a heap table the real size of its array, header included. Growth
-copies and rebases the table into a new one and publishes it with a new cache
+its bytes, a heap table the real size of its array, header included, and of its
+class offsets array, described below. Growth copies and rebases the table into
+a new one and publishes it with a new cache
 generation, as [Shared DFA Concurrency](#shared-dfa-concurrency) describes; a
 reader still using the old generation keeps the superseded table reachable
 until it returns. A reset publishes an empty table of the same size and keeps
@@ -1735,10 +1736,15 @@ took 1.196 times as long as absolute addresses, which is why native entries are
 addresses. After 1.0, walking the `int[]` transitions directly in three loops
 was rejected because one row took 1.27 times as long on both platforms. The heap
 table is the one form not measured then. Its entries are offsets because heap
-arrays move and have no stable address, so it still adds a base, which JDK 25 C2
-on AArch64 folds with the class scale into one extended add before the load. Its
-tags keep match bytes in the loop, where object rows leave it. The Hard and
-Parens rows barely exercised match bytes.
+arrays move and have no stable address, so it still adds a base. Widening and
+scaling each byte's class, which JDK 25 C2 on AArch64 folds into one extended
+add, would put that add on the step's chain of dependent loads, so the heap
+loops instead read each byte's class already multiplied by the entry size from a
+per-DFA `long[]` and add it to the row address. Only safe mode reads these
+offsets: native tables keep the scaled class, because pre-scaled offsets
+produced worse native-mode code on x86. The heap table's tags keep match bytes
+in the loop, where object rows leave it. The Hard and Parens rows barely
+exercised match bytes.
 
 Decided (Dain, 2026-11-06): without native access, the DFA uses the same
 tagged pointer table on the Java heap, reversing the earlier decision that kept

@@ -3035,7 +3035,9 @@ final class Dfa
             for (; position < textEnd; position++) {
                 long transition = addressSpace.get(
                         ValueLayout.JAVA_LONG_UNALIGNED,
-                        transitionRowAddress + ((long) (byteMap[bytes[position] & 0xFF] & 0xFF) * Long.BYTES));
+                        transitionRowAddress + (HEAP_POINTER_TABLES
+                                ? absolutePointers.classByteOffsets()[bytes[position] & 0xFF]
+                                : ((long) (byteMap[bytes[position] & 0xFF] & 0xFF) * Long.BYTES)));
                 if (transition == 0) {
                     break;
                 }
@@ -5278,7 +5280,9 @@ final class Dfa
             for (; position > textBegin; position--) {
                 long transition = addressSpace.get(
                         ValueLayout.JAVA_LONG_UNALIGNED,
-                        transitionRowAddress + ((long) (byteMap[bytes[position - 1] & 0xFF] & 0xFF) * Long.BYTES));
+                        transitionRowAddress + (HEAP_POINTER_TABLES
+                                ? absolutePointers.classByteOffsets()[bytes[position - 1] & 0xFF]
+                                : ((long) (byteMap[bytes[position - 1] & 0xFF] & 0xFF) * Long.BYTES)));
                 if (transition == 0) {
                     return ABSOLUTE_POINTER_RETRY_OBJECT;
                 }
@@ -5706,13 +5710,20 @@ final class Dfa
 
     // A pointer table: a native segment owned by its automatic arena, or a heap segment over a
     // `long[]` with no arena and base address zero. `allocatedBytes` is its charge, the native bytes
-    // or the array's size.
+    // or the array's size. A heap table also carries `classByteOffsets`, each byte's class times
+    // the bytes in an entry. The pointer loops add the byte's offset to the row address in safe
+    // mode, where widening and scaling the class put an extended add on each step's chain of
+    // dependent loads; native mode keeps the scaled class, because pre-scaled offsets produced
+    // worse native-mode code on x86. A heap table's growth and successful reset replacements
+    // reuse its offsets, and a table allocated after one was withheld builds new ones. Each
+    // table's charge includes them; native tables leave them null.
     private record AbsolutePointerTransitions(
             Arena arena,
             MemorySegment segment,
             long baseAddress,
             int entryCapacity,
-            long allocatedBytes) {}
+            long allocatedBytes,
+            long[] classByteOffsets) {}
 
     // The enlarged pointer table a growth will allocate, and the charge it adds. An
     // `allocatedBytes` of zero means the native superseded-segment cap is full: the table is
@@ -8860,8 +8871,8 @@ final class Dfa
                 long currentRowCount = nextFreeOffset / nextSize;
                 // Reserve enough budget for the Java states addressable by the sidecar, and for
                 // the state tables' growth to one row per instruction, instead of eagerly consuming
-                // the complete DFA budget for a small graph. A heap table's array header is charged
-                // once, outside the per-row cost.
+                // the complete DFA budget for a small graph. A heap table's array header and class
+                // offsets are charged once, outside the per-row cost.
                 rowCapacity = compatiblePointerRowCount(
                         availableStateMemory - tableGrowthMemory - absolutePointerTableBytes(0),
                         currentRowCount,
@@ -8886,7 +8897,7 @@ final class Dfa
 
             AbsolutePointerTransitions absolutePointers = null;
             if (supersededAbsolutePointerMemoryAllows(allocatedBytes, 0)) {
-                absolutePointers = allocateAbsolutePointerTable(allocatedBytes, toIntExact(rowCapacity * nextSize));
+                absolutePointers = allocateAbsolutePointerTable(allocatedBytes, toIntExact(rowCapacity * nextSize), null);
                 absolutePointerTransitionAllocationFailed = absolutePointers == null;
             }
             if (absolutePointers == null) {
@@ -8937,8 +8948,9 @@ final class Dfa
                 long remainingMemory = Math.max(0, availableStateMemory - reservedStateMemory - unpaidStateTableMemory(stateCapacity));
                 // Preserve enough budget for the minimum Java state behind every additional
                 // pointer row, and for the state tables' growth to one row per instruction. A heap
-                // table's array header is charged once, outside the per-row cost. Failure means
-                // ordinary DFA budget exhaustion, not an object-row representation change.
+                // table's array header and class offsets are charged once, outside the per-row
+                // cost. Failure means ordinary DFA budget exhaustion, not an object-row
+                // representation change.
                 rowCapacity = compatiblePointerRowCount(
                         Math.addExact(remainingMemory, existingPointers.allocatedBytes() - absolutePointerTableBytes(0)),
                         requiredRowCount,
@@ -8979,7 +8991,7 @@ final class Dfa
             }
             AbsolutePointerTransitions expandedPointers = consumeTestingFailurePoint(TestingFailurePoint.POINTER_TABLE_GROWTH_ALLOCATION)
                     ? null
-                    : allocateAbsolutePointerTable(size.allocatedBytes(), size.entryCapacity());
+                    : allocateAbsolutePointerTable(size.allocatedBytes(), size.entryCapacity(), existingPointers.classByteOffsets());
             if (expandedPointers == null) {
                 return new AbsolutePointerGrowth(null, 0, -existingPointers.allocatedBytes(), true);
             }
@@ -9048,24 +9060,41 @@ final class Dfa
         }
 
         // The charge for a pointer table of `rowCount` rows: its native bytes, or the real size of its
-        // heap array, header included.
+        // heap array, header included, and of its class offsets.
         private long absolutePointerTableBytes(long rowCount)
         {
             long entryCount = Math.multiplyExact(rowCount, nextSize);
             if (HEAP_POINTER_TABLES) {
-                return sizeOfLongArray(toIntExact(entryCount));
+                return sizeOfLongArray(toIntExact(entryCount)) + sizeOfLongArray(bytemap.length);
             }
             return Math.multiplyExact(entryCount, Long.BYTES);
         }
 
-        // A zeroed pointer table, or null when its memory cannot be allocated.
-        private static AbsolutePointerTransitions allocateAbsolutePointerTable(long allocatedBytes, int entryCapacity)
+        // Each byte's class times the bytes in a pointer-table entry: the byte offset of its
+        // transition in a row.
+        private long[] classByteOffsets()
+        {
+            long[] classByteOffsets = new long[bytemap.length];
+            for (int i = 0; i < bytemap.length; i++) {
+                classByteOffsets[i] = (bytemap[i] & 0xFF) * (long) Long.BYTES;
+            }
+            return classByteOffsets;
+        }
+
+        // A zeroed pointer table, or null when its memory cannot be allocated. A heap table reuses
+        // `existingClassByteOffsets`, or builds its own when that is null, so a failure to allocate
+        // the offsets also withholds the table; a native table takes and carries null.
+        private AbsolutePointerTransitions allocateAbsolutePointerTable(long allocatedBytes, int entryCapacity, long[] existingClassByteOffsets)
         {
             Arena arena = null;
             MemorySegment segment;
+            long[] classByteOffsets = existingClassByteOffsets;
             try {
                 if (HEAP_POINTER_TABLES) {
                     segment = MemorySegment.ofArray(new long[entryCapacity]);
+                    if (classByteOffsets == null) {
+                        classByteOffsets = classByteOffsets();
+                    }
                 }
                 else {
                     arena = Arena.ofAuto();
@@ -9076,7 +9105,7 @@ final class Dfa
             catch (RuntimeException | OutOfMemoryError ignored) {
                 return null;
             }
-            return new AbsolutePointerTransitions(arena, segment, segment.address(), entryCapacity, allocatedBytes);
+            return new AbsolutePointerTransitions(arena, segment, segment.address(), entryCapacity, allocatedBytes, classByteOffsets);
         }
 
         private int backfillAbsolutePointerTransitions(int[] transitions, AbsolutePointerTransitions absolutePointers)
@@ -10024,7 +10053,7 @@ final class Dfa
                     allocationFailed = true;
                 }
                 else if (supersededAbsolutePointerMemoryAllows(allocatedBytes, allocatedBytes)) {
-                    absolutePointers = allocateAbsolutePointerTable(allocatedBytes, supersededPointers.entryCapacity());
+                    absolutePointers = allocateAbsolutePointerTable(allocatedBytes, supersededPointers.entryCapacity(), supersededPointers.classByteOffsets());
                     allocationFailed = absolutePointers == null;
                 }
             }
