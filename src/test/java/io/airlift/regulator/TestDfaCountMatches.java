@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -255,6 +256,7 @@ public class TestDfaCountMatches
         }
     }
 
+    @Disabled("Sweep leg b1-no-e5-count: pins the switched-off mechanism")
     @Test
     public void testCountBailStreakSkipsDfaForNextCounts()
     {
@@ -287,6 +289,7 @@ public class TestDfaCountMatches
         assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).isEqualTo(1);
     }
 
+    @Disabled("Sweep leg b1-no-e5-count: pins the switched-off mechanism")
     @Test
     public void testCountBailWindowBoundsConcurrentSkips()
             throws Exception

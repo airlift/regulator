@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -544,6 +545,7 @@ public class TestPositionNfa
 
     /// Boolean searches and counts that run one DFA keep their own skip windows: neither path's
     /// judgements or skips move the other's window, in bytes and UTF-8 modes.
+    @Disabled("Sweep leg b1-no-e5-count: pins the switched-off mechanism")
     @Test
     public void testLineSearchesAndCountsKeepTheirOwnSkipWindows()
     {

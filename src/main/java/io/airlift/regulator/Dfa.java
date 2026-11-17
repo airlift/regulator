@@ -6741,7 +6741,8 @@ final class Dfa
         // A streak of this many bailing DFA counts opens a window in which the next
         // COUNT_BAIL_SKIPPED_COUNTS DFA counts skip the DFA.
         private static final int COUNT_BAIL_STREAK_LIMIT = 2;
-        private static final int COUNT_BAIL_SKIPPED_COUNTS = 16;
+        // Sweep leg: no DFA count skips the DFA after bailing counts, as upstream retries it.
+        private static final int COUNT_BAIL_SKIPPED_COUNTS = 0;
         // The slow resets in a row, judged across boolean searches, or across many-match
         // searches, by isSlowReset, after which those searches skip the DFA.
         private static final int SLOW_RESET_STREAK_LIMIT = 2;
