@@ -538,7 +538,8 @@ class UnitFixture:
                         "benchmarks": [{
                             "name": row["benchmark"], "run_name": row["benchmark"], "run_type": "iteration",
                             "repetitions": iterations, "repetition_index": repetition, "iterations": 1,
-                            "time_unit": "ns", "real_time": sample} for repetition, sample in enumerate(samples(row))]}))
+                            "time_unit": "ns", "real_time": sample, "inputs_per_iteration": 1}
+                            for repetition, sample in enumerate(samples(row))]}))
                 continue
             (directory / f"fixture-selector-{selector['selector']}.json").write_text(json.dumps([{
                 "benchmark": row_protocol.jmh_benchmark(row),

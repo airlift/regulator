@@ -66,6 +66,10 @@ class TestCollection(unittest.TestCase):
         self.assertEqual(len(list(collection.observations(self.manifest))), 14 * 12)
         case = self.manifest["cases"][0]
         self.assertEqual(case["id"], "everyday/logLevel")
+        # Each harness's null engine runs once, on the first case, in the partition of the language named.
+        self.assertEqual([identity for identity, *_ in collection.harness_observations(self.manifest)],
+                         ["everyday/logLevel/re2/null/native", "everyday/logLevel/re2/native-re2-null/safe",
+                          "everyday/logLevel/rust/native-rust-null/safe"])
         self.assertEqual(len(case["sources"]), 8)
         self.assertEqual(set(case["mappings"]), {"re2", "java", "trino", "rust"})
         translated = {(case["id"], language) for case in self.manifest["cases"]
@@ -148,6 +152,11 @@ class TestCollection(unittest.TestCase):
                                          "trace_sha256": collection.digest(operation_trace.encode())}
             receipts[identity] = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
                                   "operations": operations}
+        for identity, case, *_ in collection.harness_observations(self.manifest):
+            trace = collection.null_trace(case)
+            receipts[identity] = {"outcome": "completed", "operations": {operation: {
+                "outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
+                "command": ["verify-null", "workload.tsv", operation]} for operation in collection.NULL_OPERATIONS}}
         return receipts
 
     def test_verification_fails_closed_on_mismatch_missing_or_error(self):
@@ -165,6 +174,18 @@ class TestCollection(unittest.TestCase):
         del broken[first]
         with self.assertRaisesRegex(ValueError, "missing"):
             collection.validate_receipts(self.manifest, broken)
+
+    def test_null_engine_verification_is_each_input_length_and_joins_no_agreement(self):
+        receipts = self.receipts()
+        null = "everyday/logLevel/re2/null/native"
+        # A null's lengths are not a match trace, so they never meet the engines' first matches or traces.
+        self.assertNotEqual(receipts[null]["operations"]["reusedFind"]["trace"],
+                            receipts["everyday/logLevel/re2/re2/native"]["operations"]["reusedFind"]["trace"])
+        collection.validate_receipts(self.manifest, receipts)
+        trace = "0\n" * 8
+        receipts[null]["operations"]["reusedCount"].update(trace=trace, trace_sha256=collection.digest(trace.encode()))
+        with self.assertRaisesRegex(ValueError, "byte length"):
+            collection.validate_receipts(self.manifest, receipts)
 
     def test_timeout_is_not_missing_or_incompatible(self):
         receipts = self.receipts()
@@ -293,8 +314,9 @@ class TestCollection(unittest.TestCase):
         with self.assertRaises(ValueError):
             collection.load(path)
 
-    def write_measurements(self):
-        results = self.root / "results"
+    def write_measurements(self, version=None, name="results"):
+        """A measured cohort whose raw results, and provenance, follow the given call contract version."""
+        results = self.root / name
         results.mkdir()
         receipts = self.receipts()
         for receipt in receipts.values():
@@ -307,27 +329,33 @@ class TestCollection(unittest.TestCase):
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
         collection.save(results / "provenance.json", {
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "source_tree": "tree",
-            "jvm_build": {"source_tree": "tree", "jvm": runners}})
+            "jvm_build": {"source_tree": "tree", "jvm": runners},
+            **({} if version is None else {"benchmark_contract_version": version})})
         observations = {}
-        for identity, case, language, engine, mode in collection.observations(self.manifest):
-            for operation in collection.OPERATIONS:
+        for identity, case, language, engine, mode in collection.measured_observations(self.manifest):
+            runner = collection.runner_engine(engine)
+            for operation in collection.observation_operations(self.manifest, case, engine):
                 row_id = identity + "/" + operation
                 path = results / row_id / "raw.json"
                 path.parent.mkdir(parents=True)
-                if engine in collection.NATIVE_RUNNERS:
+                inputs = collection.pass_inputs(self.manifest, case, operation, version)
+                if runner in collection.NATIVE_RUNNERS:
+                    # Each iteration takes 100 ns per input it passes over.
                     raw = {"benchmarks": [
-                        {"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 100}
+                        {"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 100 * (inputs or 1),
+                         **({} if inputs is None else {"inputs_per_iteration": float(inputs)})}
                         for _ in range(5)]}
                 else:
                     raw = [{"benchmark": collection.CLASS + "." + operation,
-                            "params": {"engine": engine, "workloadFile": "workload.tsv"},
+                            "params": {"engine": runner, "workloadFile": "workload.tsv"},
                             "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
                             "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
                             "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[100] * 10 for _ in range(5)]},
                             "secondaryMetrics": {"gc.alloc.rate.norm": {
                                 "scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
                 collection.save(path, raw)
-                observations[row_id] = {"outcome": "compared", **collection.raw_samples(path, engine, operation),
+                observations[row_id] = {"outcome": "compared", **collection.raw_samples(path, runner, operation,
+                                                                                        inputs_per_iteration=inputs),
                                         "raw_file": str(path.relative_to(results))}
         collection.save(results / "observations.json", observations)
         return results, receipts, observations
@@ -337,7 +365,7 @@ class TestCollection(unittest.TestCase):
         collection.export(self.directory, results)
         exported = collection.load(results / "language-results.json")
         self.assertEqual(len(exported["comparisons"]), 14 * 4 * 2 * 6)
-        self.assertEqual(len(exported["observations"]), 14 * 12 * 6)
+        self.assertEqual(len(exported["observations"]), 14 * 12 * 6 + 3 * 3)
         compilation = next(row for row in exported["comparisons"] if row["operation"] == "compile")
         self.assertIsNone(compilation["input_bytes_per_operation"])
         self.assertEqual(exported["manifest"], collection.load(self.directory / "manifest.json"))
@@ -350,7 +378,11 @@ class TestCollection(unittest.TestCase):
         collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 3})
         current = collection.export(self.directory, results, write=False)
         self.assertTrue(all(row["work_contract"] == "public-pattern-lifecycle-v1" for row in current["comparisons"]))
+        # Results measured one operation per iteration cannot be read as passes over every input.
         collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 4})
+        with self.assertRaisesRegex(ValueError, "do not pass over the protocol's inputs"):
+            collection.export(self.directory, results, write=False)
+        collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 5})
         with self.assertRaisesRegex(ValueError, "unsupported benchmark contract version"):
             collection.export(self.directory, results, write=False)
         collection.save(results / "provenance.json", provenance)
@@ -364,10 +396,31 @@ class TestCollection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             collection.export(self.directory, results)
 
+    def test_pass_protocol_reports_time_per_input_and_harness_overhead_apart_from_comparisons(self):
+        results, _, observations = self.write_measurements(collection.BENCHMARK_CONTRACT_VERSION)
+        exported = collection.export(self.directory, results, write=False)
+        # A native iteration passes over the case's eight inputs, so its 800 ns are 100 ns per operation.
+        self.assertEqual(exported["observations"]["everyday/logLevel/re2/native-re2/safe/reusedCount"]["samples_ns"],
+                         [[100]] * 5)
+        self.assertEqual(exported["observations"]["everyday/logLevel/re2/native-re2/safe/compile"]["samples_ns"],
+                         [[100]] * 5)
+        self.assertTrue(all(row["work_contract"] == "public-pattern-lifecycle-pass-v1" for row in exported["comparisons"]))
+        nulls = {identity for identity, *_ in collection.harness_observations(self.manifest)}
+        self.assertFalse({row[side].rsplit("/", 1)[0] for row in exported["comparisons"]
+                          for side in ("candidate", "comparator")} & nulls)
+        overhead = exported["harness_overhead"]
+        self.assertEqual([(row["harness"], row["operation"], row["case"]) for row in overhead],
+                         [(harness, operation, "everyday/logLevel") for harness in ("jvm", "native-re2", "native-rust")
+                          for operation in collection.NULL_OPERATIONS])
+        # Each entry restates its null engine observation's samples, 100 ns per input.
+        self.assertEqual([row["samples_ns"] for row in overhead], [observations[row["observation"]]["samples_ns"] for row in overhead])
+        self.assertEqual({value for row in overhead for fork in row["samples_ns"] for value in fork}, {100})
+
     def test_export_reads_saved_1_0_evidence_but_fresh_verification_requires_rust(self):
-        # The 1.0 collector wrote the same lifecycle manifest without Rust.
+        # The 1.0 collector wrote the same lifecycle manifest without Rust or null engines.
         manifest = copy.deepcopy(self.manifest)
         manifest["languages"] = collection.RELEASE_1_0_ENGINES
+        del manifest["harness_overhead_case"]
         for case in manifest["cases"]:
             del case["mappings"]["rust"]
         for key, policy in (("native-rust", "representation"), ("rust", "matcher_policy"), ("native-rust", "matcher_policy")):
@@ -416,9 +469,12 @@ class TestCollection(unittest.TestCase):
         store.mkdir()
         (self.directory / "inputs").rename(store / "inputs")
         receipts = self.receipts()
-        for identity, case, language, *_ in collection.observations(self.manifest):
+        for identity, case, language, engine, _ in collection.measured_observations(self.manifest):
             workload = str((store / case["mappings"][language]["input_file"]).resolve())
             receipts[identity]["command"] = ["verify", workload]
+            if engine in collection.NULL_ENGINES:
+                for operation, receipt in receipts[identity]["operations"].items():
+                    receipt["command"] = ["verify-null", workload, operation]
         first = next(iter(receipts))
         attempt = {"outcome": "did-not-finish", "phase": "execution", "limit_seconds": 30}
         timeout = {**attempt, "attempts": [attempt.copy(), attempt.copy()]}
@@ -467,10 +523,11 @@ class TestCollection(unittest.TestCase):
                         "secondaryMetrics": {"gc.alloc.rate.norm": {"scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
                 path = Path(command[command.index("-rff") + 1])
             else:
-                operation = command[2]
+                operation = next(value for value in command if value in collection.OPERATIONS)
                 path = Path(next(value.split("=", 1)[1] for value in command if value.startswith("--benchmark_out=")))
-                raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 100}
-                                      for _ in range(5)]}
+                counter = {} if operation == "compile" else {"inputs_per_iteration": 8.0}
+                raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 800,
+                                       **counter} for _ in range(5)]}
             budgets[str(path.parent.relative_to(results.resolve()))] = measurement_timeout_seconds
             collection.save(path, raw)
             return {"outcome": "completed", "command": command}
@@ -504,7 +561,9 @@ class TestCollection(unittest.TestCase):
             (results / "provenance.json").unlink()
             measure()
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(measured), 14 * 12 * 6 - 2)
+        # Every comparison's operations but the two that timed out, and each null engine's reused operations.
+        self.assertEqual(len(measured), 14 * 12 * 6 - 2 + 3 * 3)
+        self.assertIn([str(native), "--null"], [command[:2] for command in measured])
         # Each measurement process may run for the budget its row's frozen operation seconds give it, and a row
         # without them for the protocol's limit.
         protocol = collection.protocol_for(self.manifest)

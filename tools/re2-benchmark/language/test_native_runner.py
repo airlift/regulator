@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -6,11 +7,15 @@ import unittest
 
 
 def run_case(runner, pattern, source, count, offset=3, operation=None, mode="--verify-operation"):
+    """Runs the runner on a workload of one source, or of each (source, count) pair in a list; with no mode, the
+    operation and its flags measure."""
+    sources = source if isinstance(source, list) else [(source, count)]
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "input.tsv"
-        path.write_text(pattern.encode().hex() + f"\n{offset}\t{count}\t" + source.encode().hex() + "\n")
+        path.write_text(pattern.encode().hex() + "\n" + "".join(
+            f"{offset}\t{count}\t" + text.encode().hex() + "\n" for text, count in sources))
         command = [runner, "--verify", str(path)] if operation is None else [
-            runner, mode, str(path), *operation.split()]
+            runner, *([mode] if mode else []), str(path), *operation.split()]
         return subprocess.run(command,
                               capture_output=True, text=True, timeout=10)
 
@@ -83,6 +88,30 @@ class NativeRunnerChecks:
         result = self.run_case("a", "a", 0, operation="reusedCount")
         self.assertNotEqual(result.returncode, 0)
 
+    def test_null_returns_each_input_length_for_reused_operations_only(self):
+        sources = [("ab", 3), ("", 1), ("💰é", 3)]
+        for operation in ("reusedContains", "reusedCount", "reusedFind"):
+            with self.subTest(operation=operation):
+                result = self.run_case("a*", sources, None, operation=operation, mode="--verify-null")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "2\n0\n6\n")
+        result = self.run_case("a*", sources, None, operation="compile", mode="--verify-null")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("only reused operations", result.stderr)
+
+    def test_each_iteration_reports_its_inputs_per_iteration(self):
+        # One iteration of each, only to read the counters; the times are meaningless and unread.
+        sources = [("ab", 1), ("b", 0), ("aa", 2)]
+        for mode, operation, inputs in ((None, "reusedCount", 3), (None, "singleUseContains", 3), (None, "compile", None),
+                                        ("--null", "reusedFind", 3), ("--specialized", "extractAll 1", 3)):
+            with self.subTest(mode=mode, operation=operation), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "result.json"
+                flags = f"{operation} --benchmark_min_time=1x --benchmark_out_format=json --benchmark_out={output}"
+                result = self.run_case("(a)", sources, None, operation=flags, mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                [row] = json.loads(output.read_text())["benchmarks"]
+                self.assertEqual(row.get("inputs_per_iteration"), inputs)
+
     def test_specialized_operations_print_each_value(self):
         # The second match has no "a", so its first group does not participate.
         expected = {"extract 1": "1:61\n", "extract 2": "1:62\n", "extractAll 1": "2:61,-\n",
@@ -119,9 +148,15 @@ class TestNativeRustRunner(NativeRunnerChecks, unittest.TestCase):
 @unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_HARNESS_TEST_RUNNER"),
                      "build and set LANGUAGE_NATIVE_HARNESS_TEST_RUNNER for the harness's own checks")
 class TestNativeHarness(unittest.TestCase):
-    """The harness over a stand-in engine whose find moves a match's end once an input comes round again."""
+    """The harness over a stand-in engine whose find moves a match's end on the second pass over the inputs."""
 
-    def test_find_must_repeat_its_bounds_after_the_rotation_wraps(self):
+    def test_null_must_repeat_each_length_on_the_second_pass(self):
+        runner = os.environ["LANGUAGE_NATIVE_HARNESS_TEST_RUNNER"]
+        result = run_case(runner, "a", "ba", 1, operation="reusedContains", mode="--verify-null")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("null verification failed", result.stderr)
+
+    def test_find_must_repeat_its_bounds_on_the_second_pass(self):
         runner = os.environ["LANGUAGE_NATIVE_HARNESS_TEST_RUNNER"]
         result = run_case(runner, "a", "ba", 1, operation="reusedCount")
         self.assertEqual(result.returncode, 0, result.stderr)

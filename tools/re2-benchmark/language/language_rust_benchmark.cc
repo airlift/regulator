@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "language_harness.h"
+#include "language_null.h"
 #include "rust-regex/language_rust_regex.h"
 
 #include <memory>
@@ -94,8 +95,13 @@ struct RustEngine {
                 trace == nullptr ? nullptr : +record, trace);
     }
 };
+
+// The null engine is the RE2 runner's: adding it to the crate shim would move the crate's code and change its times.
+struct RustNullLength {
+    static size_t length(std::string_view input) { return language_null_length(input); }
+};
 } // namespace
 
 int main(int argc, char** argv) {
-    return run<RustEngine>(argc, argv, "language_rust_benchmark");
+    return run<RustEngine, RustNullLength>(argc, argv, "language_rust_benchmark");
 }

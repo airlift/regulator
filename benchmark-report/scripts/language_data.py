@@ -34,6 +34,11 @@ NATIVE_COMPARATORS = {'re2', 'rust'}
 RATIO_VARIATION_WARNING = 'Host ratio variation exceeds 5%'
 DIRECTION_WARNING = 'Hosts disagree about which engine is faster'
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
+# Each harness whose null engine the lifecycle collector measures, in report order, and the reused operations it
+# measures. A null engine returns each input's byte length through its harness's boundary, so its time per input is
+# that harness's overhead; it is never a comparison.
+HARNESSES = ('jvm', 'native-re2', 'native-rust')
+HARNESS_OPERATIONS = ('reusedContains', 'reusedCount', 'reusedFind')
 # Specialized-pattern case suffixes in report column order: the regular engine,
 # the specialized engine, then compiled.
 SPECIALIZED_VARIANT_SUFFIXES = ('/regular-engine', '', '/generated')
@@ -214,6 +219,53 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
     return rows
 
 
+def harness_overhead(data, platforms=CURRENT_PLATFORMS):
+    """Each platform's harness overhead: per harness and operation on its case, the median over hosts of each host's
+    median nanoseconds per input, with every host's median. None when the capture measured no null engine."""
+    if not data.get('harness_overhead'):
+        return None
+    hosts = defaultdict(dict)
+    for row in data['harness_overhead']:
+        suite, case_id, _, platform, replica, _ = row['logical_identity']
+        if platform not in platforms or row['harness'] not in HARNESSES or row['operation'] not in HARNESS_OPERATIONS:
+            raise ValueError('unknown harness overhead platform, harness, or operation')
+        samples = [value for group in row['samples_ns'] for value in group]
+        if not samples or any(isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in samples):
+            raise ValueError('invalid harness overhead sample')
+        key = (platform, row['harness'], row['operation'], case_id)
+        if replica in hosts[key]:
+            raise ValueError('duplicate harness overhead host')
+        hosts[key][replica] = median(samples)
+    result = {}
+    for (platform, harness, operation, case_id), medians in sorted(
+            hosts.items(), key=lambda item: (item[0][0], HARNESSES.index(item[0][1]), HARNESS_OPERATIONS.index(item[0][2]))):
+        if set(medians) != {1, 2, 3}:
+            raise ValueError(f'incomplete harness overhead host coverage: {platform}/{harness}/{operation}')
+        result.setdefault(platform, []).append({
+            'harness': harness, 'operation': operation, 'caseId': case_id,
+            'medianNs': median(medians.values()), 'hostMedianNs': [medians[replica] for replica in sorted(medians)]})
+    return result
+
+
+def validate_harness_overhead(overhead, platforms):
+    """An optional section of null engine timings: per platform, at most one positive median per harness, operation
+    and case, never a comparison row."""
+    if not isinstance(overhead, dict) or not set(overhead) <= set(platforms):
+        raise ValueError('invalid harness overhead platforms')
+    for entries in overhead.values():
+        seen = set()
+        for entry in entries:
+            identity = (entry.get('harness'), entry.get('operation'), entry.get('caseId'))
+            if (identity[0] not in HARNESSES or identity[1] not in HARNESS_OPERATIONS or not isinstance(identity[2], str)
+                    or identity in seen):
+                raise ValueError('invalid or duplicate harness overhead entry')
+            seen.add(identity)
+            values = [entry.get('medianNs'), *entry.get('hostMedianNs', [None])]
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
+                   for value in values):
+                raise ValueError('invalid harness overhead time')
+
+
 def validate_estimate(result):
     """Check declared point estimates and intervals without inventing raw samples."""
     estimator = result.get('estimator')
@@ -288,6 +340,8 @@ def validate_language_report(data):
         raise ValueError('platforms and languages do not match one campaign profile')
     if not data.get('methodology') or not data.get('provenance'):
         raise ValueError('report requires method and source provenance')
+    if 'harnessOverhead' in data:
+        validate_harness_overhead(data['harnessOverhead'], platforms)
     for key in ('currentLabel', 'currentCandidate', 'engineTree', 'jdk'):
         if not isinstance(data['sources'][key], str) or not data['sources'][key]:
             raise ValueError(f'missing source {key}')
@@ -321,6 +375,9 @@ def validate_language_report(data):
                 contracts = {'joni-slice-output-v1'}
             elif row['source'] == 'language' and row['operation'] != 'execute':
                 contracts = {'public-pattern-lifecycle-v1'}
+                # From the pass protocol on, lifecycle rows record their own contract; bulk compilation keeps its own.
+                if row['id'].startswith('language-lifecycle/'):
+                    contracts.add('public-pattern-lifecycle-pass-v1')
             elif row['source'] == 'language':
                 contracts = {'bulk-matched-outputs-v1'}
                 if language == 'trino' and row['model'] in {'count-spans', 'count-captures', 'grep-captures'}:

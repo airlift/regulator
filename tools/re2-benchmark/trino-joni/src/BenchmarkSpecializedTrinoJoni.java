@@ -13,7 +13,6 @@
  */
 package io.trino.operator.scalar;
 
-import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
@@ -21,26 +20,35 @@ import io.airlift.slice.Slice;
 import io.trino.type.JoniRegexp;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.CompilerControl;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.infra.Blackhole;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.INPUTS;
+import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.inputs;
+import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.nullOperation;
 import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
+import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 
 /// This repository's Joni harness for `BenchmarkSpecializedTrinoRegexp`: each workload's
 /// operation on pinned Joni, over the same inputs. Replace and extract call pinned Trino's Joni
 /// functions; extract-all calls [JoniSliceOperations], which runs pinned Trino's loop but
 /// returns a Slice list in place of a SQL Block. The baseline shards run each workload in separate
-/// JVMs, as they do for the Regulator variants.
+/// JVMs, as they do for the Regulator variants. Each method is the same pass over the workload's
+/// inputs as the Regulator methods, through a static operation the JIT may not inline into the
+/// pass, and `nullEngine` is that pass with no engine.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -65,6 +73,12 @@ public class BenchmarkSpecializedTrinoJoni
         {
             this.workload = workload;
         }
+
+        /// The replacement of input `index`, as `replace` applies it, for the verifier.
+        public Slice replace(int index)
+        {
+            return regexpReplace(regexp, definition.replacement(), inputs[index]);
+        }
     }
 
     @State(Scope.Thread)
@@ -83,6 +97,12 @@ public class BenchmarkSpecializedTrinoJoni
         public void setWorkload(String workload)
         {
             this.workload = workload;
+        }
+
+        /// The extract of input `index`, as `extract` applies it, for the verifier.
+        public Slice extract(int index)
+        {
+            return regexpExtract(regexp, definition.group(), inputs[index]);
         }
     }
 
@@ -103,52 +123,104 @@ public class BenchmarkSpecializedTrinoJoni
         {
             this.workload = workload;
         }
+
+        /// The extract-all of input `index`, as `extractAll` applies it, for the verifier.
+        public List<Slice> extractAll(int index)
+        {
+            return regexpExtractAll(regexp, definition.group(), inputs[index]);
+        }
+    }
+
+    /// The inputs of any workload, for the null engine.
+    @State(Scope.Thread)
+    public static class NullData
+    {
+        @Param({"clickbenchHost", "urlHostPort", "queryParameterNames", "keyValue", "quotedField"})
+        String workload;
+
+        Slice[] inputs;
+
+        @Setup
+        public void setup()
+        {
+            inputs = inputs(TestingSpecializedPatternBenchmarkInputs.create(workload));
+        }
     }
 
     abstract static class WorkloadData
     {
         Workload definition;
         JoniRegexp regexp;
-        private List<Source> sources;
-        private int sourceIndex;
+        Slice[] inputs;
 
         void load(String workloadId, Operation operation)
         {
             definition = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             definition.requireOperation(operation);
             regexp = joniRegexp(definition.pattern());
-            sources = definition.sources();
-            sourceIndex = 0;
-        }
-
-        public void setSourceIndex(int sourceIndex)
-        {
-            this.sourceIndex = sourceIndex;
-        }
-
-        Slice nextSource()
-        {
-            Slice source = sources.get(sourceIndex).value();
-            sourceIndex = (sourceIndex + 1) & (sources.size() - 1);
-            return source;
+            inputs = inputs(definition);
         }
     }
 
     @Benchmark
-    public Slice replace(ReplaceData data)
+    @OperationsPerInvocation(INPUTS)
+    public void replace(ReplaceData data, Blackhole blackhole)
     {
-        return JoniRegexpFunctions.regexpReplace(data.nextSource(), data.regexp, data.definition.replacement());
+        JoniRegexp regexp = data.regexp;
+        Slice replacement = data.definition.replacement();
+        for (Slice input : data.inputs) {
+            blackhole.consume(regexpReplace(regexp, replacement, input));
+        }
     }
 
     @Benchmark
-    public Slice extract(ExtractData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extract(ExtractData data, Blackhole blackhole)
     {
-        return JoniRegexpFunctions.regexpExtract(data.nextSource(), data.regexp, data.definition.group());
+        JoniRegexp regexp = data.regexp;
+        int group = data.definition.group();
+        for (Slice input : data.inputs) {
+            blackhole.consume(regexpExtract(regexp, group, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> extractAll(ExtractAllData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractAll(ExtractAllData data, Blackhole blackhole)
     {
-        return JoniSliceOperations.extractAll(data.nextSource(), data.regexp, data.definition.group());
+        JoniRegexp regexp = data.regexp;
+        int group = data.definition.group();
+        for (Slice input : data.inputs) {
+            blackhole.consume(regexpExtractAll(regexp, group, input));
+        }
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(INPUTS)
+    public void nullEngine(NullData data, Blackhole blackhole)
+    {
+        for (Slice input : data.inputs) {
+            blackhole.consume(nullOperation(input));
+        }
+    }
+
+    // Each operation on one input, as its benchmark method applies it to each input of a pass.
+
+    @CompilerControl(DONT_INLINE)
+    private static Slice regexpReplace(JoniRegexp regexp, Slice replacement, Slice input)
+    {
+        return JoniRegexpFunctions.regexpReplace(input, regexp, replacement);
+    }
+
+    @CompilerControl(DONT_INLINE)
+    private static Slice regexpExtract(JoniRegexp regexp, int group, Slice input)
+    {
+        return JoniRegexpFunctions.regexpExtract(input, regexp, group);
+    }
+
+    @CompilerControl(DONT_INLINE)
+    private static List<Slice> regexpExtractAll(JoniRegexp regexp, int group, Slice input)
+    {
+        return JoniSliceOperations.extractAll(input, regexp, group);
     }
 }

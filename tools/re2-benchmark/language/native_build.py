@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -23,9 +24,10 @@ RUST_BUILD_INPUTS = ("rust-regex/language_rust_regex.h", "rust-regex/Cargo.toml"
                      "rust-regex/rust-toolchain.toml", "rust-regex/src/lib.rs", "../CMakeLists.txt")
 # Every source that defines a runner's timed work, relative to this directory.
 SOURCES = {
-    "language_benchmark": ("language_benchmark.cc", "language_harness.h"),
+    "language_benchmark": ("language_benchmark.cc", "language_harness.h", "language_null.h", "language_null.cc"),
     "language_bulk_benchmark": ("language_bulk_benchmark.cc", "language_bulk_harness.h"),
-    "language_rust_benchmark": ("language_rust_benchmark.cc", "language_harness.h", *RUST_BUILD_INPUTS),
+    "language_rust_benchmark": ("language_rust_benchmark.cc", "language_harness.h", "language_null.h", "language_null.cc",
+                                *RUST_BUILD_INPUTS),
     "language_rust_bulk_benchmark": ("language_rust_bulk_benchmark.cc", "language_bulk_harness.h", *RUST_BUILD_INPUTS),
 }
 
@@ -37,6 +39,11 @@ def digest(path):
 def sources(target):
     directory = Path(__file__).resolve().parent
     return {name: digest(directory / name) for name in SOURCES[target]}
+
+
+def compile_units(target):
+    """The runner's translation units, its own first: each C++ source among its sources."""
+    return [name for name in SOURCES[target] if name.endswith(".cc")]
 
 
 def source_digest(target):
@@ -96,17 +103,30 @@ def rust_evidence(build_directory, cache):
     }
 
 
+def runner_command(commands, target, unit):
+    """The compile command of `unit` for `target`. Runners share translation units, so the object
+    the command writes picks the runner's; older CMake records no "output" member, but every
+    command names its object after -o."""
+    object_path = f"CMakeFiles/{target}.dir/language/{unit}.o"
+    matching = [command for command in commands if command["file"].endswith(f"/language/{unit}")
+                and object_path in shlex.split(command["command"])]
+    if len(matching) != 1:
+        raise ValueError("missing or ambiguous native compilation command")
+    return matching[0]
+
+
 def record(build_directory, target="language_benchmark"):
     if target not in SOURCES:
         raise ValueError("unknown native language target")
     binary = build_directory / target
     commands_path = build_directory / "compile_commands.json"
     commands = json.loads(commands_path.read_text())
-    runner_commands = [command for command in commands if command["file"].endswith(f"/language/{target}.cc")]
-    if len(runner_commands) != 1:
-        raise ValueError("missing or ambiguous native compilation command")
-    if Path(runner_commands[0]["file"]).resolve() != Path(__file__).resolve().with_name(SOURCES[target][0]):
-        raise ValueError("native runner was compiled from another checkout")
+    runner_commands = []
+    for unit in compile_units(target):
+        command = runner_command(commands, target, unit)
+        if Path(command["file"]).resolve() != Path(__file__).resolve().with_name(unit):
+            raise ValueError("native runner was compiled from another checkout")
+        runner_commands.append(command)
     cache_text = (build_directory / "CMakeCache.txt").read_text()
     cache = {}
     for line in cache_text.splitlines():

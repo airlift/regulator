@@ -139,14 +139,16 @@ def is_shard_id(value):
 
 def plan_atoms(manifest, partitions):
     """The plan's observation rows, case/language/engine/mode/operation, as one list of a comparison's three
-    observations per (case, language, operation), in collection order."""
+    observations per (case, language, operation), in collection order, followed by the null engines that partition
+    measures for that operation."""
     cases = {case["id"]: case for case in manifest["cases"]}
     atoms = []
     for partition in partitions:
         case = cases[partition["case"]]
         subset = {**manifest, "cases": [case], "selected_languages": [partition["language"]]}
         for operation in collection.case_operations(manifest, case):
-            atoms.append([f"{identity}/{operation}" for identity, *_ in collection.observations(subset)])
+            atoms.append([f"{identity}/{operation}" for identity, observed, _, engine, _ in collection.measured_observations(subset)
+                          if operation in collection.observation_operations(subset, observed, engine)])
     return atoms
 
 
@@ -158,9 +160,11 @@ def plan_rows(manifest, partitions):
 def row_seconds(manifest, case, row_id, duration_policy=None):
     """Seconds to verify and measure one observation row, a per-observation estimate of its processes, at its
     system's frozen operation seconds, when the duration policy gives them."""
-    _, language, engine, _, _ = row_id.rsplit("/", 4)
-    operation_seconds = (duration_policy or {}).get("operation_seconds", {}).get(row_id)
-    return unit_cost.language_seconds(collection.protocol_for(manifest), engine in collection.NATIVE_RUNNERS,
+    _, language, engine, _, operation = row_id.rsplit("/", 4)
+    operation_seconds = collection.invocation_seconds(
+        manifest, case, operation, (duration_policy or {}).get("operation_seconds", {}).get(row_id))
+    return unit_cost.language_seconds(collection.protocol_for(manifest),
+                                      collection.runner_engine(engine) in collection.NATIVE_RUNNERS,
                                       case["mappings"][language]["status"] != "not-compatible",
                                       collection.verification_processes(manifest), operation_seconds)
 
@@ -667,7 +671,7 @@ def verify(directory, results, java, classpath, native_runners):
             continue
         subset = {**source, 'cases': [case], 'selected_languages': languages,
                   'parent_manifest_sha256': plan['parent_manifest_sha256']}
-        identities = {identity for identity, *_ in collection.observations(subset)}
+        identities = {identity for identity, *_ in collection.measured_observations(subset)}
         collection.validate_receipts(subset, {identity: receipts[identity] for identity in identities})
         expected_receipts.update(identities)
     if receipts.keys() != expected_receipts:
@@ -790,6 +794,7 @@ def export(directory, plan, result_root, receipts, output, coverage):
     classes_digests = {}
     semantic_traces = {}
     first_matches = {}
+    harness_overhead = None
     for receipt in receipts:
         attempt = unit_dispatch.unit_attempt_directory(result_root, receipt)
         if validate_unit_attempt(attempt, directory) != receipt:
@@ -798,7 +803,10 @@ def export(directory, plan, result_root, receipts, output, coverage):
         for results in sorted((attempt / "partitions").iterdir()):
             data = collection.load(results / "language-results.json")
             case = data["manifest"]["cases"][0]
-            for verification in data["verification"]["receipts"].values():
+            nulls = {identity for identity, *_ in collection.harness_observations(data["manifest"])}
+            for identity, verification in data["verification"]["receipts"].items():
+                if identity in nulls:
+                    continue
                 if verification["outcome"] == "completed":
                     previous = semantic_traces.setdefault(case["id"], verification["trace"])
                     if previous != verification["trace"]:
@@ -822,9 +830,15 @@ def export(directory, plan, result_root, receipts, output, coverage):
                 observations.append({**row, **attempt_group, "id": row_id})
             for row in data["comparisons"]:
                 comparisons.append({**row, **attempt_group})
+            if "harness_overhead" in data:
+                if harness_overhead is None:
+                    harness_overhead = []
+                harness_overhead.extend({**row, **attempt_group} for row in data["harness_overhead"])
         hosts.append({"receipt": receipt, "partitions": partitions})
+    # Null engine observations stay out of the comparisons; their own section names each one's harness.
+    overhead = {} if harness_overhead is None else {"harness_overhead": harness_overhead}
     collection.save(output, {"schema_version": 2, "plan": plan, "candidate": candidate, **coverage,
-                             "hosts": hosts, "observations": observations, "comparisons": comparisons})
+                             "hosts": hosts, "observations": observations, "comparisons": comparisons, **overhead})
 
 
 def main():

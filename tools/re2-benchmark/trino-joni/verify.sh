@@ -101,12 +101,14 @@ io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.contains
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.count
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.extract
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.extractAll
+io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.nullEngine
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.positionThird
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.replace
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.replaceLambda
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.split
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.extract
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.extractAll
+io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.nullEngine
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.replace
 io.trino.operator.scalar.BenchmarkTrinoLikeRowsTrino.matches
 io.trino.operator.scalar.BenchmarkTrinoRowsJoni.contains
@@ -121,14 +123,17 @@ if [[ "${IDENTITY_ONLY}" == true ]]; then
     exit 0
 fi
 
+# The pass checks read the frame that threw a NullPointerException, so hot sites keep their stack traces.
 java \
     --add-modules jdk.incubator.vector \
+    -XX:-OmitStackTraceInFastThrow \
     "${java_access_arguments[@]}" \
     -cp "${classpath}" \
     io.trino.operator.scalar.EverydayTrinoJoniVerifier
 
 java \
     --add-modules jdk.incubator.vector \
+    -XX:-OmitStackTraceInFastThrow \
     "${java_access_arguments[@]}" \
     -cp "${classpath}" \
     io.trino.operator.scalar.SpecializedTrinoJoniVerifier

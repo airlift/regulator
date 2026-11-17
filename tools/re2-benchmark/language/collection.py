@@ -39,6 +39,16 @@ NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark"
 OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount", "reusedFind")
 # reusedFind returns the first match's start and end UTF-8 byte offsets as start << 32 | end, or this for no match.
 NO_MATCH = -1
+# The harness-overhead observations. Each harness's null engine returns every input's byte length through the
+# boundary its engines are reached by, so its time per input is that harness's own overhead. By engine ID: the
+# harness, the language whose partition measures it on the manifest's harness-overhead case, and the memory mode its
+# harness runs in. They compare no languages: no pair, ratio, or cross-engine agreement includes them.
+NULL_ENGINES = {"null": ("jvm", "re2", "native"), "native-re2-null": ("native-re2", "re2", "safe"),
+                "native-rust-null": ("native-rust", "rust", "safe")}
+NULL_OPERATIONS = ("reusedContains", "reusedCount", "reusedFind")
+# The call contract a new measurement records. Version 4 is the pass protocol: a timed invocation is one in-order pass
+# over every input of a lifecycle case, one operation per input.
+BENCHMARK_CONTRACT_VERSION = 4
 MODES = ("native", "safe")
 # The JDK baseline/comparators.tsv pins for every JVM observation.
 JDK_VERSION = "25.0.4+7"
@@ -105,7 +115,7 @@ def load(path):
 
 
 def prepare(destination):
-    """Keep input rotation, source identities, and per-language mappings in the frozen manifest."""
+    """Keep each case's inputs in order, source identities, and per-language mappings in the frozen manifest."""
     import mappings
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "inputs").mkdir()
@@ -134,7 +144,7 @@ def prepare(destination):
         pattern = case["source_pattern"].encode("utf-8")
         case["pattern_sha256"] = digest(pattern)
         case["pattern_bytes"] = len(pattern)
-        case["rotation"] = "round-robin, one input per invocation"
+        case["rotation"] = "one in-order pass over every input per invocation; one operation per input"
         case["input_bytes_per_operation"] = sum(source["input_bytes"] for source in case["sources"]) / len(case["sources"])
         case["matches_per_count_operation"] = sum(source["expected_count"] for source in case["sources"]) / len(case["sources"])
         rows = "".join(
@@ -155,6 +165,7 @@ def prepare(destination):
         "schema_version": 2, "suite": "language-lifecycle", "protocol": PROTOCOL,
         "corpus_sha256": digest(CORPUS.read_bytes()), "languages": ENGINES,
         "memory_modes": MODES, "operations": OPERATIONS, "cases": list(cases.values()),
+        "harness_overhead_case": next(iter(cases.values()))["id"],
         "scope": "Additional shared ordinary/lifecycle suite; baseline shards remain required",
         "representation": {"regulator": "precomputed UTF-8 Slice", "jdk": "precomputed String",
                            "joni": "precomputed UTF-8 bytes", "native-re2": "identical UTF-8 bytes",
@@ -211,12 +222,17 @@ def validate_manifest(manifest, directory, archived=False, recorded_budgets=Fals
     ids = [case["id"] for case in manifest["cases"]]
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("missing or duplicate logical IDs")
+    if "harness_overhead_case" in manifest:
+        overhead_case = manifest["harness_overhead_case"]
+        # A partition holds one case, so only the whole manifest can show that the overhead case is the first.
+        if not isinstance(overhead_case, str) or ("parent_manifest_sha256" not in manifest and overhead_case != ids[0]):
+            raise ValueError("harness overhead must be measured on the first case")
     import mappings
     for case in manifest["cases"]:
         if set(case["mappings"]) != set(manifest["languages"]):
             raise ValueError(f"missing language mapping: {case['id']}")
         if not case["sources"]:
-            raise ValueError("empty source rotation")
+            raise ValueError("case has no sources")
         if len({source["id"] for source in case["sources"]}) != len(case["sources"]):
             raise ValueError("duplicate source IDs")
         pattern = case["source_pattern"].encode("utf-8")
@@ -258,6 +274,9 @@ def validate_manifest(manifest, directory, archived=False, recorded_budgets=Fals
             if (mapping["pattern"] != translated or
                     mapping["status"] != ("identical" if translated == case["source_pattern"] else "translated")):
                 raise ValueError(f"mapping differs from its declared translation: {case['id']}/{language}")
+        if case["id"] == manifest.get("harness_overhead_case") and any(
+                case["mappings"][language]["status"] == "not-compatible" for _, language, _ in NULL_ENGINES.values()):
+            raise ValueError("a null engine reads the inputs of a not-compatible mapping")
 
 
 def run_process(command, prefix, *, measuring=False, measurement_timeout_seconds=None):
@@ -393,6 +412,57 @@ def observations(manifest):
                 yield identity, case, language, engine, mode
 
 
+def harness_observations(manifest):
+    """The null engines' observations, as observations gives them: on the manifest's harness-overhead case, each null
+    engine whose language the manifest selects."""
+    selected = selected_engines(manifest)
+    for case in manifest["cases"]:
+        if case["id"] == manifest.get("harness_overhead_case"):
+            for engine, (_, language, mode) in NULL_ENGINES.items():
+                if language in selected:
+                    yield f"{case['id']}/{language}/{engine}/{mode}", case, language, engine, mode
+
+
+def measured_observations(manifest):
+    """Every observation the manifest measures: the language comparisons' and the null engines'."""
+    yield from observations(manifest)
+    yield from harness_observations(manifest)
+
+
+def observation_operations(manifest, case, engine):
+    """The operations an observation measures: its case's, which for a null engine are only the reused ones."""
+    operations = case_operations(manifest, case)
+    return tuple(operation for operation in operations if operation in NULL_OPERATIONS) if engine in NULL_ENGINES else operations
+
+
+def runner_engine(engine):
+    """The engine a runner measures for an observation: a native null engine's runner, or the engine itself, which for
+    the JVM's null engine is JMH's engine null."""
+    harness = NULL_ENGINES.get(engine, (None,))[0]
+    return harness if harness in NATIVE_RUNNERS else engine
+
+
+def null_trace(case):
+    """What a null engine's operation verification prints: each input's byte length, one line per input."""
+    return "".join(f"{source['input_bytes']}\n" for source in case["sources"])
+
+
+def pass_inputs(manifest, case, operation, version=BENCHMARK_CONTRACT_VERSION):
+    """How many inputs one timed invocation of an operation passes over: under the pass protocol, from contract
+    version 4, every input of a lifecycle case for each operation but compile, which has no input; otherwise None,
+    where an invocation is one operation."""
+    if version is None or version < 4 or manifest.get("suite") == "language-bulk" or operation == "compile":
+        return None
+    return len(case["sources"])
+
+
+def invocation_seconds(manifest, case, operation, operation_seconds):
+    """The seconds of one timed invocation of an operation that takes operation_seconds, when known."""
+    if operation_seconds is None:
+        return None
+    return operation_seconds * (pass_inputs(manifest, case, operation) or 1)
+
+
 def verify_command(command, prefix, engine, mode, *, hash_trace=False):
     attempts = []
     for attempt in range(PROTOCOL["timeout_confirmation_attempts"]):
@@ -405,7 +475,8 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
             output = attempt_prefix.with_suffix(".stdout").read_bytes()
             receipt["trace"] = "sha256:" + digest(output) + "\n" if hash_trace else output.decode()
             receipt["trace_sha256"] = digest(receipt["trace"].encode())
-            if engine in {candidate for candidate, _ in ENGINES.values()}:
+            # The JVM's null engine runs, like the candidates, in the mode its observation names.
+            if engine in {candidate for candidate, _ in ENGINES.values()} | {"null"}:
                 marker = f"native-access={str(mode == 'native').lower()}"
                 if marker not in attempt_prefix.with_suffix(".stderr").read_text().splitlines():
                     raise ValueError(f"wrong native access mode: {prefix}")
@@ -449,6 +520,16 @@ def verify(directory, results, java, classpath, native_runners, inputs=None):
             receipt["operations"][operation] = verify_command(operation_command, prefix / operation, engine, mode)
         receipts[identity] = receipt
         save(results / "verification.partial.json", receipts)
+    for identity, case, language, engine, mode in harness_observations(manifest):
+        workload = str((inputs / case["mappings"][language]["input_file"]).resolve())
+        runner = runner_engine(engine)
+        receipt = {"outcome": "completed", "operations": {}}
+        for operation in NULL_OPERATIONS:
+            command = ([native_runners[runner], "--verify-null", workload, operation] if runner in NATIVE_RUNNERS else
+                       java_command(java, classpath, mode) + [CLASS, "--verify-operation", runner, workload, operation])
+            receipt["operations"][operation] = verify_command(command, results / identity / operation, engine, mode)
+        receipts[identity] = receipt
+        save(results / "verification.partial.json", receipts)
     validate_receipts(manifest, receipts)
     if runners != runner_identity(java, classpath, native_runners):
         raise ValueError("runners changed during verification")
@@ -462,9 +543,11 @@ def validate_receipts(manifest, receipts):
     if manifest.get("suite") == "language-bulk":
         import bulk
         return bulk.validate_receipts(manifest, receipts)
-    expected = {identity for identity, *_ in observations(manifest)}
+    expected = {identity for identity, *_ in measured_observations(manifest)}
     if set(receipts) != expected:
         raise ValueError("missing or unexpected verification receipts")
+    for identity, case, *_ in harness_observations(manifest):
+        validate_null_receipt(case, receipts[identity])
     # Compare each language's own candidate/comparator, then compare completed language mappings.
     # The shared registry promises equivalent semantics, including recorded translations.
     for case in manifest["cases"]:
@@ -517,6 +600,16 @@ def validate_receipts(manifest, receipts):
             raise SemanticFailure(f"verification-failed: engines disagree for {case['id']}")
         if len(set(first_matches)) > 1:
             raise SemanticFailure(f"verification-failed: engines disagree about first matches for {case['id']}")
+
+
+def validate_null_receipt(case, receipt):
+    """A null engine's verification: each of its operations completed and returned every input's byte length."""
+    expected = null_trace(case)
+    operations = receipt.get("operations", {})
+    if receipt.get("outcome") != "completed" or set(operations) != set(NULL_OPERATIONS) or any(
+            operation.get("outcome") != "completed" or operation.get("trace") != expected or
+            operation.get("trace_sha256") != digest(expected.encode()) for operation in operations.values()):
+        raise ValueError(f"a null engine did not return each input's byte length: {case['id']}")
 
 
 def first_match_bounds(case, trace):
@@ -586,7 +679,10 @@ def validate_operation_receipt(case, language, operation, receipt):
 
 
 def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, expected_result=None,
-                expected_jvm_arguments=None, protocol=None, allocation_path=None):
+                expected_jvm_arguments=None, protocol=None, allocation_path=None, inputs_per_iteration=None):
+    """An observation's samples in nanoseconds per operation. A native iteration under the pass protocol, given
+    inputs_per_iteration, passes over that many inputs, which it must report, and its time is divided by them; any
+    other native iteration is one operation and must report no inputs. A JMH score is already per operation."""
     protocol = PROTOCOL if protocol is None else protocol
     data = load(path)
     if engine in NATIVE_RUNNERS:
@@ -595,7 +691,9 @@ def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, e
             raise ValueError("incomplete native repetitions")
         if any(row["time_unit"] != "ns" or row["run_name"].split("/")[0] != operation for row in rows):
             raise ValueError("unexpected native measurement")
-        samples = [[row["real_time"]] for row in rows]
+        if any(row.get("inputs_per_iteration") != inputs_per_iteration for row in rows):
+            raise ValueError("native iterations do not pass over the protocol's inputs")
+        samples = [[row["real_time"] / (inputs_per_iteration or 1)] for row in rows]
         allocation = None
     else:
         if len(data) != 1 or data[0]["benchmark"] != benchmark_class + "." + operation:
@@ -659,7 +757,7 @@ def benchmark_class(manifest):
     return "io.airlift.regulator.BenchmarkLanguageBulk" if manifest.get("suite") == "language-bulk" else CLASS
 
 
-def work_contract(manifest, case, language, operation, version=3):
+def work_contract(manifest, case, language, operation, version=BENCHMARK_CONTRACT_VERSION):
     """Record timed work independently of successful output verification."""
     if manifest.get("suite") == "language-bulk" and operation == "execute":
         model = case["model"]
@@ -668,6 +766,8 @@ def work_contract(manifest, case, language, operation, version=3):
         if language in {"re2", "java", "rust"} and model in {"grep", "count"}:
             return "public-find-count-v2"
         return "bulk-matched-outputs-v1"
+    if manifest.get("suite") != "language-bulk" and version >= 4:
+        return "public-pattern-lifecycle-pass-v1"
     return "public-pattern-lifecycle-v1"
 
 
@@ -677,7 +777,7 @@ def validate_native_build(manifest, engine, build, binary_sha256):
         raise ValueError(f"{engine}: native binary does not match recorded build")
     if build["source_sha256"] != native_build.source_digest(native_target(manifest, engine)):
         raise ValueError(f"{engine}: native runner was built from a different source")
-    if any(flag not in build["runner_compile_commands"][0]["command"] for flag in ("-O3", "-DNDEBUG")):
+    if any(flag not in command["command"] for command in build["runner_compile_commands"] for flag in ("-O3", "-DNDEBUG")):
         raise ValueError(f"{engine}: native comparator requires a release build")
 
 
@@ -731,14 +831,15 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
         **native_evidence,
         "runners_sha256": digest(encode(runners)),
         "jvm_build": build_receipt,
-        "benchmark_contract_version": 3,
+        "benchmark_contract_version": BENCHMARK_CONTRACT_VERSION,
         "measured_jvm_arguments": {mode: measured_jvm_arguments(mode) for mode in MODES},
         "manifest_sha256": evidence["manifest_sha256"],
     }
     save(results / "provenance.json", provenance)
     observations_data = {}
-    for identity, case, language, engine, mode in observations(manifest):
-        for operation in case_operations(manifest, case):
+    for identity, case, language, engine, mode in measured_observations(manifest):
+        runner = runner_engine(engine)
+        for operation in observation_operations(manifest, case, engine):
             verification = evidence["receipts"][identity]["operations"][operation]
             row_id = identity + "/" + operation
             if verification["outcome"] != "completed":
@@ -749,14 +850,15 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                 raise ValueError(f"will not overwrite existing measurements: {raw}")
             raw.parent.mkdir(parents=True, exist_ok=True)
             workload = str((inputs / case["mappings"][language]["input_file"]).resolve())
-            native = engine in NATIVE_RUNNERS
+            native = runner in NATIVE_RUNNERS
             if native:
-                command = [native_runners[engine], workload, operation, "--benchmark_repetitions=5", "--benchmark_min_time=1s",
+                command = [native_runners[runner], *(["--null"] if engine in NULL_ENGINES else []), workload, operation,
+                           "--benchmark_repetitions=5", "--benchmark_min_time=1s",
                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
                            "--benchmark_out_format=json", f"--benchmark_out={raw}"]
             else:
                 command = jmh_command(java, classpath, mode) + ["^" + benchmark_class(manifest) + r"\." + operation + "$",
-                           "-p", f"engine={engine}", "-p", f"workloadFile={workload}",
+                           "-p", f"engine={runner}", "-p", f"workloadFile={workload}",
                            "-f", str(protocol["forks"]), "-wi", str(protocol["warmup_iterations"]),
                            "-i", str(protocol["measurement_iterations"]), "-w", "1s", "-r", "1s",
                            "-rf", "json", "-rff", str(raw), "-foe", "true"]
@@ -764,9 +866,9 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                     command += ["-prof", "gc"]
                 if manifest.get("suite") == "language-bulk":
                     command += ["-p", f"expectedResult={case['expected_result']}"]
+            seconds = invocation_seconds(manifest, case, operation, operation_seconds.get(row_id))
             receipt = run_process(command, raw.parent / "measurement", measuring=True,
-                                  measurement_timeout_seconds=unit_cost.measurement_budget(
-                                      protocol, native, operation_seconds.get(row_id)))
+                                  measurement_timeout_seconds=unit_cost.measurement_budget(protocol, native, seconds))
             if receipt["outcome"] != "completed":
                 # Aggregate fork timeout is a collection failure, not proof that one regex call timed out.
                 raise BudgetOverrun(f"measurement process exceeded the measurement process budget: {row_id}")
@@ -781,15 +883,15 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                 allocation_command += ["-prof", "gc"]
                 allocated = run_process(allocation_command, raw.parent / "allocation", measuring=True,
                                         measurement_timeout_seconds=unit_cost.measurement_budget(
-                                            protocol, False, operation_seconds.get(row_id), allocation=True))
+                                            protocol, False, seconds, allocation=True))
                 if allocated["outcome"] != "completed":
                     raise BudgetOverrun(f"allocation process exceeded the measurement process budget: {row_id}")
                 allocation_evidence = {"allocation_raw_file": str(allocation_raw.relative_to(results)),
                                        "allocation_command": allocation_command}
-            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload,
+            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, runner, operation, workload,
                                          benchmark_class(manifest), case.get("expected_result"), measured_jvm_arguments(mode),
-                                         protocol, allocation_raw), "raw_file": str(raw.relative_to(results)),
-                                         "command": command, **allocation_evidence}
+                                         protocol, allocation_raw, pass_inputs(manifest, case, operation)),
+                                         "raw_file": str(raw.relative_to(results)), "command": command, **allocation_evidence}
             save(results / "observations.partial.json", observations_data)
     save(results / "observations.json", observations_data)
     export(directory, results, inputs=inputs)
@@ -813,10 +915,15 @@ def export(directory, results, *, write=True, inputs=None):
         import bulk
         bulk.validate_evidence(manifest, evidence, results)
     data = load(results / "observations.json")
-    expected = {identity + "/" + operation for identity, case, *_ in observations(manifest)
-                for operation in case_operations(manifest, case)}
+    expected = {identity + "/" + operation for identity, case, _, engine, _ in measured_observations(manifest)
+                for operation in observation_operations(manifest, case, engine)}
     if set(data) != expected:
         raise ValueError("missing or unexpected observations")
+    # Never stamp a current call contract onto an archived measurement. Only a
+    # collector that recorded this version before timing can emit these claims.
+    version = provenance.get("benchmark_contract_version")
+    if "benchmark_contract_version" in provenance and version not in {2, 3, 4}:
+        raise ValueError("unsupported benchmark contract version")
     rows = []
     for case in manifest["cases"]:
         for language, (candidate, comparator) in selected_engines(manifest).items():
@@ -832,7 +939,8 @@ def export(directory, results, *, write=True, inputs=None):
                             expected_arguments = provenance.get("measured_jvm_arguments", {}).get(measured_mode)
                             observed = raw_samples(results / row["raw_file"], engine, operation, verified_workload,
                                                    benchmark_class(manifest), case.get("expected_result"), expected_arguments,
-                                                   protocol_for(manifest), results / row["allocation_raw_file"] if "allocation_raw_file" in row else None)
+                                                   protocol_for(manifest), results / row["allocation_raw_file"] if "allocation_raw_file" in row else None,
+                                                   pass_inputs(manifest, case, operation, version))
                             if any(row[key] != observed[key] for key in observed):
                                 raise ValueError("raw samples changed since reduction")
                         elif row["outcome"] not in {"not-compatible", "did-not-finish"}:
@@ -848,14 +956,10 @@ def export(directory, results, *, write=True, inputs=None):
                                  "operation": operation, "candidate": candidate_id, "comparator": comparator_id,
                                  "input_bytes_per_operation": None if operation == "compile" else case["input_bytes_per_operation"],
                                  "matches_per_count_operation": case["matches_per_count_operation"] if operation.endswith("Count") else None})
-    # Never stamp a current call contract onto an archived measurement. Only a
-    # collector that recorded this version before timing can emit these claims.
     if "benchmark_contract_version" in provenance:
-        if provenance["benchmark_contract_version"] not in {2, 3}:
-            raise ValueError("unsupported benchmark contract version")
         cases = {case["id"]: case for case in manifest["cases"]}
         for row in rows:
-            row["work_contract"] = work_contract(manifest, cases[row["logical_case"]], row["language"], row["operation"], provenance["benchmark_contract_version"])
+            row["work_contract"] = work_contract(manifest, cases[row["logical_case"]], row["language"], row["operation"], version)
     if evidence["manifest_sha256"] != digest((directory / "manifest.json").read_bytes()) or provenance["manifest_sha256"] != evidence["manifest_sha256"]:
         raise ValueError("provenance does not identify the verified manifest")
     runners = load(results / "runners.json")
@@ -872,9 +976,34 @@ def export(directory, results, *, write=True, inputs=None):
     exported = {"schema_version": 2, "manifest": manifest, "verification": evidence,
                 "provenance": provenance, "runners": runners,
                 "observations": data, "comparisons": rows}
+    if "harness_overhead_case" in manifest:
+        exported["harness_overhead"] = harness_overhead(manifest, evidence, provenance, data, results, version)
     if write:
         save(results / "language-results.json", exported)
     return exported
+
+
+def harness_overhead(manifest, evidence, provenance, data, results, version):
+    """Each null engine observation's samples, rechecked against its raw results: the overhead its harness charges each
+    input, in nanoseconds."""
+    overhead = []
+    for identity, case, _, engine, mode in harness_observations(manifest):
+        for operation in observation_operations(manifest, case, engine):
+            row_id = identity + "/" + operation
+            row = data[row_id]
+            if row["outcome"] != "compared":
+                raise ValueError(f"harness overhead was not measured: {row_id}")
+            # A null engine's operation verification names the workload just before the operation.
+            workload = evidence["receipts"][identity]["operations"][operation]["command"][-2]
+            observed = raw_samples(results / row["raw_file"], runner_engine(engine), operation, workload, CLASS, None,
+                                   provenance.get("measured_jvm_arguments", {}).get(mode), protocol_for(manifest),
+                                   results / row["allocation_raw_file"] if "allocation_raw_file" in row else None,
+                                   pass_inputs(manifest, case, operation, version))
+            if any(row[key] != observed[key] for key in observed):
+                raise ValueError("raw samples changed since reduction")
+            overhead.append({"harness": NULL_ENGINES[engine][0], "operation": operation, "case": case["id"],
+                             "observation": row_id, "samples_ns": row["samples_ns"]})
+    return overhead
 
 
 def main():

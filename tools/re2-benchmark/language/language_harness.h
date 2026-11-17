@@ -17,6 +17,15 @@
 // the first match's match_bounds or kNoMatch, count with an optional match trace,
 // and check, which rejects inputs the engine cannot accept.
 //
+// Timing follows the pass protocol: one benchmark iteration is one in-order pass over every input of the
+// workload, each result sunk by DoNotOptimize as it is returned, and the iteration reports the number of inputs
+// as the inputs_per_iteration counter, so a result's time per operation is its time divided by that count.
+// Compilation has no inputs: one iteration is one compile and reports no counter.
+//
+// A runner also supplies the length function of its null engine, NullEngine<Length>, whose every operation returns
+// the input's byte length through the boundary the runner's engine is reached by. Timed by the same pass, its
+// time per input is the harness's own overhead.
+//
 // For the baseline's specialized-pattern comparators an adapter also supplies the
 // nearest public form of each specialized operation: extract, the given group of
 // the first match, and extract_all, that group of every match, over per-pattern
@@ -172,7 +181,7 @@ void verify_operation(const Inputs& inputs, const std::string& operation) {
             }
             // The inputs record counts but no expected first-match bounds, so collection compares the first pass's
             // bounds across engines and with the trace. The second pass must repeat the first exactly, so reused state
-            // that goes wrong once the rotation wraps is rejected too.
+            // that goes wrong on the second pass is rejected too.
             bool verified = operation == "reusedFind" ? (result == kNoMatch) == (source.expected == 0)
                     : result == (is_contains ? (source.expected != 0) : source.expected);
             if (!verified || (pass > 0 && result != first_pass[index])) {
@@ -186,37 +195,51 @@ void verify_operation(const Inputs& inputs, const std::string& operation) {
     }
 }
 
+// The inputs in workload order, as the views each timed pass reads.
+std::vector<std::string_view> input_views(const Inputs& inputs) {
+    std::vector<std::string_view> views;
+    views.reserve(inputs.sources.size());
+    for (const Source& source : inputs.sources) views.push_back(source.bytes());
+    return views;
+}
+
 template <typename Engine, Operation operation>
 void measure(benchmark::State& state, const Inputs& inputs) {
     auto pattern = Engine::compile(inputs.pattern);
     if (!pattern.ok()) { state.SkipWithError(pattern.error().c_str()); return; }
-    size_t index = 0;
-    for (auto _ : state) {
-        if constexpr (operation == Operation::Compile) {
+    if constexpr (operation == Operation::Compile) {
+        for (auto _ : state) {
             auto compiled = Engine::compile(inputs.pattern);
             benchmark::DoNotOptimize(compiled);
         }
-        else {
-            std::string_view source = inputs.sources[index].bytes();
-            index = (index + 1) % inputs.sources.size();
-            if constexpr (operation == Operation::SingleContains) {
-                auto compiled = Engine::compile(inputs.pattern);
-                benchmark::DoNotOptimize(Engine::contains(compiled, source));
-            }
-            else if constexpr (operation == Operation::SingleCount) {
-                auto compiled = Engine::compile(inputs.pattern);
-                benchmark::DoNotOptimize(Engine::count(compiled, source));
-            }
-            else if constexpr (operation == Operation::ReusedContains) {
-                benchmark::DoNotOptimize(Engine::contains(pattern, source));
-            }
-            else if constexpr (operation == Operation::ReusedCount) {
-                benchmark::DoNotOptimize(Engine::count(pattern, source));
-            }
-            else if constexpr (operation == Operation::ReusedFind) {
-                benchmark::DoNotOptimize(Engine::find(pattern, source));
+    }
+    else {
+        const std::vector<std::string_view> views = input_views(inputs);
+        const std::string_view* const sources = views.data();
+        const size_t count = views.size();
+        for (auto _ : state) {
+            for (size_t index = 0; index < count; ++index) {
+                std::string_view source = sources[index];
+                if constexpr (operation == Operation::SingleContains) {
+                    auto compiled = Engine::compile(inputs.pattern);
+                    benchmark::DoNotOptimize(Engine::contains(compiled, source));
+                }
+                else if constexpr (operation == Operation::SingleCount) {
+                    auto compiled = Engine::compile(inputs.pattern);
+                    benchmark::DoNotOptimize(Engine::count(compiled, source));
+                }
+                else if constexpr (operation == Operation::ReusedContains) {
+                    benchmark::DoNotOptimize(Engine::contains(pattern, source));
+                }
+                else if constexpr (operation == Operation::ReusedCount) {
+                    benchmark::DoNotOptimize(Engine::count(pattern, source));
+                }
+                else if constexpr (operation == Operation::ReusedFind) {
+                    benchmark::DoNotOptimize(Engine::find(pattern, source));
+                }
             }
         }
+        state.counters["inputs_per_iteration"] = static_cast<double>(count);
     }
 }
 
@@ -225,6 +248,53 @@ void register_operation(const std::string& name, const Inputs& inputs) {
     benchmark::RegisterBenchmark(name.c_str(), [&inputs](benchmark::State& state) {
         measure<Engine, operation>(state, inputs);
     });
+}
+
+template <typename Engine>
+void register_lifecycle(const std::string& operation, const Inputs& inputs) {
+    if (operation == "compile") register_operation<Engine, Operation::Compile>(operation, inputs);
+    if (operation == "singleUseContains") register_operation<Engine, Operation::SingleContains>(operation, inputs);
+    if (operation == "singleUseCount") register_operation<Engine, Operation::SingleCount>(operation, inputs);
+    if (operation == "reusedContains") register_operation<Engine, Operation::ReusedContains>(operation, inputs);
+    if (operation == "reusedCount") register_operation<Engine, Operation::ReusedCount>(operation, inputs);
+    if (operation == "reusedFind") register_operation<Engine, Operation::ReusedFind>(operation, inputs);
+}
+
+// A null engine over Length::length, which returns an input's byte length through the boundary of the runner's
+// engine. Every operation returns that length, and it has no compiled state, so measure times only the pass.
+template <typename Length>
+struct NullEngine {
+    struct Pattern {
+        bool ok() const { return true; }
+        std::string error() const { return ""; }
+    };
+
+    static Pattern compile(const std::string&) { return {}; }
+    static size_t contains(const Pattern&, std::string_view input) { return Length::length(input); }
+    static size_t count(const Pattern&, std::string_view input) { return Length::length(input); }
+    static size_t find(const Pattern&, std::string_view input) { return Length::length(input); }
+};
+
+// The null engine runs only the reused operations, the harness's overhead around one call per input.
+bool is_null_operation(const std::string& operation) {
+    return operation == "reusedContains" || operation == "reusedCount" || operation == "reusedFind";
+}
+
+// Prints the null engine's result for each input, one line per input, after checking that each of two passes
+// returns every input's byte length.
+template <typename Null>
+void verify_null(const Inputs& inputs, const std::string& operation) {
+    if (!is_null_operation(operation)) throw std::runtime_error("the null engine has only reused operations");
+    auto pattern = Null::compile(inputs.pattern);
+    std::cerr << "phase=execution\n";
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const Source& source : inputs.sources) {
+            size_t result = operation == "reusedContains" ? Null::contains(pattern, source.bytes())
+                    : operation == "reusedCount" ? Null::count(pattern, source.bytes()) : Null::find(pattern, source.bytes());
+            if (result != source.bytes().size()) throw std::runtime_error("null verification failed");
+            if (pass == 0) std::cout << result << '\n';
+        }
+    }
 }
 
 enum class Specialized { Replace, Extract, ExtractAll };
@@ -280,12 +350,15 @@ void measure_specialized(benchmark::State& state, const Inputs& inputs, int grou
     auto pattern = Engine::compile(inputs.pattern);
     if (!pattern.ok()) { state.SkipWithError(pattern.error().c_str()); return; }
     auto scratch = Engine::scratch(pattern, group);
-    size_t index = 0;
+    const std::vector<std::string_view> views = input_views(inputs);
+    const std::string_view* const sources = views.data();
+    const size_t count = views.size();
     for (auto _ : state) {
-        std::string_view source = inputs.sources[index].bytes();
-        index = (index + 1) % inputs.sources.size();
-        run_specialized<Engine, operation>(pattern, scratch, source, group, nullptr);
+        for (size_t index = 0; index < count; ++index) {
+            run_specialized<Engine, operation>(pattern, scratch, sources[index], group, nullptr);
+        }
     }
+    state.counters["inputs_per_iteration"] = static_cast<double>(count);
 }
 
 // Verifies the operation's values, or registers it to be timed under its name.
@@ -320,8 +393,20 @@ void specialized(const Inputs& inputs, const std::string& name, int group, bool 
     throw std::runtime_error("unknown specialized operation: " + name);
 }
 
-template <typename Engine>
+// Runs the benchmark library over the flags from argv[first] on, behind the program name.
+int run_benchmarks(int argc, char** argv, int first) {
+    for (int i = first; i < argc; ++i) argv[i - first + 1] = argv[i];
+    argc -= first - 1;
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}
+
+template <typename Engine, typename Length>
 int run(int argc, char** argv, const std::string& program) {
+    using Null = NullEngine<Length>;
     try {
         if (argc == 3 && std::string(argv[1]) == "--verify") {
             Inputs inputs = read_inputs(argv[2]);
@@ -346,18 +431,27 @@ int run(int argc, char** argv, const std::string& program) {
             Inputs inputs = read_inputs(argv[2]);
             Engine::check(inputs);
             specialized<Engine>(inputs, argv[3], capture_group(argv[4]), false);
-            for (int i = 5; i < argc; ++i) argv[i - 4] = argv[i];
-            argc -= 4;
-            benchmark::Initialize(&argc, argv);
-            if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
-            benchmark::RunSpecifiedBenchmarks();
-            benchmark::Shutdown();
+            return run_benchmarks(argc, argv, 5);
+        }
+        if (argc == 4 && std::string(argv[1]) == "--verify-null") {
+            Inputs inputs = read_inputs(argv[2]);
+            Engine::check(inputs);
+            verify_null<Null>(inputs, argv[3]);
             return 0;
+        }
+        if (argc >= 4 && std::string(argv[1]) == "--null") {
+            Inputs inputs = read_inputs(argv[2]);
+            Engine::check(inputs);
+            std::string operation = argv[3];
+            verify_null<Null>(inputs, operation);
+            register_lifecycle<Null>(operation, inputs);
+            return run_benchmarks(argc, argv, 4);
         }
         if (argc < 3) {
             throw std::runtime_error("usage: " + program + " <workload> <operation> [benchmark flags]"
                     " | --specialized <workload> <operation> <group> [benchmark flags]"
-                    " | --verify-specialized <workload> <operation> <group>");
+                    " | --verify-specialized <workload> <operation> <group>"
+                    " | --null <workload> <operation> [benchmark flags] | --verify-null <workload> <operation>");
         }
         Inputs inputs = read_inputs(argv[1]);
         Engine::check(inputs);
@@ -365,19 +459,8 @@ int run(int argc, char** argv, const std::string& program) {
         if (!is_operation(operation)) throw std::runtime_error("unknown operation");
         // Check only the selected operation here; full match traces are collected separately.
         verify_operation<Engine>(inputs, operation);
-        if (operation == "compile") register_operation<Engine, Operation::Compile>(operation, inputs);
-        if (operation == "singleUseContains") register_operation<Engine, Operation::SingleContains>(operation, inputs);
-        if (operation == "singleUseCount") register_operation<Engine, Operation::SingleCount>(operation, inputs);
-        if (operation == "reusedContains") register_operation<Engine, Operation::ReusedContains>(operation, inputs);
-        if (operation == "reusedCount") register_operation<Engine, Operation::ReusedCount>(operation, inputs);
-        if (operation == "reusedFind") register_operation<Engine, Operation::ReusedFind>(operation, inputs);
-        for (int i = 3; i < argc; ++i) argv[i - 2] = argv[i];
-        argc -= 2;
-        benchmark::Initialize(&argc, argv);
-        if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
-        benchmark::RunSpecifiedBenchmarks();
-        benchmark::Shutdown();
-        return 0;
+        register_lifecycle<Engine>(operation, inputs);
+        return run_benchmarks(argc, argv, 3);
     }
     catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

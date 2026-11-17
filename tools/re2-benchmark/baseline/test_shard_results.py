@@ -506,7 +506,7 @@ class TestShardResults(unittest.TestCase):
                 (route / "raw" / "route-selector-2.json").write_text(json.dumps({"context": {}, "benchmarks": [{
                     "name": "operation", "run_name": "operation", "run_type": "iteration",
                     "repetitions": 2, "repetition_index": index, "iterations": 1, "time_unit": "ns",
-                    "real_time": time} for index, time in enumerate(repetitions)]}))
+                    "real_time": time, "inputs_per_iteration": 1} for index, time in enumerate(repetitions)]}))
                 return SHARD_RESULTS.route_processes(route, selectors)
 
             self.assertEqual({("regulator", "benchmark", "-"): [[1.0, 3.0], [2.0, 2.0]],
@@ -1009,16 +1009,19 @@ class TestShardResults(unittest.TestCase):
                 "route": "native-access", "tests": "TestExample", "outcome": "accepted",
                 "semantic_result_digest": "0" * 64}])
 
-            def result(workload, times, repetitions=3, indices=None, context=(), error=False):
+            def result(workload, times, repetitions=3, indices=None, context=(), error=False, inputs=8):
+                """A result whose iterations each pass over inputs inputs, at times nanoseconds per input."""
                 path = root / f"{workload}.json"
                 failure = {"error_occurred": True, "error_message": "runner failed"} if error else {}
+                counter = {} if inputs is None else {"inputs_per_iteration": float(inputs)}
                 # The score is the median wall time, so the CPU time differs from it.
                 path.write_text(json.dumps({
                     "context": {"host_name": "host", "parameter.workload": workload, **dict(context)},
                     "benchmarks": [
                         *({"name": "extract", "run_name": "extract", "run_type": "iteration",
                            "repetitions": repetitions, "repetition_index": index, "iterations": 1000,
-                           "real_time": time, "cpu_time": time * 2, "time_unit": "ns", **failure}
+                           "real_time": time * (inputs or 1), "cpu_time": time * 2, "time_unit": "ns", **counter,
+                           **failure}
                           for index, time in zip(indices or range(len(times)), times)),
                         {"name": "extract_median", "run_name": "extract", "run_type": "aggregate",
                          "aggregate_name": "median", "repetitions": repetitions, "real_time": 1,
@@ -1035,6 +1038,10 @@ class TestShardResults(unittest.TestCase):
                               for row in rows], [
                 (expected[0]["row_id"], "20", "ns/op", "not-measured"),
                 (expected[1]["row_id"], "6", "ns/op", "not-measured")])
+            # An iteration's time covers a pass over every input, so a result that does not say how many is refused.
+            arguments.input = [result("keyValue", (300, 10, 20), inputs=None), result("quotedField", (5, 7, 6))]
+            with self.assertRaisesRegex(ValueError, "does not report the inputs"):
+                SHARD_RESULTS.normalize_native(arguments)
             # A run that stopped early has fewer repetitions than it planned.
             arguments.input = [result("keyValue", (30, 10)), result("quotedField", (5, 7, 6))]
             with self.assertRaisesRegex(ValueError, "has 2 of 3 repetitions"):

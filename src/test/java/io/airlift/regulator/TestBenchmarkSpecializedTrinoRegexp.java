@@ -48,8 +48,11 @@ public class TestBenchmarkSpecializedTrinoRegexp
                 .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds(Operation.EXTRACT));
         assertThat(parameters(BenchmarkSpecializedTrinoRegexp.ExtractAllData.class))
                 .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds(Operation.EXTRACT_ALL));
+        // Every language's null engine runs on every workload.
+        assertThat(parameters(TestingSpecializedPatternBenchmarks.NullData.class))
+                .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds());
 
-        // The URL workloads share one rotation of distinct URLs; the everyday test checks the others.
+        // The URL workloads share one list of distinct URLs, in one order; the everyday test checks the others.
         List<String> urlWorkloadIds = TestingSpecializedPatternBenchmarkInputs.urlWorkloadIds();
         List<Source> urls = TestingSpecializedPatternBenchmarkInputs.create(urlWorkloadIds.getFirst()).sources();
         assertThat(urls).hasSize(8);
@@ -57,12 +60,12 @@ public class TestBenchmarkSpecializedTrinoRegexp
         assertThat(urls).extracting(Source::value).doesNotHaveDuplicates();
         assertThat(urls).extracting(Source::sliceOffset).contains(0, 3);
         assertThat(urls).anyMatch(url -> url.value().length() > url.value().toStringUtf8().length());
-        List<Tuple> rotation = urls.stream()
+        List<Tuple> urlSources = urls.stream()
                 .map(url -> tuple(url.sourceId(), url.value(), url.sliceOffset()))
                 .toList();
         for (String workloadId : urlWorkloadIds) {
             Workload workload = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
-            assertThat(workload.sources()).extracting(Source::sourceId, Source::value, Source::sliceOffset).as(workloadId).containsExactlyElementsOf(rotation);
+            assertThat(workload.sources()).extracting(Source::sourceId, Source::value, Source::sliceOffset).as(workloadId).containsExactlyElementsOf(urlSources);
             assertThat(workload.input().origin()).as(workloadId).isEqualTo(workloadId.equals("clickbenchHost") ? "clickbench-q29" : "designed-control");
             assertThat(workload.sources()).extracting(Source::expectedMatchCount)
                     .contains(0L)
@@ -90,6 +93,13 @@ public class TestBenchmarkSpecializedTrinoRegexp
     }
 
     @Test
+    public void testEveryPassHandsEachInputToItsOperation()
+            throws Exception
+    {
+        TestingSpecializedPatternBenchmarks.verifyPasses(new BenchmarkSpecializedTrinoRegexp(), BenchmarkSpecializedTrinoRegexp::variantsForTesting);
+    }
+
+    @Test
     public void testEveryVariantProducesTheSameResult()
             throws ReflectiveOperationException
     {
@@ -111,13 +121,12 @@ public class TestBenchmarkSpecializedTrinoRegexp
                 expected.add(result);
             }
 
-            // Started at the first source, each variant returns each source's result as its
-            // rotation advances and wraps around.
+            // Each variant returns each input's result in order, and the first's again after the
+            // last, so state it reuses from one input to the next changes no result.
             for (Variant variant : variants) {
-                variant.setSourceIndex(0);
                 for (int call = 0; call <= sources.size(); call++) {
                     int sourceIndex = call % sources.size();
-                    assertThat(variant.invoke()).as("%s/%s %s", workloadId, sources.get(sourceIndex).sourceId(), variant.name()).isEqualTo(expected.get(sourceIndex));
+                    assertThat(variant.invoke(sourceIndex)).as("%s/%s %s", workloadId, sources.get(sourceIndex).sourceId(), variant.name()).isEqualTo(expected.get(sourceIndex));
                 }
             }
         }
