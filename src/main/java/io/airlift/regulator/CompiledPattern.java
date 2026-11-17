@@ -275,10 +275,6 @@ abstract sealed class CompiledPattern
     // reverse program could never run, keeps none and has no reverse program. This pattern's
     // lock keeps the input, the program, and the computed flag consistent with each other.
     private Regexp normalizedReverseRegexp;
-    // The input of Trino's lazily built repeat matcher, the members of a greedy zero-or-more
-    // one-byte repeat, captured from a Trino pattern's suffix where its shape and the program
-    // allow it, or null.
-    private final SingleByteRepeatMatcher.Repeat singleByteRepeat;
     // Whether the suffix is a greedy class repeat that the class counter takes, where the
     // program allows it.
     private final boolean hasClassRepeat;
@@ -377,10 +373,6 @@ abstract sealed class CompiledPattern
         boolean holdsClassRepeatCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS;
         boolean countsOnMatcherCounter = holdsClassRepeatCounter || (matcherClassCounter != null && singleMember != null);
         this.boundedCharacterClassCounter = countsOnMatcherCounter ? matcherClassCounter : analysis.compactBoundedCharacterClass();
-        // Only Trino builds the repeat matcher.
-        this.singleByteRepeat = compilerDialect == Compiler.Dialect.TRINO && requiredPrefix == null && !partialProg.hasTextDependentAssertions()
-                ? SingleByteRepeatMatcher.analyze(suffixRegexp, expressionAnalysis.caseFolding())
-                : null;
         // A counter held from the start is never built lazily, so only a pattern without one
         // analyzes its suffix for the lazy counter's input.
         BoundedCharacterClassCounter.Repeat repeat = boundedCharacterClassCounter == null && countsOnClassCounter
@@ -444,7 +436,6 @@ abstract sealed class CompiledPattern
         this.longestMatch = pattern.longestMatch;
         this.capturingGroupCount = pattern.capturingGroupCount;
         this.capturingGroupNames = pattern.capturingGroupNames;
-        this.singleByteRepeat = pattern.singleByteRepeat;
         this.hasClassRepeat = pattern.hasClassRepeat;
         this.classRepeat = pattern.classRepeat;
         this.requiredPrefix = pattern.requiredPrefix;
@@ -1990,7 +1981,6 @@ abstract sealed class CompiledPattern
                 expressionAnalysis.estimatedRetainedSize(partialProg) +
                 partialProg.estimatedRetainedSize() +
                 (foldedStartRun == null ? 0 : foldedStartRun.estimatedRetainedSize()) +
-                (singleByteRepeat == null ? 0 : singleByteRepeat.estimatedRetainedSize()) +
                 (classRepeat == null ? 0 : classRepeat.estimatedRetainedSize()) +
                 (requiredPrefix == partialProg.getRequiredPrefix() || expressionAnalysis.holdsLiteral(requiredPrefix) ? 0 : SizeOf.sizeOf(requiredPrefix)) +
                 booleanPlans.estimatedRetainedSize(partialProg, expressionAnalysis, singleByteMatcher) +
@@ -4168,11 +4158,6 @@ abstract sealed class CompiledPattern
         return requiredPrefix == null &&
                 !partialProg.hasTextDependentAssertions() &&
                 MatchLength.fixed(matchLength) == 1;
-    }
-
-    SingleByteRepeatMatcher createSingleByteRepeatMatcher()
-    {
-        return singleByteRepeat == null ? null : SingleByteRepeatMatcher.create(singleByteRepeat);
     }
 
     BoundedCharacterClassCounter createBoundedCharacterClassCounter()
