@@ -55,10 +55,8 @@ import static java.util.Objects.requireNonNull;
 ///
 /// A find never runs the search on a search window shorter than [#minimumSearchBytes], nor a count
 /// on a whole text shorter than [#minimumCountBytes], though a count's later searches cover
-/// whatever text remains; the exception is a pattern that keeps a short-search fixed-width matcher,
-/// which runs the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] whatever its literal
-/// kind. A shorter window, as for the many short lines of a line-by-line search, runs the ordinary
-/// engine, or that fixed-width matcher for a count or matcher find. A gated one-byte search, for a
+/// whatever text remains. A shorter window, as for the many short lines of a line-by-line search,
+/// runs the ordinary engine. A gated one-byte search, for a
 /// one-byte exact literal with byte gates, also runs on a shorter find window, as a
 /// [check][#checksShortWindows] that rejects a window without a gate-passing hit, and where the
 /// pattern qualifies the ordinary engine's full-Slice boolean find, which, for a pattern on the
@@ -697,10 +695,8 @@ final class InnerLiteralSearch
     /// head, which only the folded pair kernel searches, and
     /// [#MINIMUM_LITERAL_SET_SEARCH_BYTES] for a literal set, or
     /// [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] for one behind a class run that only the
-    /// class-run proof admits. A pattern with a short-search fixed-width matcher, whose shorter
-    /// counts and matcher finds run that matcher instead, runs the search from
-    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], and a search that
-    /// [checks short windows][#checksShortWindows] runs on them too; see
+    /// class-run proof admits. A search that [checks short windows][#checksShortWindows] runs
+    /// on them too; see
     /// [CompiledPattern#searchesInnerLiteralWindow].
     int minimumSearchBytes()
     {
@@ -770,8 +766,7 @@ final class InnerLiteralSearch
     /// The fewest bytes of a whole-text count's text that it runs the search on where the
     /// alternative is the ordinary engine: [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a literal
     /// set not behind a class run, whose one search continues across the count's matches, and
-    /// [#minimumSearchBytes] for every other kind. A pattern with a short-search fixed-width
-    /// matcher counts through the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES].
+    /// [#minimumSearchBytes] for every other kind.
     int minimumCountBytes()
     {
         // One count search continues across many matches, so a set's scan pays off sooner there

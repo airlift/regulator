@@ -412,7 +412,7 @@ public class TestBenchmarkPatternDispatch
             case "ORDERED_LITERALS_BYTES" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(ORDERED_LITERALS);
             case "INNER_LITERAL_FIXED_WIDTH" -> {
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
-                assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
+                assertThat(compiled.fixedWidthByteSpanMatcherForDiagnostics()).as(description).isNull();
             }
             case "GENERAL" -> {
                 assertThat(compiled.sharedSingleByteMatcher()).as(description).isNull();
