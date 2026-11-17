@@ -432,12 +432,11 @@ public class TestDfaCandidateStartCursor
     public void testFoldedStartRunCursorVerifiesOnlyStartsThatHoldTheLiteral()
     {
         // Behind an opening curly quote, whose bytes lie outside ASCII, the run ` holme` of
-        // `abcMr. Sherlock Holmes` allows a start at the `a`, which holds no `the `. Rust, Java
-        // with Unicode case, and Trino judge `\b` with a DFA that quits on a start after a byte
-        // outside ASCII, and four quits in a row turn the cursor and the DFA off until the next
-        // reset. The cursor rules such a start out unverified, so every find routes through it, as
-        // with the literal cursor. A start that holds the literal right after the quote still
-        // quits and falls back, as with the literal cursor.
+        // `abcMr. Sherlock Holmes` allows a start at the `a`, which holds no `the `. The cursor
+        // rules such a start out unverified, so every find routes through it, as with the literal
+        // cursor. Rust, Java with Unicode case, and Trino judge `\b` after the quote with a DFA
+        // that decides it, so a start that holds the literal right after the quote routes through
+        // the cursor too.
         String expression = "\\bthe (?i)Sherlock Holmes";
         String tail = " ".repeat(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES);
         for (String language : List.of("Rust", "Java (?u)", "Trino")) {
@@ -445,7 +444,7 @@ public class TestDfaCandidateStartCursor
             CompiledPattern control = compilePattern(language, "(" + expression + ")");
             for (RunCursorCase runCase : List.of(
                     new RunCursorCase("\u201CabcMr. Sherlock Holmes. the Sherlock Holmes. ".repeat(4) + tail, 4, 0),
-                    new RunCursorCase("\u201Cthe Sherlock Holmes. the Sherlock Holmes. ".repeat(4) + tail, 4, 4))) {
+                    new RunCursorCase("\u201Cthe Sherlock Holmes. the Sherlock Holmes. ".repeat(4) + tail, 8, 0))) {
                 String description = language + " " + expression + " on " + runCase.text();
                 RegexpMatcher candidate = assertFoldedRunCandidateAgrees(language + " " + expression, pattern, control, utf8(runCase.text()));
                 assertThat(candidate.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(runCase.routes());
@@ -526,20 +525,21 @@ public class TestDfaCandidateStartCursor
     @Test
     public void testLiteralCandidateCursorSettlesQuitCandidates()
     {
-        // A word boundary that decodes characters quits the DFA next to a byte outside ASCII: here
-        // at the literal's first occurrence, after a letter, a curly quote, and malformed UTF-8.
-        // The matcher settles that one candidate without the DFA, matched or not, and the cursor
-        // resumes after it, so the cursor's DFA finds every later match, nothing falls back, and
-        // no quit counts toward the streak. The count, a region, find(int), and a Slice past its
-        // array's first byte agree with a matcher without the cursor.
-        String expression = "\\bgot(?i)syou";
-        String rest = "gotsyou, gotSYOU and gotsyou " + FILLER;
-        List<byte[]> neighbors = List.of("É".getBytes(UTF_8), "“".getBytes(UTF_8), new byte[] {(byte) 0xC3}, new byte[] {(byte) 0x89}, new byte[] {(byte) 0xFF});
+        // A word boundary that decodes characters quits the DFA where a lead it took for a word
+        // character turns out malformed: here after the literal's first occurrence, whose word
+        // runs into a Cyrillic lead with no character, alone or before another lead. The matcher
+        // settles that one candidate without the DFA, and the cursor resumes after it, so the
+        // cursor's DFA finds every later match, nothing falls back, and no quit counts toward the
+        // streak. The count, a region, find(int), and a Slice past its array's first byte agree
+        // with a matcher without the cursor.
+        String expression = "\\bgot(?i)syou\\w{0,8}\\b";
+        String rest = ", gotSYOU and gotsyou " + FILLER;
+        List<byte[]> neighbors = List.of(new byte[] {(byte) 0xD0}, new byte[] {(byte) 0xD0, (byte) 0xD0});
         for (String language : QUITTING_LANGUAGES) {
             CompiledPattern pattern = compile(language, expression);
             CompiledPattern controlPattern = compile(language, "(" + expression + ")");
             for (byte[] neighbor : neighbors) {
-                Slice input = concatenate("fo".getBytes(UTF_8), neighbor, rest.getBytes(UTF_8));
+                Slice input = concatenate("fo gotsyou".getBytes(UTF_8), neighbor, rest.getBytes(UTF_8));
                 String description = language + " after " + HexFormat.of().formatHex(neighbor);
                 RegexpMatcher control = controlPattern.matcher(input);
                 assertThat(control.candidateStartCursorEnabledForDiagnostics()).as(description).isFalse();
@@ -582,58 +582,54 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
-    public void testLiteralCandidateCursorSettlesQuitCandidateExactly()
+    public void testLiteralCandidateCursorDecidesCandidatesBesideNonAscii()
     {
-        // Each input's first find meets a candidate whose check quits next to a byte outside
-        // ASCII, which the matcher settles. Each find agrees with a matcher without the cursor,
-        // the cursor's fallback count stays zero, and no quit counts toward the streak.
+        // Each input's first find meets a candidate beside a character outside ASCII, whose word
+        // boundary the cursor's DFA decides from the text: with candidates that fail, matches that
+        // span the most bytes a match can, text that ends inside a match, and the literal again
+        // right after a candidate. Each find agrees with a matcher without the cursor, nothing
+        // falls back, the streak stays zero, and the cursor never reports a quit.
         String sherlock = "zqx cat, Ézqx Sherlock, “";
         int quotedCandidateStart = sherlock.getBytes(UTF_8).length;
-        List<QuitCandidateCase> cases = List.of(
-                // The first occurrence fails its suffix. The second quits and fails its word
-                // boundary. The quoted occurrence quits and matches the shorter `Sherlock`
-                // alternative.
-                new QuitCandidateCase(
+        List<NonAsciiCandidateCase> cases = List.of(
+                new NonAsciiCandidateCase(
                         "\\bzqx (?i)(?:Sherlock|Sherlock Holmes)",
                         sherlock + "zqx SHERLOCK Holmes, zqx sherlock holmes " + FILLER,
                         Optional.of(new Boundary(quotedCandidateStart, quotedCandidateStart + "zqx SHERLOCK".length()))),
-                // Matches that span the most bytes a match can, so the settle reads every one. The
-                // long s and the Kelvin sign are the longest folds of s and k.
-                new QuitCandidateCase("\\bab[a-z]{0,3}", "“abxyz " + FILLER, Optional.of(new Boundary(3, 8))),
-                new QuitCandidateCase("\\bgot(?i)syou", "“gotſyou " + FILLER, Optional.of(new Boundary(3, 11))),
-                new QuitCandidateCase("\\bab(?i)sk", "“abſ\u212A " + FILLER, Optional.of(new Boundary(3, 10))),
-                // The text ends inside the longest match's bytes after the candidate, so the
-                // settle reads only to its end.
-                new QuitCandidateCase("\\bgot(?i)syou", FILLER + "“gotsyo", Optional.empty()),
-                // The byte after the settled bytes rules out a match at the first candidate.
-                new QuitCandidateCase("\\bab\\b", "“abc ab " + FILLER, Optional.of(new Boundary(7, 9))),
-                // The literal occurs again at the byte after the settled candidate.
-                new QuitCandidateCase("\\Baa[bc]", "éaaab " + FILLER, Optional.of(new Boundary(3, 6))),
-                // Five candidates settle without a match, and the window after the last is too
-                // short for the cursor, so no completed cursor search resets the streak afterward;
-                // a settle that counted toward the streak would leave it nonzero.
-                new QuitCandidateCase("\\bab(?i)k\\b", "“abc ".repeat(4) + FILLER_UNIT.repeat(4) + "“abc " + FILLER_UNIT + "filler", Optional.empty()));
-        for (QuitCandidateCase quitCase : cases) {
-            Slice input = utf8(quitCase.input());
+                new NonAsciiCandidateCase("\\bab[a-z]{0,3}", "“abxyz " + FILLER, Optional.of(new Boundary(3, 8))),
+                new NonAsciiCandidateCase("\\bgot(?i)syou", "“gotſyou " + FILLER, Optional.of(new Boundary(3, 11))),
+                new NonAsciiCandidateCase("\\bab(?i)sk", "“abſ\u212A " + FILLER, Optional.of(new Boundary(3, 10))),
+                new NonAsciiCandidateCase("\\bgot(?i)syou", FILLER + "“gotsyo", Optional.empty()),
+                new NonAsciiCandidateCase("\\bab\\b", "“abc ab " + FILLER, Optional.of(new Boundary(7, 9))),
+                new NonAsciiCandidateCase("\\Baa[bc]", "éaaab " + FILLER, Optional.of(new Boundary(3, 6))),
+                new NonAsciiCandidateCase("\\bab(?i)k\\b", "“abc ".repeat(4) + FILLER_UNIT.repeat(4) + "“abc " + FILLER_UNIT + "filler", Optional.empty()));
+        for (NonAsciiCandidateCase candidateCase : cases) {
+            Slice input = utf8(candidateCase.input());
             for (String language : QUITTING_LANGUAGES) {
-                String description = language + " " + quitCase.expression() + " on " + quitCase.input();
-                RegexpMatcher matcher = compile(language, quitCase.expression()).groupZeroMatcher(input, null);
-                List<Boundary> expected = ordinaryBoundaries(language, quitCase.expression(), input);
+                String description = language + " " + candidateCase.expression() + " on " + candidateCase.input();
+                RegexpMatcher matcher = compile(language, candidateCase.expression()).groupZeroMatcher(input, null);
+                List<Boundary> expected = ordinaryBoundaries(language, candidateCase.expression(), input);
 
                 assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).as(description).isTrue();
-                assertThat(expected.stream().findFirst()).as(description).isEqualTo(quitCase.firstMatch());
+                assertThat(expected.stream().findFirst()).as(description).isEqualTo(candidateCase.firstMatch());
                 assertThat(boundaries(matcher)).as(description).isEqualTo(expected);
                 assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isZero();
                 assertThat(matcher.dfaQuitStreak()).as(description).isZero();
                 assertThat(matcher.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isFalse();
-                assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isTrue();
+                assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isFalse();
             }
         }
+    }
 
-        // A cursor that scans for a folded start run settles no quit: each start after `é` that
-        // holds the literal quits and falls back, and counts toward the streak.
-        String runExpression = "\\bthe (?i)Sherlock Holmes";
-        Slice runInput = utf8("éthe Sherlock Holmes, the Sherlock Holmes. ".repeat(3) + FILLER);
+    @Test
+    public void testFoldedStartRunCursorFallsBackOnQuitCandidates()
+    {
+        // A cursor that scans for a folded start run settles no quit: each check whose word runs
+        // into a Cyrillic lead with no character quits and falls back, and counts toward the
+        // streak.
+        String runExpression = "\\bthe (?i)Sherlock Holmes\\w{0,8}\\b";
+        byte[] runUnit = concatenate("the Sherlock Holmes".getBytes(UTF_8), new byte[] {(byte) 0xD0}, ", the Sherlock Holmes. ".getBytes(UTF_8)).getBytes();
+        Slice runInput = concatenate(runUnit, runUnit, runUnit, FILLER.getBytes(UTF_8));
         for (String language : QUITTING_LANGUAGES) {
             String description = language + " " + runExpression;
             CompiledPattern pattern = compile(language, runExpression);
@@ -641,10 +637,9 @@ public class TestDfaCandidateStartCursor
             List<Boundary> expected = ordinaryBoundaries(language, runExpression, runInput);
 
             assertThat(matcher.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isTrue();
-            assertThat(boundaries(matcher)).as(description).hasSize(3).isEqualTo(expected);
+            assertThat(boundaries(matcher)).as(description).hasSize(6).isEqualTo(expected);
             assertThat(pattern.count(runInput)).as(description).isEqualTo(expected.size());
             assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(3);
-            assertThat(matcher.dfaQuitStreak()).as(description).isEqualTo(3);
             assertThat(matcher.candidateStartCursorReportsQuitCandidatesForDiagnostics()).as(description).isFalse();
         }
     }
@@ -653,12 +648,14 @@ public class TestDfaCandidateStartCursor
     public void testLiteralCandidateCursorBoundsQuitCandidateWork()
     {
         // Each quit candidate is settled over at most the bytes the longest match spans, which the
-        // cursor charges to its work budget. Here every candidate follows a curly quote, so each
-        // find settles one and matches there; each match consumes three bytes, but each settle is
-        // charged the much longer maximum match length. The budget runs out before the candidates
-        // do, and the cursor falls back for the rest of the input, whose matches are the same.
-        String expression = "\\bab[^\\n]{0,300}?X";
-        Slice input = utf8("“abX ".repeat(1_000) + FILLER);
+        // cursor charges to its work budget. Here every candidate's word runs into a Cyrillic lead
+        // with no character, so each find settles one and matches there; each match consumes the
+        // two bytes ab of a four-byte unit, but each settle is charged the much longer maximum
+        // match length. The budget runs
+        // out before the candidates do, and the cursor falls back for the rest of the input, whose
+        // matches are the same.
+        String expression = "\\bab\\w{0,40}\\b";
+        Slice input = concatenate(truncatedWord("ab", 1_000), FILLER.getBytes(UTF_8));
         for (String language : QUITTING_LANGUAGES) {
             CompiledPattern pattern = compile(language, expression);
             RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
@@ -672,7 +669,7 @@ public class TestDfaCandidateStartCursor
                 found.add(new Boundary(matcher.start(), matcher.end()));
             }
 
-            assertThat(window).as(language).isGreaterThan(300);
+            assertThat(window).as(language).isGreaterThan(40);
             assertThat(found).as(language).isEqualTo(ordinaryBoundaries(language, expression, input));
             assertThat(settledFinds).as(language).isPositive().isLessThan(found.size());
             assertThat((long) settledFinds * window).as(language).isLessThanOrEqualTo(3L * input.length());
@@ -681,15 +678,26 @@ public class TestDfaCandidateStartCursor
 
         // The first quit after a reset repeats its search in the loop that reports quits, and the
         // work of the search that quit is refunded. Here that search checks every candidate before
-        // the quoted one, each over the longest match's bytes, so it spends most of the budget:
-        // charged twice, it would exhaust the budget and the cursor would fall back.
-        Slice costlyInput = utf8(("ab" + "y".repeat(120) + "\n").repeat(400) + "“abX " + FILLER);
+        // the truncated one, each over a word too long to end within the repeat, so it spends most
+        // of the budget: charged twice, it would exhaust the budget and the cursor would fall back.
+        Slice costlyInput = concatenate(("ab" + "y".repeat(41) + "\n").repeat(1_100).getBytes(UTF_8), truncatedWord("ab", 1), FILLER.getBytes(UTF_8));
         for (String language : QUITTING_LANGUAGES) {
             RegexpMatcher matcher = compile(language, expression).groupZeroMatcher(costlyInput, null);
 
             assertThat(boundaries(matcher)).as(language).isEqualTo(ordinaryBoundaries(language, expression, costlyInput));
             assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(language).isZero();
         }
+    }
+
+    // `count` copies of `word`, each followed by 0xD0, the lead of a Cyrillic letter, and a space.
+    private static byte[] truncatedWord(String word, int count)
+    {
+        byte[] unit = concatenate(word.getBytes(UTF_8), new byte[] {(byte) 0xD0, ' '}).getBytes();
+        byte[] words = new byte[unit.length * count];
+        for (int index = 0; index < count; index++) {
+            System.arraycopy(unit, 0, words, index * unit.length, unit.length);
+        }
+        return words;
     }
 
     @Test
@@ -974,5 +982,5 @@ public class TestDfaCandidateStartCursor
 
     private record RunFindCase(String language, String expression, String text, int from, Boundary expected, int routes, int fallbacks) {}
 
-    private record QuitCandidateCase(String expression, String input, Optional<Boundary> firstMatch) {}
+    private record NonAsciiCandidateCase(String expression, String input, Optional<Boundary> firstMatch) {}
 }

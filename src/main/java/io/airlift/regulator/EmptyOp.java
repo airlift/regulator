@@ -86,7 +86,8 @@ final class EmptyOp
     // Java's \b and \B and Trino's Unicode \b and \B, which decode the character on each side.
     static final int JAVA_TRINO_WORD_BOUNDARIES = CODE_POINT_ASSERTIONS | EMPTY_UNICODE_WORD_BOUNDARY | EMPTY_NO_UNICODE_WORD_BOUNDARY;
     // The word assertions that decode the text. Between ASCII bytes and text edges each is its
-    // ASCII form, so the DFA evaluates them there and quits next to a byte outside ASCII.
+    // ASCII form; next to a byte outside ASCII the DFA decides them from a lead byte whose
+    // characters share one class or from the decoded text, and quits only on malformed text.
     static final int DECODING_WORD_ASSERTIONS = RUST_UNICODE_WORD_ASSERTIONS | JAVA_TRINO_WORD_BOUNDARIES;
 
     public static final int TEXT_DEPENDENT =
@@ -104,7 +105,78 @@ final class EmptyOp
                     EMPTY_TRINO_END_LINE |
                     RUST_ASSERTIONS;
 
+    // The kinds of byte a DFA that decides word assertions tells apart, in the low three bits of
+    // decodingByteKind, with the character length of a word or non-word lead above them.
+    static final int ASCII_BYTE = 0;
+    static final int CONTINUATION_BYTE = 1;
+    // A lead whose characters do not share one class or that limits the byte after it, or a
+    // byte that starts no valid character (C0, C1, and F5 through FF): next to an assertion, its
+    // transition is read from the text, so its length does not matter.
+    static final int MIXED_LEAD_BYTE = 2;
+    static final int WORD_LEAD_BYTE = 3;
+    static final int NON_WORD_LEAD_BYTE = 4;
+    static final int BYTE_KIND_MASK = 0x7;
+    static final int LEAD_LENGTH_SHIFT = 3;
+
     private EmptyOp() {}
+
+    /// Returns the word rules, as [UnicodeGroups#wordCharacterClass] takes them, of the word
+    /// assertions among `assertions` that decode the text.
+    static int wordRules(int assertions)
+    {
+        int wordRules = 0;
+        if ((assertions & RUST_UNICODE_WORD_ASSERTIONS) != 0) {
+            wordRules |= UnicodeGroups.RUST_WORD_RULE;
+        }
+        if ((assertions & JAVA_WORD_BOUNDARIES) != 0) {
+            wordRules |= UnicodeGroups.JAVA_WORD_RULE;
+        }
+        if ((assertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
+            wordRules |= UnicodeGroups.JAVA_UNICODE_WORD_RULE;
+        }
+        if ((assertions & (EMPTY_UNICODE_WORD_BOUNDARY | EMPTY_NO_UNICODE_WORD_BOUNDARY)) != 0) {
+            wordRules |= UnicodeGroups.TRINO_WORD_RULE;
+        }
+        return wordRules;
+    }
+
+    /// Returns the kind of the byte `value` under `wordRules`, with the length of the character
+    /// it leads above [#LEAD_LENGTH_SHIFT] for a word or non-word lead.
+    static int decodingByteKind(int value, int wordRules)
+    {
+        if (value < 0x80) {
+            return ASCII_BYTE;
+        }
+        if (value < 0xC0) {
+            return CONTINUATION_BYTE;
+        }
+        if (value < 0xC2 || value > 0xF4) {
+            return MIXED_LEAD_BYTE;
+        }
+        int length = value < 0xE0 ? 2 : value < 0xF0 ? 3 : 4;
+        return switch (UnicodeGroups.wordLeadClass(value, wordRules)) {
+            case UnicodeGroups.WORD_CHARACTER -> WORD_LEAD_BYTE | (length << LEAD_LENGTH_SHIFT);
+            case UnicodeGroups.NON_WORD_CHARACTER -> NON_WORD_LEAD_BYTE | (length << LEAD_LENGTH_SHIFT);
+            default -> MIXED_LEAD_BYTE;
+        };
+    }
+
+    /// Returns the valid character that holds the byte before `position`, as `(bytes << 2) |
+    /// class`: its class under `wordRules`, and how many of its bytes lie at or after
+    /// `position`, 0 when it ends there. Returns -1 when that byte is in no valid character, or
+    /// when stray continuation bytes follow the character it is in. `position` must be after
+    /// `begin`.
+    static int characterBefore(byte[] bytes, int begin, int end, int position, int wordRules)
+    {
+        int start = previousCodePointStart(bytes, begin, position);
+        long decoded = Utf8.decode(bytes, start, end);
+        int width = Utf8.decodedWidth(decoded);
+        if (!isValid(decoded) || start + width < position) {
+            return -1;
+        }
+        int characterClass = UnicodeGroups.wordCharacterClass(Utf8.decodedCodePoint(decoded), wordRules);
+        return ((start + width - position) << 2) | characterClass;
+    }
 
     static int contextFlags(Slice text, int position)
     {

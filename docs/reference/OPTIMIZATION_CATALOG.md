@@ -1287,10 +1287,13 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   keep the streak. A transition that must quit throws before taking the lock and is never
   stored, so other readers never see a quit state
 - **What it does:** In a program whose word boundaries decode characters, the
-  DFA quits only when a state that needs any assertion meets a non-ASCII byte
-  before or after it. Elsewhere ASCII decides the boundary through RE2's state
-  flags, with the JDK's and Joni's word characters for Java and Trino, and the
-  quit hands non-ASCII neighbors to an engine that decodes characters. A
+  DFA once quit whenever a state that needs any assertion met a non-ASCII byte
+  before or after it; it now decides those neighbors itself, as
+  [Unicode word assertions decided on the DFA](#unicode-word-assertions-decided-on-the-dfa)
+  describes, and quits only on malformed text. Elsewhere ASCII decides the
+  boundary through RE2's state flags, with the JDK's and Joni's word
+  characters for Java and Trino, and a quit hands the malformed text to an
+  engine that decodes characters. A
   second program rewrites a terminal final-line `$` as an optional LF and end
   of text, so boolean calls and group-zero bounds run on the DFA instead of
   the program with the text-dependent assertion. Rust rows with Unicode `\b`
@@ -1304,6 +1307,52 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   Graviton and Intel, in Rust, Java, and Trino ([#242]). The group-zero forward
   cursor runs these programs too, and a find whose cursor quits skips the
   DFA on its fallback rather than running it again.
+
+### Unicode word assertions decided on the DFA
+
+- **Origin:** Goes past regex-automata's lazy DFA, which treats every
+  non-ASCII byte as a quit byte for Unicode word assertions and hands the
+  search to the PikeVM or backtracker ([hybrid/dfa.rs][ra-hybrid]); Inspired
+  by resharp, which rewrites `\b` from its neighbors as `(?<!\w)` and `(?!\w)`,
+  carries the lookbehind through its derivative states, and defers lookahead
+  with a `rel` offset of up to one character ([resharp]). Regulator: the
+  last-character field, uniform lead bytes per language, and the
+  context-keyed side table that keeps a text-dependent destination out of the
+  shared byte slot.
+- **Where:** `Dfa.DfaInstance.computeDecodingTransition`,
+  `Dfa.DfaInstance.decodingDecision`,
+  `Dfa.DfaInstance.computeContextTransition`, `Dfa.DecodedWordCaches`,
+  `UnicodeGroups.WordLeads`, `EmptyOp.decodingByteKind`,
+  `Prog.computeByteMap`
+- **Applies when:** A program has a word assertion that decodes characters:
+  Rust Unicode `\b`, `\B`, `\b{start}`, `\b{end}` and the half boundaries,
+  Java `\b` and `\B` with or without `(?U)`, and Trino `\b` and `\B`. Every
+  other program, and every RE2 program, keeps its byte classes, flags, and
+  transitions. On ASCII text these programs take the same states as before.
+- **What it does:** Four flag bits record what the last character was: an
+  ASCII or edge neighbor, a word or non-word character, the class of the
+  character whose continuation bytes are still being read, or unknown. Inside
+  a valid character every Unicode word assertion is false, so the forward DFA
+  needs no lookahead there. A lead byte whose every valid character has one
+  class under the language's own word rule decides the boundary from its byte
+  class and caches it like any transition; the class is claimed for the whole
+  character, and a malformed continuation after that claim quits to the
+  decoding engines as before. A mixed lead such as E2 or C3, an unknown last
+  character, and every reverse transition beside non-ASCII leave the byte slot
+  uncomputed and decode the neighbors from the text with the language's
+  `EmptyOp` rule, caching the destination in a side table keyed by state,
+  neighbor kinds, and byte class. The side table is allocated only when such a
+  program meets non-ASCII text and is charged to the DFA's memory budget. A
+  claimed lead whose transition would end the search or report a match is
+  refused the byte slot and decided from the text, with its result cached
+  under the decoded context like any context transition. The forward byte map
+  refines its classes once per kind of byte it tells apart, wherever the kind's
+  bytes lie, so a kind splits only where the pattern's own classes split it;
+  the reverse map adds none. On 2,500 lines of rebar's
+  Russian haystack, Rust `\b\w+\b` and `\b\w{12,}\b` now find every match on
+  the DFA, where before 4 quits sent 11,422 and 212 finds to the Pike NFA;
+  Greek and French text decode the neighbors about once per non-ASCII
+  character on the forward DFA.
 
 ### Thrashing DFA skipped across calls
 
@@ -2962,6 +3011,7 @@ change is described.
 [re2-re2]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/re2.cc
 [re2-set]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/set.cc
 [re2-simplify]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/simplify.cc
+[resharp]: https://github.com/ieviev/resharp
 [rs-interval]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/interval.rs
 [rs-literal]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/literal.rs
 [simdjson]: https://github.com/simdjson/simdjson

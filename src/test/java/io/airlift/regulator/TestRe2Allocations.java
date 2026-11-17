@@ -195,6 +195,36 @@ public class TestRe2Allocations
     }
 
     @Test
+    public void testRejectedDfaBudgetIsNotMeasuredAgain()
+    {
+        // Measuring the minimum of a DFA that decides Unicode word boundaries classifies every
+        // byte into a new array. A lookup that rejected the budget measured it again, so every
+        // search at that budget allocated the array.
+        Slice pattern = Slices.utf8Slice("\\bfoo\\b");
+        Prog program = null;
+        for (long maxMemory = 4096; program == null || program.dfaMemory() / 2 == 0; maxMemory += 64) {
+            assertThat(maxMemory).as("maxMemory leaving the DFA a budget").isLessThan(65_536);
+            try {
+                program = RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+            }
+            catch (RegexpCompileMemoryLimitException ignored) {
+                // The program itself does not fit yet.
+            }
+        }
+        assertThat(reachesFirstMatchMinimum(program)).isFalse();
+        assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+
+        Prog rejectingProgram = program;
+        assertAllocatesNothingOnceCompiled("testRejectedDfaBudgetIsNotMeasuredAgain", MAXIMUM_WINDOW_RUNS, 10_000, () -> {
+            int rejectedCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                rejectedCount += rejectingProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH) == null ? 1 : 0;
+            }
+            return rejectedCount;
+        });
+    }
+
+    @Test
     public void testLiteralSetFindDoesNotAllocate()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();

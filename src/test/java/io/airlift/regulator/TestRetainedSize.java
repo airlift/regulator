@@ -42,6 +42,9 @@ public class TestRetainedSize
     private static final String WORD_ALTERNATION = "(?i)(sherlock|holmes|watson|irene|adler|moriarty|lestrade)";
     private static final Slice TEXT = randomText(256 << 10);
     private static final Slice SHORT_TEXT = Slices.utf8Slice("Sherlock Holmes met Watson");
+    // Binary digits before é or ×, whose shared lead C3 makes a Rust Unicode \b decode the text.
+    private static final Slice DECODED_TEXT = binaryDigitsBeforeLatin1Letters(15_000);
+    private static final String DECODED_WORD_BOUNDARY = "0[01]{12}\\bZ";
 
     @Test
     public void testSizeGrowsAsSearchesBuildCaches()
@@ -159,6 +162,12 @@ public class TestRetainedSize
         assertMatchesHeapGraph("LIKE pattern after matching", () -> TrinoLikePattern.compile(Slices.utf8Slice("a%b_c%d")), TrinoLikePattern::matches, TrinoLikePattern::retainedSizeInBytes);
         assertMatchesHeapGraph("500 named groups (map sizing)", () -> JavaRegexp.compile(Slices.utf8Slice(namedGroups(500))), (_, _) -> {}, JavaRegexp::retainedSizeInBytes);
         assertMatchesHeapGraph("Java default-dot literal (dot stops, span matcher)", () -> JavaRegexp.compile(Slices.utf8Slice(".*foo.*")), JavaRegexp::find, JavaRegexp::retainedSizeInBytes);
+        assertMatchesHeapGraph("Rust Unicode \\b after decoding (word decoding, decoded caches)", () -> RustRegexp.compile(Slices.utf8Slice(DECODED_WORD_BOUNDARY)), (pattern, _) -> pattern.count(DECODED_TEXT), RustRegexp::retainedSizeInBytes);
+        assertMatchesHeapGraph("Rust Unicode \\b reset, then ASCII (superseded decoded caches)", () -> RustRegexp.compile(Slices.utf8Slice(DECODED_WORD_BOUNDARY)), (pattern, _) -> {
+            pattern.count(DECODED_TEXT);
+            dfas(pattern).forEach(Dfa.DfaInstance::resetCacheExternal);
+            pattern.count(TEXT);
+        }, RustRegexp::retainedSizeInBytes);
         assertMatchesHeapGraph("Rust \\w before reverse compile (shared Unicode ranges)", () -> RustRegexp.compile(Slices.utf8Slice("([\\w!]*)([\\w!])")), (_, _) -> {}, RustRegexp::retainedSizeInBytes);
         assertMatchesHeapGraph("named-group map views (duplicate names, cached views)", () -> Re2.compile(Slices.utf8Slice("(?P<same>a)(?P<same>b)")), (pattern, _) -> {
             assertThat(pattern.capturingGroupNames().keySet()).hasSize(2);
@@ -310,6 +319,19 @@ public class TestRetainedSize
             builder.add(Slices.utf8Slice(atom), Re2.Options.defaults());
         }
         return builder.build();
+    }
+
+    private static Slice binaryDigitsBeforeLatin1Letters(int lines)
+    {
+        Random random = new Random(275);
+        StringBuilder text = new StringBuilder();
+        for (int line = 0; line < lines; line++) {
+            for (int digit = 0; digit < 17; digit++) {
+                text.append(random.nextBoolean() ? '1' : '0');
+            }
+            text.append(line % 2 == 0 ? '\u00E9' : '\u00D7');
+        }
+        return Slices.utf8Slice(text.toString());
     }
 
     // Words of letters in either case with the alternation's names among them, so the

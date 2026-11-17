@@ -14,9 +14,11 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDfaPairedTransitions
@@ -70,8 +73,8 @@ public class TestDfaPairedTransitions
         Dfa.StateData start = dfa.analyzeStart(tables, matchingInput, textBegin, textEnd, false, true);
         byte[] bytes = matchingInput.byteArray();
         assertThat(Dfa.FLAT_PAIRED_ROWS
-                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false)
-                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false))
+                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false, textBegin)
+                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false, textBegin))
                 .isEqualTo(matchingInput.length());
 
         assertThat(Dfa.search(program, matchingInput, false, Prog.MatchKind.FIRST_MATCH, true))
@@ -157,35 +160,51 @@ public class TestDfaPairedTransitions
     }
 
     @Test
-    public void testFirstSearchWithoutTransitionsDefersPointerTableOnce()
+    public void testSearchesThatQuitBeforeTransitionsLeavePairingToTheNextSearch()
     {
-        // The DFA quits when it evaluates Java's \b next to a byte outside ASCII, so a search that
-        // starts at a byte-order mark ends before the DFA computes a transition. Two short searches
-        // from different start contexts leave two start states with nothing computed, and the
-        // pointer table the long search then requests waits, so the next search builds paired rows.
+        // A search whose range ends just before a malformed character, which its last step would
+        // read as a claimed character, quits before the DFA computes a transition and before it
+        // requests a pointer table. Three such searches from different start contexts leave start
+        // states with nothing computed, and the first search that computes transitions builds
+        // paired rows.
         String pattern = "\\b\\w+n\\b";
         Prog program = compileJavaProgram(pattern);
-        Slice wordThenByteOrderMark = utf8Slice("x\uFEFF");
-        Slice byteOrderMarkInput = utf8Slice("\uFEFF" + "x ".repeat(150) + "plain");
+        Slice truncatedLead = Slices.wrappedBuffer((byte) 0xD0);
+        Slice wordThenTruncatedLead = Slices.wrappedBuffer((byte) 'x', (byte) 0xD0);
+        byte[] longBytes = ("x ".repeat(150) + "plain ").getBytes(UTF_8);
+        longBytes[longBytes.length - 1] = (byte) 0xD0;
+        Slice longThenTruncatedLead = Slices.wrappedBuffer(longBytes);
         Slice input = utf8Slice("x ".repeat(150) + "plain");
 
-        assertThat(Dfa.search(program, utf8Slice("\uFEFF"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
-        assertThat(Dfa.search(program, wordThenByteOrderMark, 1, wordThenByteOrderMark.length(), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
-        assertThat(Dfa.search(program, byteOrderMarkInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(program, truncatedLead, 0, 0, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(program, wordThenTruncatedLead, 1, 1, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(program, longThenTruncatedLead, 0, input.length(), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
 
         assertThat(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(input.length());
         assertThat(dfa.pairedTransitionMemory()).isPositive();
         assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+    }
 
-        // The table waits only once: a DFA that keeps quitting at its first byte gets the table on
-        // its second search.
-        Prog quittingProgram = compileJavaProgram(pattern);
-        for (int search = 0; search < 2; search++) {
-            assertThat(Dfa.search(quittingProgram, byteOrderMarkInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
-        }
-        assertThat(quittingProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).absolutePointerTransitionsAvailable()).isTrue();
+    @Test
+    public void testPointerTableWaitsOnceForASearchThatComputesTransitions()
+    {
+        // Beside a byte that starts no valid character, Java's \b is read from the text, so a
+        // search over such bytes computes only context transitions, none in the shared table,
+        // and gives pairing nothing to evaluate. The pointer table it requests waits for one
+        // search, then is allocated though the next search computes nothing either. A quit cannot
+        // drive this: a quit before any transition comes before the request, and every later
+        // one follows a lead whose claim the shared table holds.
+        Prog program = compileJavaProgram("\\b\\w+n\\b");
+        byte[] invalidBytes = new byte[400];
+        Arrays.fill(invalidBytes, (byte) 0xFF);
+        Slice invalid = Slices.wrappedBuffer(invalidBytes);
+        assertThat(Dfa.search(program, invalid, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+        assertThat(Dfa.search(program, invalid, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
     }
 
     @Test
