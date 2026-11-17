@@ -1850,6 +1850,7 @@ ordinary engine would.
   byte-gap form ([#28], [#33], [#127], [design][d-trino-literal],
   [design][d-boolean]).
 - **Where:** `OrderedLiteralMatcher.analyze`, `OrderedLiteralMatcher.matches`,
+  `OrderedLiteralMatcher.findWithCharacterGaps`,
   `CompiledPattern.createByteGapOrderedLiteralMatcher`
 - **Applies when:** Unanchored chains of case-sensitive literals: Trino
   `contains` with dot-all gaps; full-input boolean finds in RE2 and Rust whose
@@ -1859,7 +1860,10 @@ ordinary engine would.
   LIKE `%a%b%c%`
 - **What it does:** `(?s)a.*b.*c` finds each literal in turn at its first
   occurrence with `LiteralSearchKernel`. A UTF-8 `(?s:.)` gap keeps the
-  general engine, which rejects malformed UTF-8 there. On synthetic rows, RE2
+  general engine, which rejects malformed UTF-8 there, except in Trino's
+  `contains`, which checks each gap between two found literals against the
+  characters the engine's dot accepts, skipping ASCII a word at a time, and
+  asks the engine on the whole input when a gap fails. On synthetic rows, RE2
   Latin-1 and Rust bytes-API ordered-literal finds take 0.03 to 0.04 of their
   earlier time on 1 KB rows and 0.31 to 0.42 on short rows ([#127]).
 

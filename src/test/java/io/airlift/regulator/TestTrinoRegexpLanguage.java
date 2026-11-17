@@ -22,6 +22,7 @@ import io.airlift.joni.Matcher;
 import io.airlift.joni.Option;
 import io.airlift.joni.Regex;
 import io.airlift.joni.Syntax;
+import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -30,6 +31,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -79,38 +81,65 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testOrderedLiteralContainsUsesJoniSemantics()
+    public void testOrderedLiteralGapsAgreeAcrossOperations()
     {
-        Slice pattern = utf8Slice("(first)(?s:.*)(second)");
-        Slice backing = rawBytes('!', 'x', 'f', 'i', 'r', 's', 't', 0xFF, '\n', 's', 'e', 'c', 'o', 'n', 'd', 'y', '?');
-        Slice input = backing.slice(1, backing.length() - 2);
-        TrinoRegexp regexp = TrinoRegexp.compile(pattern);
+        // Contains jumps between the literals but reads the dot-all gaps between them as the
+        // engine does, and leaves a gap holding bytes the dot rejects to the engine, so contains
+        // and extract agree on malformed UTF-8 in a gap, which Trino's garbage-in, garbage-out
+        // rule leaves free to differ from Joni.
+        TrinoRegexp pair = TrinoRegexp.compile(utf8Slice("first(?s:.*)second"));
+        Slice malformedGap = orderedLiteralInput(rawBytes(0xFF));
+        assertThat(pair.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
+        assertThat(pair.contains(malformedGap)).isFalse();
+        assertThat(pair.extract(malformedGap)).isNull();
 
-        assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(regexp.contains(input)).isEqualTo(joniFind(pattern, input));
-
-        assertJoniContainsRoute("first(?s:.*)second", "first\nsecond", true);
-        assertJoniContainsRoute("first(?s:.*)second", "second first", true);
-        assertJoniContainsRoute("(?s:.*)first(?s:.*)second(?s:.*)", "xfirst💰secondy", true);
-        assertJoniContainsRoute("first.*second", "first\nsecond", false);
-        assertJoniContainsRoute("^first(?s:.*)second", "xfirst-second", false);
-        assertJoniContainsRoute("first(?s:.*)second$", "first-secondx", false);
-        assertJoniContainsRoute("(?i:first)(?s:.*)second", "FIRST-second", false);
-        assertJoniContainsRoute("first.{2}second", "first--second", false);
-        assertJoniContainsRoute("first\\b(?s:.*)second", "first-second", false);
-
-        Slice validInput = utf8Slice("xfirst\nsecondy");
-        assertThat(regexp.extract(validInput, 1)).isEqualTo(utf8Slice("first"));
-        assertThat(regexp.extract(validInput, 2)).isEqualTo(utf8Slice("second"));
+        // The dot accepts an encoded surrogate, so that gap matches without the engine; a lone
+        // continuation byte, an overlong C0, or a cut-short lead does not, nor does a bad byte
+        // after a long ASCII run, which the check skips a word or a vector at a time.
+        Map<Slice, Boolean> gaps = Map.of(
+                rawBytes(0xFF), false,
+                new DynamicSliceOutput(101).appendBytes(utf8Slice("x".repeat(100))).appendByte(0xFF).slice(), false,
+                rawBytes(0x80), false,
+                rawBytes(0xC0, 0x80), false,
+                rawBytes(0xE2, '\n'), false,
+                rawBytes(0xED, 0xA0, 0x80), true,
+                utf8Slice("\n💰"), true);
+        for (String pattern : List.of("first(?s:.*)second", "(first)(?s:.*)(second)(?s:.*)(third)", "(?s:.*)first(?s:.*)second(?s:.*)")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).as(pattern).isTrue();
+            gaps.forEach((gap, matches) -> {
+                Slice input = orderedLiteralInput(gap);
+                String description = "%s with gap %s".formatted(pattern, HexFormat.of().formatHex(gap.getBytes()));
+                assertThat(regexp.contains(input)).as(description).isEqualTo(matches);
+                assertThat(regexp.extract(input) != null).as(description).isEqualTo(matches);
+                if (matches) {
+                    // An accepted gap answers on the literal search alone: the engine builds no DFA.
+                    TrinoRegexp fresh = TrinoRegexp.compile(utf8Slice(pattern));
+                    assertThat(fresh.contains(input)).as(description).isTrue();
+                    for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
+                        assertThat(fresh.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(kind)).as("%s initialized %s DFA", description, kind).isNull();
+                    }
+                }
+            });
+            // A rejected gap does not decide: the engine finds the later literals.
+            Slice laterMatch = orderedLiteralInput(rawBytes(0xFF), utf8Slice(" first second third"));
+            assertThat(regexp.contains(laterMatch)).as(pattern).isTrue();
+            assertThat(regexp.extract(laterMatch)).as(pattern).isNotNull();
+        }
     }
 
-    private static void assertJoniContainsRoute(String pattern, String input, boolean orderedLiteralRoute)
+    private static Slice orderedLiteralInput(Slice gap)
     {
-        Slice patternSlice = utf8Slice(pattern);
-        Slice inputSlice = utf8Slice(input);
-        TrinoRegexp regexp = TrinoRegexp.compile(patternSlice);
-        assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).as(pattern).isEqualTo(orderedLiteralRoute);
-        assertThat(regexp.contains(inputSlice)).as(pattern).isEqualTo(joniFind(patternSlice, inputSlice));
+        return orderedLiteralInput(gap, utf8Slice(""));
+    }
+
+    /// Builds `first`, `gap`, `second`, `gap`, `third`, and `suffix` in a nonzero-offset Slice.
+    private static Slice orderedLiteralInput(Slice gap, Slice suffix)
+    {
+        DynamicSliceOutput output = new DynamicSliceOutput(64);
+        output.appendBytes(utf8Slice("!xfirst")).appendBytes(gap).appendBytes(utf8Slice("second")).appendBytes(gap).appendBytes(utf8Slice("third")).appendBytes(suffix).appendBytes(utf8Slice("y?"));
+        Slice backing = output.slice();
+        return backing.slice(1, backing.length() - 2);
     }
 
     @Test
@@ -1420,6 +1449,15 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("a(?x)b|c d", "acd", true),
                 new MatchCase("a(?s)b|.", "\n", false),
                 new MatchCase("a(?s)b|.", "a\n", true),
+                new MatchCase("first(?s:.*)second", "first\nsecond", true),
+                new MatchCase("first(?s:.*)second", "second first", false),
+                new MatchCase("(?s:.*)first(?s:.*)second(?s:.*)", "xfirst💰secondy", true),
+                new MatchCase("first.*second", "first\nsecond", false),
+                new MatchCase("^first(?s:.*)second", "xfirst-second", false),
+                new MatchCase("first(?s:.*)second$", "first-secondx", false),
+                new MatchCase("(?i:first)(?s:.*)second", "FIRST-second", true),
+                new MatchCase("first.{2}second", "first--second", true),
+                new MatchCase("first\\b(?s:.*)second", "first-second", true),
                 new MatchCase("\\u0041+", "AAA", true),
                 new MatchCase("a{01,003}", "aa", true),
                 new MatchCase("(?'name'x)", "x", true),
