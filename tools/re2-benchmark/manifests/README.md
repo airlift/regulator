@@ -64,7 +64,9 @@ python3 tools/re2-benchmark/manifests/provision-literal-corpus.py --rebar-root <
 `BenchmarkUapCore` runs by URL, revision, size, checksum, and license, together
 with the size and checksum of each committed resource generated from them: the
 browser and OS sections of `regexes.yaml` and the browser and OS test cases, as
-gzip JSON lines. `provision-uap-core.py` regenerates the resources from a
+gzip JSON lines, and uap-core's `LICENSE`, copied unchanged beside them with a
+`README.md` that states the conversion, as the Apache-2.0 license requires.
+`provision-uap-core.py` regenerates the resources from a
 checkout of the pinned revision, and with `--check` verifies them:
 
 ```bash
