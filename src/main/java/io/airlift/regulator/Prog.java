@@ -65,7 +65,6 @@ final class Prog
 
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
-    private static final int MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET = 16;
     // The results of walkByteOffset other than an instruction count.
     private static final int BYTE_OFFSET_ASSERTION = -1;
     private static final int BYTE_OFFSET_MATCH = -2;
@@ -83,8 +82,6 @@ final class Prog
             value = "EI_EXPOSE_REP",
             justification = "Slice values are deliberate zero-copy result views")
     public record PossibleMatchRangeResult(Slice min, Slice max) {}
-
-    record FixedDistanceByteCandidates(byte[] candidates, int offset) {}
 
     // The probe pair a folded pair kernel tests and whether the dense kernel scans it; see
     // foldedPairScan.
@@ -1765,47 +1762,6 @@ final class Prog
         skipsToStartCandidate = canPrefixAccel() || (transparentStartLiteral != null && hasDfaUnsupportedAssertions());
     }
 
-    /// Finds a selective byte set at one fixed offset from every possible match start.
-    /// The bounded walk deliberately rejects assertions and variable-distance candidates.
-    FixedDistanceByteCandidates buildFixedDistanceByteCandidates(int[] stack, byte[] startByteCandidates)
-    {
-        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || startByteCandidates == null || start() == 0) {
-            return null;
-        }
-
-        int bestCandidateCount = countCandidates(startByteCandidates);
-        byte[] bestCandidates = null;
-        int bestOffset = -1;
-
-        int[] currentInstructions = new int[size()];
-        int currentInstructionCount = 1;
-        currentInstructions[0] = start();
-        int[] byteInstructions = new int[size()];
-        boolean[] visited = new boolean[size()];
-
-        for (int offset = 0; offset <= MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET && currentInstructionCount > 0; offset++) {
-            byte[] candidates = new byte[256];
-            currentInstructionCount = walkByteOffset(stack, currentInstructions, currentInstructionCount, byteInstructions, visited, candidates);
-            if (currentInstructionCount == BYTE_OFFSET_ASSERTION) {
-                return null;
-            }
-            if (currentInstructionCount == BYTE_OFFSET_MATCH) {
-                break;
-            }
-            int candidateCount = countCandidates(candidates);
-            if (offset > 0 && candidateCount > 0 && candidateCount < bestCandidateCount) {
-                bestCandidateCount = candidateCount;
-                bestCandidates = candidates;
-                bestOffset = offset;
-            }
-        }
-
-        if (bestCandidates == null || bestCandidateCount > 64) {
-            return null;
-        }
-        return new FixedDistanceByteCandidates(bestCandidates, bestOffset);
-    }
-
     /// Returns the bytes at each of the first offsets of every match, for the start class filter
     /// of a forward DFA: one 256-entry membership table per offset; entry `b` of table `k` is
     /// nonzero when some path from [#start()] reads `b` there, the union over all paths. The
@@ -1813,8 +1769,7 @@ final class Prog
     /// every match holds a byte of each table at its offset. Returns null when fewer than two
     /// offsets lie before every match end, when an offset reads no byte, when the bounded walk
     /// reaches an assertion, and for a reversed, start-anchored, or empty-matching program, one
-    /// with prefix acceleration, or one with no start instruction. The walk is the one
-    /// [#buildFixedDistanceByteCandidates] takes.
+    /// with prefix acceleration, or one with no start instruction.
     byte[][] buildStartOffsetByteSets(int[] stack, int maximumSpan)
     {
         if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0) {
@@ -1914,20 +1869,6 @@ final class Prog
             currentInstructions[index] = instOut(words[byteInstructions[index]]);
         }
         return byteInstructionCount;
-    }
-
-    private static int countCandidates(byte[] candidates)
-    {
-        if (candidates == null) {
-            return Integer.MAX_VALUE;
-        }
-        int count = 0;
-        for (byte candidate : candidates) {
-            if (candidate != 0) {
-                count++;
-            }
-        }
-        return count;
     }
 
     private static int addStartByteRange(byte[] candidates, long instruction)

@@ -94,8 +94,7 @@ public class BenchmarkDfaSelfLoopExitScan
         dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
         if (dfa.estimatedPairedTransitionMemory() <= Dfa.MAX_PAIRED_TRANSITION_MEMORY ||
                 dfa.pairedTransitionRowCount() != 0 ||
-                dfa.selfLoopTransitionCount() == 0 ||
-                dfa.canFixedDistanceByteAcceleration()) {
+                dfa.selfLoopTransitionCount() == 0) {
             throw new IllegalStateException("Benchmark did not select the unpaired self-loop DFA route");
         }
     }

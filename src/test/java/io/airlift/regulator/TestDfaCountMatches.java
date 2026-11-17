@@ -28,8 +28,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntConsumer;
 import java.util.function.ToLongFunction;
 import java.util.regex.Matcher;
@@ -91,26 +89,9 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testShortFixedDistanceSkipUsesCompactContinuation()
+    public void testCountsAndCursorSearchesUseStartLiteralFilter()
     {
-        // Sparse enough for the productivity sample of a 64 KiB search to take the fixed-distance
-        // scan, which a shorter search leaves for the start class filter.
-        Prog program = compile("[a-z]shing");
-        String filler = "xxxxxxsxxxxxx";
-        String input = filler.repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES / filler.length() + 1) + "ashing";
-
-        assertThat(Dfa.countMatches(program, utf8Slice(input), Prog.MatchKind.FIRST_MATCH))
-                .isEqualTo(1);
-        assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).fixedDistanceShortSkipFallbackCount())
-                .isGreaterThan(0);
-    }
-
-    @Test
-    public void testUnsampledFixedDistanceScanYieldsToStartLiteralFilter()
-    {
-        // The names' fifth bytes are common in English text, so their fixed-distance scan skips
-        // little. Below the sampling threshold, counts and group-zero searches use the more
-        // selective start literal filter.
+        // Counts and group-zero searches use the start literal filter.
         String expression = "(?i)Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty";
         String filler = "the eel slept here alone, see ".repeat(100);
         for (int nameCount : new int[] {7, 55}) {
@@ -148,8 +129,7 @@ public class TestDfaCountMatches
         assertUnsampledSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH), source);
     }
 
-    // ASCII case folding, as in rebar's sherlock-casei-en row; Unicode folding gives s and k
-    // multibyte variants, which leave no fixed-distance byte.
+    // ASCII case folding, as in rebar's sherlock-casei-en row.
     private static RustRegexp compileRustBytesWithoutUnicode(String expression)
     {
         return RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setUnicode(false));
@@ -157,10 +137,7 @@ public class TestDfaCountMatches
 
     private static void assertUnsampledSearchesUseStartLiteralFilter(Dfa.DfaInstance dfa, Slice source)
     {
-        assertThat(dfa.fixedDistanceByteOffset()).isEqualTo(4);
-        // Without the vector scanners there is no filter, and the fixed-distance scan runs.
         assertThat(dfa.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
-        assertThat(dfa.fixedDistanceShortSkipFallbackCount() == 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
         assertThat(dfa.startLiteralFilterScanCount() > 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
     }
 
@@ -400,23 +377,6 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testSuccessfulCountDfaThrashingKeepsProductiveScanner()
-    {
-        // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-        // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
-        // and the pinned native RE2 count still holds.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(3L << 19));
-        var input = Slices.wrappedBuffer(stateExplosionInput(2 * 1024 * 1024));
-
-        // Pinned native RE2 finds 1,074 non-overlapping matches in this deterministic input.
-        assertThat(pattern.countMatches(input)).isEqualTo(1_074);
-        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics()
-                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
-        assertThat(dfa.byteScanFallbackCount()).isZero();
-    }
-
-    @Test
     public void testPointerTableThrashingKeepsDfa()
     {
         // These texts reach about 2,700 DFA states. A 2 MiB budget holds them all on object rows,
@@ -458,176 +418,6 @@ public class TestDfaCountMatches
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
             assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
         }
-    }
-
-    @Test
-    public void testLockFreeCountHandsPointerTableResetsToLock()
-            throws Exception
-    {
-        // A count over cached states runs without the lock, and between two of its matches finds
-        // on another text reset the DFA twice while it holds the pointer table; neither find
-        // resets often enough itself to give the table back. With the table the count goes on
-        // under the lock, which gives the table back, and reports each match end once.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
-        Prog program = pattern.forwardProgramForDiagnostics();
-        Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
-        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
-        int[] matchEnds = {0};
-
-        long result = Dfa.countMatches(program, cached, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
-            if (matchEnds[0]++ == 0) {
-                assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
-                resetTwice(dfa, growth);
-                assertThat(dfa.releasedAbsolutePointerResetCount()).isZero();
-            }
-            return true;
-        }, null);
-
-        assertThat(result).isEqualTo(4_000L << Integer.SIZE | cached.length());
-        assertThat(matchEnds[0]).isEqualTo(4_000);
-        assertThat(dfa.releasedAbsolutePointerResetCount()).isPositive();
-
-        // Now the DFA has no table to give back: it gave it back above. A count that sees two
-        // foreign resets gives up without the lock, which this thread holds from the resets until
-        // the count returns.
-        dfa.resetCacheExternal();
-        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
-        CountDownLatch resetsMade = new CountDownLatch(1);
-        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            Future<Long> count = executor.submit(() -> Dfa.countMatches(program, cached, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
-                if (resetsMade.getCount() != 0) {
-                    resetTwice(dfa, growth);
-                    resetsMade.countDown();
-                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                    while (!dfa.cacheMutationLockedForTesting()) {
-                        if (Thread.interrupted() || System.nanoTime() >= deadline) {
-                            throw new AssertionError("The cache mutation lock was not taken");
-                        }
-                        Thread.onSpinWait();
-                    }
-                }
-                return true;
-            }, null));
-            try {
-                assertThat(resetsMade.await(10, TimeUnit.SECONDS)).isTrue();
-                dfa.beginSearch(true);
-                try {
-                    assertThat(count.get(10, TimeUnit.SECONDS)).isEqualTo(Dfa.COUNT_BAILED);
-                }
-                finally {
-                    dfa.cancelExclusiveSearch();
-                }
-            }
-            finally {
-                executor.shutdownNow();
-            }
-        }
-    }
-
-    @Test
-    public void testLockFreeCountHandsOffResetsJudgedBeforeRelease()
-    {
-        // Another search can give the table back between a lock-free count's judgement that its
-        // resets came too often and its choice to give up. No reset after the one that drops the
-        // table has come yet, so the count hands the resets to the lock rather than giving up.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
-        Prog program = pattern.forwardProgramForDiagnostics();
-        Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
-        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        int initialResetCount = dfa.resetCount();
-        resetTwice(dfa, pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024))));
-        assertThat(dfa.countResetsTooOften(initialResetCount, false)).isTrue();
-
-        dfa.beginSearch(true);
-        try {
-            assertThat(dfa.releaseAbsolutePointerTransitionsForSlowReset()).isTrue();
-        }
-        finally {
-            dfa.endSearch(true);
-        }
-        assertThat(dfa.countHandsResetsToLock(initialResetCount)).isTrue();
-    }
-
-    @Test
-    public void testLockedCountKeepsHandedOffResets()
-            throws Exception
-    {
-        // A count without the lock hands two resets to the lock while another search holds it.
-        // Before the count gets the lock, that search gives the table back, makes the reset that
-        // drops it, and one more. The count must count that reset, so it gives up at the first
-        // reset its own searches make under the lock.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
-        Prog program = pattern.forwardProgramForDiagnostics();
-        String match = "x".repeat(15) + "a".repeat(14) + "x";
-        assertThat(Dfa.countMatches(program, utf8Slice(match.repeat(4_000)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        // After the cached matches, short pieces of state growth between matches make the count's
-        // own searches reset the DFA, each piece at most once; the matches after each piece keep
-        // the byte scans sampled, so the matches between pieces are judged.
-        Random random = new Random(7);
-        byte[] alphabet = "abcdefghijklmnopqrst \n,.;0123456789".getBytes(US_ASCII);
-        StringBuilder text = new StringBuilder(match.repeat(4_000));
-        for (int piece = 0; piece < 40; piece++) {
-            for (int index = 0; index < 300; index++) {
-                text.append((char) alphabet[random.nextInt(alphabet.length)]);
-            }
-            text.append(match.repeat(20));
-        }
-        text.append(match.repeat(4_000));
-        Slice input = utf8Slice(text.toString());
-        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
-        int startResetCount = dfa.resetCount();
-
-        CountDownLatch resetsMade = new CountDownLatch(1);
-        AtomicReference<Thread> countThread = new AtomicReference<>();
-        long result;
-        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            Future<Long> count = executor.submit(() -> Dfa.countMatches(program, input, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
-                if (resetsMade.getCount() != 0) {
-                    resetTwice(dfa, growth);
-                    countThread.set(Thread.currentThread());
-                    resetsMade.countDown();
-                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                    while (!dfa.cacheMutationLockedForTesting()) {
-                        if (Thread.interrupted() || System.nanoTime() >= deadline) {
-                            throw new AssertionError("The cache mutation lock was not taken");
-                        }
-                        Thread.onSpinWait();
-                    }
-                }
-                return true;
-            }, null));
-            try {
-                assertThat(resetsMade.await(10, TimeUnit.SECONDS)).isTrue();
-                dfa.beginSearch(true);
-                try {
-                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                    while (!count.isDone() && LockSupport.getBlocker(countThread.get()) == null) {
-                        assertThat(System.nanoTime()).isLessThan(deadline);
-                        Thread.onSpinWait();
-                    }
-                    if (!count.isDone() && dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
-                        dfa.resetCacheExternal();
-                        dfa.resetCacheExternal();
-                    }
-                }
-                finally {
-                    dfa.cancelExclusiveSearch();
-                }
-                result = count.get(10, TimeUnit.SECONDS);
-            }
-            finally {
-                executor.shutdownNow();
-            }
-        }
-
-        assertThat(result).isEqualTo(Dfa.COUNT_BAILED);
-        int releasedResetCount = dfa.releasedAbsolutePointerResetCount();
-        assertThat(releasedResetCount).isPositive();
-        assertThat(dfa.resetCount() - Math.max(startResetCount, releasedResetCount)).isEqualTo(2);
     }
 
     @Test
@@ -1643,29 +1433,6 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testStartByteScanSetNotSampledForFixedDistanceSearches()
-    {
-        String expression = "[a-z]{3}:[0-9]+";
-        // The prefix, dense enough that no wider sample is taken, selects the scalar scan. Searches
-        // with at least 4 KiB remaining use the fixed-distance scan for the colon, so they must
-        // not sample start-byte density. A sample after a late prefix match would see only filler
-        // and promote the range scanner for the final span, which is shorter than 4 KiB and
-        // reaches the start-byte scan without sampling. Three letters keep the start class filter
-        // off, which the selection would keep without the sample.
-        Slice source = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "bbb:2" + ".".repeat(2_000));
-        Prog program = compile(expression);
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa.startClassFilter()).isNull();
-
-        for (int iteration = 0; iteration < 3; iteration++) {
-            assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
-                    .isEqualTo(trinoMatcherCount(expression, source))
-                    .isEqualTo(65);
-        }
-        assertThat(dfa.contiguousRangeScanCount()).isZero();
-    }
-
-    @Test
     public void testStartByteScanSetPromotionSurvivesRetry()
     {
         Prog program = compile("([a-z]+)-([0-9]+)");
@@ -1757,17 +1524,6 @@ public class TestDfaCountMatches
         // start-byte scan productive. The count holds that outcome across the cluster, so no
         // search walks the DFA; sampling at each search would reject the scan inside the cluster.
         assertSingleCountFallbacks("([a-z]+)-([0-9]+)", "abc-1" + ".".repeat(200) + "abc-1".repeat(20) + ".".repeat(70_000), 21, 0);
-        // The cluster's dense `:` bytes reject the fixed-distance scan, and the count holds that
-        // rejection. The searches whose start-scan samples also reject scanning walk the DFA: 15
-        // fallbacks with the start class filter, 16 with the start-byte scan alone. Holding the
-        // earlier productive fixed-distance result instead would leave none. The cluster repeats
-        // `1:1:`, which the start class filter passes at every digit, as densely as the start
-        // bytes; it would pass `a:1:` only at each letter.
-        assertSingleCountFallbacks(
-                "\\w:[0-9]+",
-                "a:1" + ".".repeat(200) + "1:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000),
-                23,
-                VectorSupport.isAvailable() ? 15 : 16);
     }
 
     private static void assertSingleCountFallbacks(String expression, String text, long expectedCount, int expectedFallbackCount)
@@ -1946,16 +1702,6 @@ public class TestDfaCountMatches
             text.append(blocks[random.nextInt(blocks.length)]).append(separator);
         }
         return text.toString();
-    }
-
-    // Resets the DFA twice with finds on another text, counting only the resets after the one
-    // that drops a pointer table given back, as the count rule does.
-    private static void resetTwice(Dfa.DfaInstance dfa, RegexpMatcher growth)
-    {
-        int resetCount = dfa.resetCount();
-        while (dfa.resetCount() - Math.max(resetCount, dfa.releasedAbsolutePointerResetCount()) < 2) {
-            assertThat(growth.find()).isTrue();
-        }
     }
 
     private static int findCount(RegexpMatcher matcher)

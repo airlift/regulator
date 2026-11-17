@@ -1428,9 +1428,7 @@ start while at least 4 KiB remain, and the count keeps the vector scan from the
 first sample that selects it; on a text of at least 64 KiB, a later scalar
 choice holds for the next 64 KiB past its sample. A start literal filter or
 start class filter is kept without this sample, though the per-search
-productivity check still samples its stops. Searches served by the
-fixed-distance scan do not sample, so dense input such as `[a-z]{3}:[0-9]+`
-over repeated `zza:1.` does not pay a start-byte density sample per match.
+productivity check still samples its stops.
 Below 4 KiB the check reports the span as productive without sampling, so
 resampling there would promote the vector scan for uniformly dense input. The per-search
 productivity check that can reject candidate scanning altogether runs for each
@@ -1440,8 +1438,7 @@ current selection. A count under 64 KiB with no sampling carried across calls
 discards a vector scan promotion made by the search that retried, and the retry
 samples again; a longer count, or one that carries sampling, keeps what its
 sampling recorded. The selected primitive changes only how candidates are found,
-never which candidates the DFA processes. Fixed-distance candidate selection
-still samples at each match.
+never which candidates the DFA processes.
 
 Sampling at each match boundary made the choice depend on where the previous
 match ended rather than on the input. On sparse capture input with a match
@@ -1471,8 +1468,8 @@ fused counts.
 Each sample spreads its windows over the whole remaining text, so every one of
 those counts read the same far, cold bytes again. These counts therefore share
 their sampling outcomes: a vector selection holds for the rest of the
-inner-literal count, and a scalar selection and each start-byte and
-fixed-distance productivity result, productive or not, hold for the next 64 KiB
+inner-literal count, and a scalar selection and each start-byte
+productivity result, productive or not, hold for the next 64 KiB
 past the position sampled, as the group-zero search cursor holds a rejection. A
 vector selection recorded by a search that then retries is kept, and the shared
 counts keep the 64-byte start decision.
@@ -1484,9 +1481,8 @@ sampling at every one read windows spread over the rest of the text once per
 match, which was 36-55% of the time of the case-insensitive literal count rows.
 Each later search of a call starts just past a match near the position
 sampled, so the call holds only the outcomes that stay valid past those
-matches: a fixed-distance rejection, a productive start-byte result, and the
-scalar scan choice hold for the next 64 KiB, and a productive fixed-distance
-result and a start-byte rejection are sampled again at each search. A held
+matches: a productive start-byte result and the scalar scan choice hold for
+the next 64 KiB, and a start-byte rejection is sampled again at each search. A held
 start-byte rejection taken among a cluster of matches sent the search after the
 cluster walking the plain DFA to a far match, and on the bounded-repeat context
 row a held productive fixed-distance result sent a search into a 670 KB gap
@@ -1516,24 +1512,6 @@ unchanged on r9g, where that row is bimodal across forks. It keeps the
 case-insensitive literal count win: `02-literal-alternate sherlock-casei-en`
 takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
 `tom-sawyer-huckle-fin-insensitive` 0.481x / 0.656x.
-
-A single find, a count search, or a group-zero cursor search with less than
-64 KiB left, a whole search under 64 KiB or the end of a longer count, does not
-sample the fixed-distance scan. It took that scan by default, and when the
-scan's first skip was short it handed the search to the plain DFA, which
-walked to the match end one byte at a time. On `sherlock-casei-en` in Rust
-bytes mode the names' fifth bytes, a space, `l`, or `e` in either case, fill
-the text, so the searches of the last 64 KiB stepped 58,791 of the count's
-73,333 DFA bytes. Such a search therefore takes the start literal or class
-filter instead when English text holds the fixed-distance bytes more often
-than the filter's estimate accepts a position; a sampled search keeps its
-sample's outcome. Before folded literals took this count, it then stepped
-13,086 DFA bytes for the same 725 matches. On r9g / r8i the count takes
-0.56x / 0.47x of main's time, and a single find in 4 or 16 KiB of English text
-0.12x / 0.09x. Holding the count's last sampled fixed-distance outcome into the
-tail instead would not reach a count under 64 KiB, and a held rejection without
-a filter would leave a dense tail on the start-byte scan rather than the
-fixed-distance scan's handoff to the plain DFA.
 
 ## Bounded DFA Pointer Transition Table
 
@@ -4431,7 +4409,7 @@ continuation byte.
 
 ## Small Candidate-Byte Vector Scan
 
-Forward DFA start-byte and fixed-distance candidate sets containing exactly two
+Forward DFA start-byte candidate sets containing exactly two
 or three bytes use a packed, allocation-free Vector scanner for searches of at
 least 1 KiB when `jdk.incubator.vector` is resolved and the preferred byte
 vector holds 16 to 64 bytes. Other candidate counts, short searches, and JVMs
@@ -4802,8 +4780,7 @@ then a dot or a third digit. On English text with numbers, the digit scan
 handed control to the DFA at nearly every number, which failed after about 2.4
 steps on average.
 
-The filter is sound by construction. The walk from the program's start, the one
-the fixed-distance byte candidates use, takes at each offset the union of the
+The filter is sound by construction. The walk from the program's start takes at each offset the union of the
 bytes every path reads there, and it keeps only the offsets before the shortest
 match ends, so every match holds a byte of each offset's set. Each set is
 stored as the smallest unsigned range that covers it, which can only accept
@@ -4837,11 +4814,8 @@ start literal filter taken for rare start bytes does. On long inputs the
 start-scan productivity check samples the filter's own stops.
 
 A start literal filter of one-bit groups takes precedence, and one that only
-wider groups give yields to the class filter. Fixed-distance byte candidates
-still run first on the searches long enough for them, except where an unsampled
-search yields to a filter, as
-[Once-Per-Count Start-Byte Scan Selection](#once-per-count-start-byte-scan-selection)
-describes; the class filter replaces only the start set's own scan. A
+wider groups give yields to the class filter. The class filter replaces only
+the start set's own scan. A
 fixed-width pattern does not yield to it: unlike the start literal filter, it
 is not among the engine routes the
 [fixed-width matcher](#fixed-width-rare-class-candidates) yields to, since the
@@ -5286,8 +5260,7 @@ protected non-capture controls.
 
 ## Reusable Group-Zero Forward Cursor
 
-Eligible group-zero matchers lazily retain the forward first-match DFA and its
-fixed-distance byte candidates after the bounded candidate-start route declines
+Eligible group-zero matchers lazily retain the forward first-match DFA after the bounded candidate-start route declines
 the search. Repeated `find()` calls then use the existing count-search traversal
 to return one forward boundary without rediscovering the DFA, match mode, and
 acceleration state for every match. Fixed-length expressions derive the start
