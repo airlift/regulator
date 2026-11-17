@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -344,6 +345,7 @@ public class TestTaggedAlternationProgram
         assertThat(taggedDfa.resetCount()).isGreaterThan(resets);
     }
 
+    @Disabled("Sweep leg b3-no-e5-tagged: pins the switched-off mechanism")
     @Test
     public void testThrashingManyMatchDfaIsSkipped()
     {
