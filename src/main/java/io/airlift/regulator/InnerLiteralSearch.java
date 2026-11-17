@@ -399,14 +399,13 @@ final class InnerLiteralSearch
     /// Returns the shortest literal length [#analyze] would search the normalized `regexp` for:
     /// the length of its literal, or of the shortest member of its literal set, as
     /// [#minimumLiteralLength] counts it, or zero when it has none, without a compiled program. It
-    /// also returns zero when the expression has a prefix or a folded run the compiler could scan
-    /// for, a conservative exclusion: the compiler leaves out a leading run where vectors hold 64
-    /// bytes, which this does not check. It cannot see what [#analyze] reads from the program
+    /// also returns zero when the expression has a prefix the compiler could scan for. It cannot
+    /// see what [#analyze] reads from the program
     /// alone: an anchored or DFA-unsupported assertion, which the caller's expression must not
     /// hold, and whether the reverse prefix DFA fits its memory.
     static int predictMinimumLiteralLength(Regexp regexp, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        if (regexp.requiredPrefixForAccel(caseFolding) != null || !regexp.foldedRunsForAccel(caseFolding, byteFrequencies).isEmpty()) {
+        if (regexp.requiredPrefixForAccel(caseFolding) != null) {
             return 0;
         }
         List<InnerLiteral> innerLiterals = innerLiterals(regexp, caseFolding, true);

@@ -47,15 +47,8 @@ import static java.util.Objects.requireNonNull;
 /// matches, and the cost stays linear in the input.
 ///
 /// Only a case-sensitive literal of more than one byte can probe a single later byte. A
-/// case-insensitive literal prefix is scanned for a pair of its folded bytes, and so, under
-/// Unicode case folding, is a run of folded bytes that every match holds within a known range
-/// of offsets from its start. Under any case folding, a find can also scan for a run of folded
-/// bytes behind the literal of a leading assertion, such as the ` holme` of
-/// `\bthe (?i)Sherlock Holmes`, in place of that literal, when the run's pair is more than
-/// {@value #PROBE_FACTOR} times rarer than the pair the literal's own scan probes. The chosen
-/// distribution picks the pair and the run, decides whether such a run replaces the literal, and
-/// decides which three-byte runs are rare enough to scan, or [#englishText()] does in place of
-/// [#uniform()]: a uniform distribution rates each ASCII letter, both of its cases together, at
+/// case-insensitive literal prefix is scanned for a pair of its folded bytes. The chosen
+/// distribution picks the pair, or [#englishText()] does in place of [#uniform()]: a uniform distribution rates each ASCII letter, both of its cases together, at
 /// twice any other byte, so no pair is ever more than {@value #PROBE_FACTOR} times rarer than
 /// the first and last bytes, and the rule would always keep them. Outside scan plans, Rust,
 /// RE2, and Java patterns move the single probe only when the literal's first byte is ASCII.
@@ -308,18 +301,8 @@ public final class ByteFrequencies
         return probability * foldedProbability(literal[pair.secondOffset()]);
     }
 
-    /// Returns whether `probability` is more than {@value #PROBE_FACTOR} times smaller than
-    /// `referenceProbability`, the margin by which a probe leaves the bytes it would otherwise
-    /// probe.
-    static boolean isRarerByProbeMargin(double probability, double referenceProbability)
-    {
-        return probability * PROBE_FACTOR < referenceProbability;
-    }
-
-    /// Returns the distribution that chooses folded pairs, decides whether a folded run behind a
-    /// leading assertion's literal replaces the literal in a find's scan, and decides which
-    /// three-byte runs are rare enough to scan: this one, or [#englishText()] in place of
-    /// [#uniform()]. A uniform distribution rates each ASCII letter, counting both cases, at twice
+    /// Returns the distribution that chooses folded pairs: this one, or [#englishText()] in place
+    /// of [#uniform()]. A uniform distribution rates each ASCII letter, counting both cases, at twice
     /// any other byte, so no pair is ever more than {@value #PROBE_FACTOR} times rarer than the
     /// first and last bytes, and the rule would always keep them.
     ByteFrequencies forFoldedPairs()

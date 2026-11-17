@@ -118,14 +118,11 @@ public class TestWindowLiteralSearch
             assertThat(limitSearch.windowBytesForDiagnostics()).isEqualTo(WindowLiteralSearch.MAXIMUM_WINDOW_BYTES);
         }
         // Where another route applies, the search is left out: a literal prefix, an inner literal,
-        // a folded run behind a start literal, and RE2's longest match.
+        // and RE2's longest match.
         assertThat(Re2.compile(utf8Slice("Tom.{10,25}river")).windowLiteralSearchForDiagnostics()).isNull();
         CompiledPattern inner = Re2.compile(utf8Slice("\\bTom.{10,25}river"));
         assertThat(inner.innerLiteralSearchForDiagnostics()).isNotNull();
         assertThat(inner.windowLiteralSearchForDiagnostics()).isNull();
-        CompiledPattern foldedStartRun = Re2.compile(utf8Slice("\\bthe (?i)Sherlock Holmes"));
-        assertThat(foldedStartRun.foldedStartRunForDiagnostics()).isNotNull();
-        assertThat(foldedStartRun.windowLiteralSearchForDiagnostics()).isNull();
         assertThat(Re2.compile(utf8Slice(TOM_RIVER), Re2.Options.defaults().setLongestMatch(true)).windowLiteralSearchForDiagnostics()).isNull();
     }
 

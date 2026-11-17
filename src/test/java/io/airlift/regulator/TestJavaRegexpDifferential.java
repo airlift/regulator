@@ -169,8 +169,7 @@ public class TestJavaRegexpDifferential
     public void testFoldedRunBehindVariableLeadMatchesJdk()
     {
         // Under Unicode case folding, s, k, and i also match the long s, the Kelvin sign, and the
-        // dotted and dotless i, which take more bytes, so these patterns scan for a run of folded
-        // bytes behind a lead of varying width.
+        // dotted and dotless i, which take more bytes.
         Map<String, List<String>> spellings = Map.of(
                 "Sherlock Holmes", List.of("Sherlock Holmes", "\u017Fherloc\u212A HOLME\u017F", "SHERLOCK holmes"),
                 "kiss the sky", List.of("kiss the sky", "\u212A\u0131\u017F\u017F THE \u017F\u212Ay", "\u212A\u0130ss the sky"),
@@ -179,7 +178,6 @@ public class TestJavaRegexpDifferential
         for (String pattern : spellings.keySet()) {
             Pattern jdk = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern), OptionProfile.UNICODE_CASE_INSENSITIVE.newJavaOptions());
-            assertThat(regexp.forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern).isPositive();
             for (String input : TestPrefixProbeAcceleration.foldedRunTexts(spellings.get(pattern), nearMisses.get(pattern))) {
                 Matcher expected = jdk.matcher(input);
                 RegexpMatcher actual = regexp.matcher(utf8Slice(input));

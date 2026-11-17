@@ -972,11 +972,6 @@ public final class RegexpMatcher
         return candidateStartCursor != null && candidateStartCursor.searchesLiteral();
     }
 
-    boolean candidateStartCursorSearchesFoldedStartRunForDiagnostics()
-    {
-        return candidateStartCursor != null && candidateStartCursor.searchesFoldedStartRun();
-    }
-
     boolean candidateStartCursorReportsQuitCandidatesForDiagnostics()
     {
         return candidateStartCursor != null && candidateStartCursor.reportsQuitCandidates();
@@ -1032,11 +1027,6 @@ public final class RegexpMatcher
     long candidateStartProductivityRejectionCountForDiagnostics()
     {
         return candidateStartCursor == null ? 0 : candidateStartCursor.productivityRejectionCount();
-    }
-
-    long candidateStartFoldedRunSearchCountForDiagnostics()
-    {
-        return candidateStartCursor == null ? 0 : candidateStartCursor.foldedRunSearchCount();
     }
 
     long requiredLiteralScanCountForDiagnostics()

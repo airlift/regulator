@@ -361,17 +361,11 @@ so the automata run only where a match can be.
   ([noodle_engine_sse.c][hs-noodle-caseless]); Inspired by the Rust regex
   crate ([#85]); Adapted from memchr's packed pair, which probes a needle's
   two rarest bytes by a rank table ([packedpair][memchr-packedpair],
-  [default_rank.rs][memchr-rank]), for the pair choice, and from Hyperscan's
-  offset acceleration ([accel.c][hs-accel]) and .NET 7's fixed-distance sets
-  ([RegexFindOptimizations.cs][dotnet7-fixed-distance]) for the folded run.
+  [default_rank.rs][memchr-rank]), for the pair choice.
   Regulator: case masks on two folded prefix bytes, in SWAR and vector forms
   ([#85], [design][d-folded-prefix]), the English ranking under the uniform
   default, the vector form's counted loop and its in-loop kernel for dense
-  pairs, the SWAR forms' call-free comparison, and a run behind a lead whose
-  width lies within a range, under Unicode and full case folding, with the
-  skip bound the engines share ([#195]), and a run behind a transparent start
-  literal that the literal's candidate cursor scans for in its place ([#235]);
-  base RE2 [O-PROG-006].
+  pairs, and the SWAR forms' call-free comparison; base RE2 [O-PROG-006].
 - **Where:** `Prog.prefixAccelFoldCase`,
   `Prog.prefixAccelFoldCaseFrontAndBackSWAR`, `Prog.findFoldCaseSwar`,
   `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`,
@@ -380,25 +374,12 @@ so the automata run only where a match can be.
   `VectorPrefixScanner.findFoldCaseDensePair`,
   `VectorPrefixScanner.findFoldCaseSve`,
   `VectorPrefixScanner.findFoldCaseDenseSve`,
-  `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
-  `Regexp.foldedRunsBehindStartLiteral`, `Prog.FoldedStartRun`,
-  `Dfa.searchFoldedRunCandidateBoundary`,
-  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`,
   `InnerLiteralSearch.findFoldedLiteralVector`
 - **Applies when:** `(?i)` ASCII prefixes, and the vector form for a
   case-insensitive [inner literal](#reverse-inner-literal-search); the vector
   form from 1 KiB, with the in-loop kernel for probe pairs that the
   distribution that chose them predicts in 15% or more of vectors, as for
-  common pairs in 64-byte vectors.
-  Folded runs: case-insensitive patterns under Unicode case folding with no
-  folded prefix, or whose folded prefix stops at a letter whose fold leaves
-  ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
-  when the run's pair is rarer, and a prefix run that every match starts with
-  only where vectors hold fewer than 64 bytes. A run behind a [transparent
-  start literal](#transparent-start-literal), under any case folding, for that
-  literal's candidate cursor, when its pair is more than four times rarer than
-  the pair the literal's search probes. Either run of three bytes only when an
-  ASCII letter the selected distribution rates rare leads it
+  common pairs in 64-byte vectors
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned for two of its folded bytes a SWAR word or vector at a time. The
   pair is the prefix's first and last bytes unless two bytes at least two
@@ -416,39 +397,15 @@ so the automata run only where a match can be.
   product `p` and the vector's byte count `n`, and at 15% or more scans with a
   kernel that verifies candidates inside its vector loop, where the counted
   loop would leave and re-enter on many vectors; that kernel fits C2's inline
-  limit, so it inlines into the DFA scan. RE2 scans it with a ShiftDFA. Where
-  a Unicode fold ends the prefix, the compiler finds the runs of four to nine
-  folded bytes, or of three led by a rare letter, that every match holds
-  behind a lead of known least and greatest width, and scans for the run
-  with the rarest pair in place of the folded prefix.
-  Prefix acceleration starts that scan the least lead past the search start
-  and returns the run less the greatest lead, and the DFA, NFA, and BitState
-  searches skip the scans that would find the same run again. A run that every
-  match starts with keeps the start bytes only in a first-match DFA whose
-  start bytes carry a start literal filter, and a find loop verifies their
-  candidates without a reverse pass. RE2 scans nothing past such a fold.
-  Behind a transparent start literal, the walk continues past assertions and
-  case-sensitive letters, and the literal's candidate cursor scans for a rarer
-  run in the literal's place and verifies, leftmost first, each start the
-  run's lead allows that holds the literal, as for ` holme` behind `the ` in
-  `\bthe (?i)Sherlock Holmes`. That run scans with a second program
-  configured with it as its folded prefix, with the vector pair kernels from
-  1 KiB with the Vector API and the generic pair SWAR kernel otherwise, so the
-  pattern's program keeps its compiled layout. Rust, RE2, and Java
+  limit, so it inlines into the DFA scan. RE2 scans it with a ShiftDFA. A
+  Unicode fold ends the prefix, and RE2 scans nothing past such a fold.
+  Rust, RE2, and Java
   `name-sherlock-casei` and Rust `name-sherlock-holmes-casei` take 0.17 to 0.20 of their earlier time on Graviton and 0.09 to 0.13 on
   Intel, and `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77
   and 0.62 to 0.64 ([#85]). The counted loop takes `(?i)Sherlock Holmes` in
   Rust and Java to 0.75 to 0.83 of its earlier time on Graviton and Intel, the
   rarer pair takes RE2's Latin-1 `(?i)Sherlock Holmes` to 0.71 on Graviton and
-  0.53 on Intel, and `(?i)Twain` and CPython's `timeout` to 0.45 to 0.68, and
-  the folded run takes `(?i)password` over CPython source to 0.43 to 0.46 in
-  RE2, Rust, and Java with Unicode case and 0.12 to 0.16 in Trino, and the
-  three-byte runs `wat` and `wor`, led by a rare letter, take Trino's counts of
-  `(?i)watson` and `(?i)works` over English to 0.16 on Graviton, and the run
-  ` holme` behind `the ` takes RE2 and Rust counts of
-  `\bthe (?i)Sherlock Holmes` over English to 0.65 to 0.67 on Graviton and
-  0.50 to 0.51 on Intel, and Rust's over curly-quoted English to 0.34, while
-  rows whose run the margin rejects, such as `\bgot(?i)syou`, tie. With the
+  0.53 on Intel, and `(?i)Twain` and CPython's `timeout` to 0.45 to 0.68. With the
   in-loop kernel, CPython's `error`, `(?i)secret` over a log, and Java's
   Unicode `(?i)Twain` run at 0.94 to 1.06 of the earlier per-vector scan's
   time on Intel, where the counted loop loses. The call-free comparison keeps
@@ -512,9 +469,8 @@ so the automata run only where a match can be.
 - **What it does:** When a pattern begins with line or word assertions and
   then a literal, the scan finds the literal and the engine checks the
   assertion from the byte before each hit. The NFA skips to the literal when
-  no thread is live, and a DFA cursor scans for it, or for a rarer folded run
-  behind it, as [Folded prefix masks](#folded-prefix-masks) describes, and
-  verifies each start that holds the literal. On rebar's
+  no thread is live, and a DFA cursor scans for it and verifies each start
+  that holds the literal. On rebar's
   `line-boundary-sherlock-holmes`, searches take 0.03 to 0.09 of their earlier
   time, and Rust goes from 20 to 28 times the crate's time to 1.07 to 1.37
   ([#96]).
@@ -1269,8 +1225,7 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   input. A quit is settled only in a pattern whose matches have a longest
   length, by a cursor that searches the literal itself, and a settle the
   cursor's work budget cannot cover falls back; a pattern with no longest
-  match, such as `\bfoo\w*`, and a cursor that scans for a folded start run
-  keep the streak. A transition that must quit throws before taking the lock and is never
+  match, such as `\bfoo\w*`, keeps the streak. A transition that must quit throws before taking the lock and is never
   stored, so other readers never see a quit state
 - **What it does:** In a program whose word boundaries decode characters, the
   DFA quits only when a state that needs any assertion meets a non-ASCII byte
@@ -2604,7 +2559,6 @@ change is described.
 [#229]: https://github.com/airlift/regulator/pull/229
 [#231]: https://github.com/airlift/regulator/pull/231
 [#232]: https://github.com/airlift/regulator/pull/232
-[#235]: https://github.com/airlift/regulator/pull/235
 [#241]: https://github.com/airlift/regulator/pull/241
 [#242]: https://github.com/airlift/regulator/pull/242
 [#244]: https://github.com/airlift/regulator/pull/244

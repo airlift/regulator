@@ -229,9 +229,7 @@ Within the budget, compilation and matching keep these limits:
   empty, and required-byte checks are not kept when their memory would stop the
   first-match or longest-match DFA from initializing. The literal searched
   behind a leading assertion is kept only when the first-match and longest-match
-  DFAs both keep their minimum memory beside it, and the folded run a find can
-  search for in that literal's place only when they keep it beside both, a
-  minimum that leaves out a forward DFA's start-byte tables. A prefix's literal
+  DFAs both keep their minimum memory beside it. A prefix's literal
   set, which long vector prefix scans compare at each candidate, is decided
   under a `maxMemory` after OnePass and every plan and route, so it never takes
   memory they would use, and is kept only where the first-match and
@@ -300,12 +298,9 @@ such as a plain literal pattern or a pattern's leading literal, probe its first
 byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 `Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
 `RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
-first-byte scanning. The distribution also ranks the folded byte pairs and
-folded runs that case-insensitive prefix scans probe, decides whether a find
-scans for a folded run behind the literal of a leading assertion in place of
-that literal, under any case folding, and admits a three-byte run only when its
-first byte is an ASCII letter it rates rare, counting both cases, using English
-text frequencies under the default. A distribution that matches the searched
+first-byte scanning. The distribution also ranks the folded byte pairs that
+case-insensitive prefix scans probe, using English text frequencies under the
+default. A distribution that matches the searched
 data lets the search scan for a rarer byte of the literal instead. Outside scan
 plans, `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a
 multi-byte literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
@@ -332,7 +327,7 @@ by a multibyte UTF-8 character that ends before the literal's last byte, that
 character's last byte and the literal's last byte, and in vector scans of a
 periodic literal, whose smallest period is more than one byte and at most half
 its length, the first two adjacent bytes that differ from that pair's first byte
-on; the distribution decides only whether a folded run replaces that literal. A
+on. A
 fixed-width pattern with no position rare enough to scan for also estimates with
 English text frequencies whether to test every start of a 64-byte block at once.
 A distribution that does not match the data can make literal scans several times

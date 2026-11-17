@@ -350,7 +350,7 @@ public class TestHotMethodSize
     @Test
     public void testPrefixScanRoutesFitInlineSize()
     {
-        for (String method : List.of("prefixAccel", "prefixAccelFoldCase", "prefixAccelFoldCaseBehindLead")) {
+        for (String method : List.of("prefixAccel", "prefixAccelFoldCase")) {
             assertThat(codeLength(Prog.class, method))
                     .as("Prog.%s bytecode bytes", method)
                     .isPositive()
@@ -387,14 +387,12 @@ public class TestHotMethodSize
     }
 
     /// Keeps every folded pair scan on the selectors, so each takes the candidate-mask form the
-    /// platform selects: the folded prefix scan, the folded run behind a start literal, and the
-    /// folded inner literal search, whose long searches take the vector path. The SVE forms' own
+    /// platform selects: the folded prefix scan and the folded inner literal search, whose long searches take the vector path. The SVE forms' own
     /// tests call the kernels directly, so off SVE hosts a direct kernel call would go unnoticed.
     @Test
     public void testFoldedPairScansCallSelectors()
     {
         assertCallsSelectors(Prog.class, "prefixAccelFoldCase");
-        assertCallsSelectors(Prog.FoldedStartRun.class, "find");
         assertCallsSelectors(InnerLiteralSearch.class, "findFoldedLiteralVector");
         assertThat(calledMethods(InnerLiteralSearch.class, "findFoldedLiteral", InnerLiteralSearch.class))
                 .as("InnerLiteralSearch methods InnerLiteralSearch.findFoldedLiteral calls")

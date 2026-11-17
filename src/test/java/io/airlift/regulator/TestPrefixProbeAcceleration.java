@@ -22,10 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
-import java.util.function.BiFunction;
-import java.util.function.Function;
 
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -101,88 +98,6 @@ public class TestPrefixProbeAcceleration
     }
 
     @Test
-    public void testFoldedRunBehindVariableLead()
-    {
-        // Under Unicode folding, s and k also match the long s and the Kelvin sign, two and three
-        // bytes in UTF-8, so no folded prefix reaches past them. The scan instead searches for
-        // the run of folded bytes between them with the rarest pair, and steps back by the most
-        // bytes its lead can take. In password, ss is s and s or, in Trino, also sharp s.
-        List<BiFunction<String, ByteFrequencies, CompiledPattern>> compilers = List.of(
-                (pattern, frequencies) -> Re2.compile(Slices.utf8Slice("(?i)" + pattern), Re2.Options.defaults().setByteFrequencies(frequencies)),
-                (pattern, frequencies) -> RustRegexp.compile(Slices.utf8Slice(pattern), RustRegexp.Options.defaults().setCaseInsensitive(true).setByteFrequencies(frequencies)),
-                (pattern, frequencies) -> JavaRegexp.compile(Slices.utf8Slice(pattern), JavaRegexp.Options.defaults().setCaseInsensitive(true).setUnicodeCase(true).setByteFrequencies(frequencies)),
-                (pattern, frequencies) -> TrinoRegexp.compile(Slices.utf8Slice("(?i)" + pattern), TrinoRegexp.Options.defaults().setByteFrequencies(frequencies)).re2());
-        for (BiFunction<String, ByteFrequencies, CompiledPattern> compiler : compilers) {
-            Function<String, CompiledPattern> language = pattern -> compiler.apply(pattern, ByteFrequencies.uniform());
-            assertFoldedRun(language.apply("Sherlock Holmes"), " holme", 8, 11, 1, 4);
-            assertFoldedRun(language.apply("password"), "word", 4, 6, 0, 3);
-            // A run needs four bytes, or three led by a rare letter, so yez, led by y, is scanned
-            // for, and tyz, led by t, is not.
-            assertFoldedRun(language.apply("ssssssssyez"), "yez", 8, 16, 0, 2);
-            assertThat(language.apply("sssssssstyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-            // The first byte must be rated under 1.5%: English rates y at 1.4% and g at 1.6%, and
-            // JSON rates g at 0.8%. It must also be a letter, since English rates _ rare.
-            assertThat(language.apply("ssssssssgyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-            assertFoldedRun(compiler.apply("ssssssssgyz", ByteFrequencies.json()), "gyz", 8, 16, 0, 2);
-            assertThat(language.apply("ssssssss_yz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-            // Leads that may differ by eight bytes still qualify; nine do not.
-            assertFoldedRun(language.apply("ssssssssxyzw"), "xyzw", 8, 16, 0, 2);
-            assertThat(language.apply("sssssssssxyzw").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-            // A run longer than nine bytes is split, and the lead of its second part counts the
-            // nine bytes of the first.
-            assertFoldedRun(language.apply("kabcdefghjqvwx"), "qvwx", 10, 12, 0, 3);
-        }
-        // A lead of fixed width qualifies when there is no prefix. In Latin-1 each character of the
-        // lead, the fold class included, takes one byte.
-        assertFoldedRun(Re2.compile(Slices.utf8Slice("(?i)\u00E9clair")), "clair", 2, 2, 0, 4);
-        assertFoldedRun(Re2.compile(latin1Slice("[\u00C9\u00E9]\u00C0(?i:xyzw)"), Re2.Options.latin1()), "xyzw", 2, 2, 0, 2);
-        // A one-byte folded prefix stops the scan wherever its byte is, so a run with a rarer
-        // pair displaces it.
-        assertFoldedRun(Re2.compile(Slices.utf8Slice("(?i)es the")), " the", 2, 3, 0, 3);
-        // A case-sensitive literal ends the runs, and a run must hold an ASCII letter: inner
-        // literal search serves these, as it would without the fold class in front.
-        for (String pattern : List.of("(?i:k)ey = value", "[\u00C9\u00E9]: \\d+ ERROR", "(?i:k)1234ERROR")) {
-            Re2 compiled = Re2.compile(Slices.utf8Slice(pattern));
-            assertThat(compiled.forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
-            assertThat(compiled.innerLiteralSearchForDiagnostics()).as(pattern).isNotNull();
-        }
-        // A class ends the runs unless it holds exactly one fold orbit: [A\x{10000}] lacks the a
-        // of the orbit of A, and [Aa\x{10000}] holds a character outside it.
-        for (String pattern : List.of("[A\\x{10000}](?i:xyzw)", "[Aa\\x{10000}](?i:xyzw)")) {
-            assertThat(Re2.compile(Slices.utf8Slice(pattern)).forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
-        }
-        // In Trino, the s of (?i)Holmes also matches the long s, so the literal has no folded
-        // prefix, and every match starts with its run holme. A three-byte run led by a rare letter
-        // is scanned for too, as with the wat of (?i)watson and the wor of (?i)works. With 64-byte
-        // vectors these runs are left out and the DFA keeps its start bytes. A three-byte run led
-        // by a common letter is not scanned for, as with the thi of (?i)this, the elf of (?i)self,
-        // the cla of (?i)class, and the pon of (?i)response.
-        CompiledPattern holmes = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2();
-        CompiledPattern watson = TrinoRegexp.compile(Slices.utf8Slice("(?i)watson")).re2();
-        CompiledPattern works = TrinoRegexp.compile(Slices.utf8Slice("(?i)works")).re2();
-        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
-            assertFoldedRun(holmes, "holme", 0, 0, 0, 3);
-            assertFoldedRun(watson, "wat", 0, 0, 0, 2);
-            assertFoldedRun(works, "wor", 0, 0, 0, 2);
-        }
-        else {
-            for (CompiledPattern compiled : List.of(holmes, watson, works)) {
-                assertThat(compiled.forwardProgramForDiagnostics().canPrefixAccel()).as(compiled.pattern().toStringUtf8()).isFalse();
-            }
-        }
-        for (String pattern : List.of("(?i)this", "(?i)self", "(?i)class", "(?i)response")) {
-            assertThat(TrinoRegexp.compile(Slices.utf8Slice(pattern)).re2().forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
-        }
-        // In Trino, ffi is also the ffi ligature, the ff ligature and i, or f and the fi ligature.
-        // The first character outside ASCII ends the runs, read in the folded literal, where the
-        // Kelvin sign and the long s are k and s and take the leads k and s take.
-        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)affidavit")).re2(), "davit", 4, 5, 0, 2);
-        assertThat(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u00E9clair")).re2().forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u212Aworld")).re2(), "world", 1, 3, 0, 4);
-        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u017Fworld")).re2(), "world", 1, 2, 0, 4);
-    }
-
-    @Test
     public void testFoldedRunBehindVariableLeadFindsEveryMatch()
     {
         // The anchored searches of the reference never scan for the run, so they judge every
@@ -201,7 +116,6 @@ public class TestPrefixProbeAcceleration
         texts.addAll(foldedRunTexts(List.of("kiss the sky", "\u212Ai\u017F\u017F THE \u017F\u212Ay", "KISS the SKY"), "kis the sky"));
         texts.addAll(foldedRunTexts(List.of("\u212AWORLD", "kworld", "\u017Fworld", "SWorld"), "xworld"));
         for (CompiledPattern pattern : patterns) {
-            assertThat(pattern.forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern.pattern().toStringUtf8()).isPositive();
             RegexpMatcher anchored = pattern.matcher(Slices.EMPTY_SLICE);
             for (String text : texts) {
                 Slice input = Slices.utf8Slice(text);
@@ -234,50 +148,21 @@ public class TestPrefixProbeAcceleration
         for (CompiledPattern pattern : List.of(
                 Re2.compile(Slices.utf8Slice("(?i)Sherlock Holmes")),
                 TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2())) {
-            Prog program = pattern.forwardProgramForDiagnostics();
-            assertThat(program.prefixAccelMaximumLead()).isGreaterThan(program.prefixAccelMinimumLead());
             assertThat(pattern.count(Slices.utf8Slice(text))).isEqualTo(100);
-            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).prefixRunScanCount()).isEqualTo(101);
         }
     }
 
     @Test
     public void testLeadingFoldedRunKeepsFilteredCandidateCursor()
     {
-        // Every match of Trino's (?i)think and (?i)Holmes starts with its folded run, and a
-        // first-match DFA whose start bytes carry a start literal filter keeps them beside the run.
-        // A find loop verifies candidates from them there, as think's do with the Vector API, which
-        // yields each match's start without a reverse pass; with 64-byte vectors there is no run
-        // and the start bytes serve as before. Holmes's start bytes carry no filter, so its find
-        // loop takes the run. The run of (?i)Sherlock Holmes lies behind a lead, so its DFA has no
-        // start bytes to verify.
+        // Trino's (?i)think, (?i)Holmes, and (?i)Sherlock Holmes have no prefix scan, so a find
+        // loop verifies candidates from their start bytes, as with the Vector API, which yields
+        // each match's start without a reverse pass.
         String filler = "filler text, ".repeat(100);
         Slice text = Slices.utf8Slice(filler + "I THINK " + filler + "Holmes thinks " + filler + "Sherlock HOLMES " + filler);
         assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)think")).re2(), text, 2, VectorSupport.isAvailable());
-        CompiledPattern holmes = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2();
-        if (holmes.forwardProgramForDiagnostics().canPrefixAccel()) {
-            assertCandidateCursorFinds(holmes, text, 2, false);
-        }
-        assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2(), text, 1, false);
-
-        // Only the first-match DFA whose start bytes carry the filter keeps and charges the start
-        // tables; the run takes their place in every other DFA, which would never read them. So
-        // think keeps them in its first-match DFA alone, with the Vector API, and Holmes in none.
-        // With 64-byte vectors neither word has a run, as above, and the tables serve as before.
-        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
-            Map<String, List<Dfa.DfaInstance.Kind>> tableKinds = Map.of(
-                    "(?i)think", VectorSupport.isAvailable() ? List.of(Dfa.DfaInstance.Kind.FIRST_MATCH) : List.of(),
-                    "(?i)Holmes", List.of());
-            for (Map.Entry<String, List<Dfa.DfaInstance.Kind>> entry : tableKinds.entrySet()) {
-                Prog program = TrinoRegexp.compile(Slices.utf8Slice(entry.getKey())).re2().forwardProgramForDiagnostics();
-                assertThat(program.prefixRunStartsEveryMatch()).as(entry.getKey()).isTrue();
-                for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
-                    assertThat(Dfa.DfaInstance.initializationMemory(program, kind) > Dfa.DfaInstance.minimumMemory(program, kind))
-                            .as("%s %s start tables", entry.getKey(), kind)
-                            .isEqualTo(entry.getValue().contains(kind));
-                }
-            }
-        }
+        assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2(), text, 2, VectorSupport.isAvailable());
+        assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2(), text, 1, VectorSupport.isAvailable());
     }
 
     @Test
@@ -542,8 +427,6 @@ public class TestPrefixProbeAcceleration
         assertThat(program.usesFoldCasePrefixCandidateScan()).isTrue();
         assertThat(program.prefixAccelFoldCaseFirstOffset()).isEqualTo(firstOffset);
         assertThat(program.prefixAccelFoldCaseSecondOffset()).isEqualTo(secondOffset);
-        // A folded prefix starts every match.
-        assertThat(program.prefixAccelMaximumLead()).isZero();
     }
 
     private static void assertCandidateCursorFinds(CompiledPattern pattern, Slice text, int matches, boolean candidateCursor)
@@ -569,21 +452,6 @@ public class TestPrefixProbeAcceleration
         assertThat(program.prefixAccelFoldCaseDense())
                 .as(pattern)
                 .isEqualTo(VectorSupport.isAvailable() && Prog.usesDenseFoldCaseScan(probability, VectorSupport.preferredByteLanes()));
-    }
-
-    private static void assertFoldedRun(CompiledPattern pattern, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)
-    {
-        assertFoldedRun(pattern.pattern().toStringUtf8(), pattern.forwardProgramForDiagnostics(), run, minimumLead, maximumLead, firstOffset, secondOffset);
-    }
-
-    private static void assertFoldedRun(String description, Prog program, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)
-    {
-        assertThat(program.usesFoldCasePrefixCandidateScan()).as(description).isTrue();
-        assertThat(program.prefixAccelFoldCaseBytesForDiagnostics()).as(description).isEqualTo(run.getBytes(UTF_8));
-        assertThat(program.prefixAccelMinimumLead()).as(description).isEqualTo(minimumLead);
-        assertThat(program.prefixAccelMaximumLead()).as(description).isEqualTo(maximumLead);
-        assertThat(program.prefixAccelFoldCaseFirstOffset()).as(description).isEqualTo(firstOffset);
-        assertThat(program.prefixAccelFoldCaseSecondOffset()).as(description).isEqualTo(secondOffset);
     }
 
     /// Texts that hold each spelling of a case-insensitive literal whose prefix scan searches for

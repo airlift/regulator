@@ -85,9 +85,7 @@ public sealed class TrinoRegexp
         /// scan probes. Matching reads only the chosen offsets; the compiled pattern keeps the
         /// distribution only to compare it with other compiles. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
-        /// folded byte pairs and folded runs that case-insensitive prefix scans probe, decides
-        /// whether a find scans for a folded run behind a leading assertion's literal in place of
-        /// that literal, and decides which three-byte runs are rare enough to scan, with
+        /// folded byte pairs that case-insensitive prefix scans probe, with
         /// [ByteFrequencies#englishText()] in place of the default.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
