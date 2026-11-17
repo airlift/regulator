@@ -238,7 +238,7 @@ public class TestDfaRetainedState
         assertThat(tightDfa.absolutePointerTransitionMemory()).isPositive();
         Dfa.CacheSnapshot firstPointerTable = tightDfa.cacheSnapshot();
         assertThat(firstPointerTable.stateCapacity()).isLessThan(tightDfa.programStateCapacity());
-        long addedPointerRows = tightDfa.absolutePointerTransitionMemory() / ((long) tightDfa.nextSize * Long.BYTES) - (firstPointerTable.stateCount() + 1L);
+        long addedPointerRows = tightDfa.absolutePointerTransitionSegment().byteSize() / ((long) tightDfa.nextSize * Long.BYTES) - (firstPointerTable.stateCount() + 1L);
         assertThat(tightDfa.availableStateMemory()).isGreaterThanOrEqualTo(
                 stateTableMemory(tightDfa.programStateCapacity(), tightDfa.nextSize) -
                         stateTableMemory(firstPointerTable.stateCapacity(), tightDfa.nextSize) +

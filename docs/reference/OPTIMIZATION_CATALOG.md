@@ -1403,6 +1403,7 @@ authoritative.
   [design][d-native]); base RE2 [O-DFA-001], [O-DFA-002], [O-DFA-013].
 - **Where:** `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.allocateAbsolutePointerTable`,
+  `Dfa.DfaInstance.classByteOffsets`,
   `Dfa.searchForwardAbsolutePointers`,
   `Dfa.DfaInstance.shouldUseAbsolutePointersForShortSearch`,
   `Dfa.DfaInstance.setAbsolutePointerTransition`,
@@ -1423,8 +1424,12 @@ authoritative.
   memory, or its byte offset in a heap `long[]` read through a segment whose
   base address is zero, so a step follows the next row without decoding an
   object reference, and the heap form needs one more addition; zero means
-  uncomputed and defers to the object rows. Match, dead, and full-match
-  transitions live in the low 3 bits of the row's address or offset, so the
+  uncomputed and defers to the object rows. The heap form reads each byte's
+  class pre-multiplied by the entry size from an array charged with the table,
+  so its step adds that offset to the row address instead of widening and
+  scaling the class; native tables keep the scaled class, which compiles better
+  there on x86. Match, dead, and full-match transitions live in the low 3 bits
+  of the row's address or offset, so the
   loop tests a tag instead of loading the state's data, and the reverse DFA
   walks the same table. Eligible searches under 256 bytes use an existing
   table at once, and request one after 16 such searches. The first allocation
