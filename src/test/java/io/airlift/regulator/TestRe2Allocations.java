@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import com.sun.management.ThreadMXBean;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
@@ -248,6 +249,39 @@ public class TestRe2Allocations
         long allocatedBytes = minimumAllocatedBytes(30_000, () -> runFinalLineBooleanOperations(pattern, absent, matched, anchored));
 
         assertThat(allocatedBytes / 10_000).isZero();
+    }
+
+    @Test
+    public void testTrinoCaptureMatcherRejectsRowWithoutEngineMatcher()
+    {
+        // Trino builds a capture matcher for each row, as for rebar's ruff-noqa and aws-keys rows.
+        // A row too short for a match, or lacking the bytes every match holds, fails the first
+        // find before the engine matcher and its group storage are built.
+        TrinoRegexp noqa = TrinoRegexp.compile(Slices.utf8Slice("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)"));
+        TrinoRegexp awsKeys = TrinoRegexp.compile(Slices.utf8Slice(
+                "(('|\")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|\").*?(\\n^.*?){0,4}(('|\")[a-zA-Z0-9+/]{40}('|\"))+|" +
+                        "('|\")[a-zA-Z0-9+/]{40}('|\").*?(\\n^.*?){0,3}('|\")((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))('|\"))+"));
+        Slice shortRow = Slices.utf8Slice("x = 1");
+        Slice longRow = Slices.utf8Slice("    return self._parse(value, strict=True)  # a comment without the marker");
+        long matcherSize = SizeOf.instanceSize(noqa.matcher(shortRow).getClass());
+        assertThat(SizeOf.instanceSize(awsKeys.matcher(shortRow).getClass())).isEqualTo(matcherSize);
+
+        assertAllocatesAtMostOnceCompiled("testTrinoCaptureMatcherRejectsRowWithoutEngineMatcher", MAXIMUM_WINDOW_RUNS, 80_000, 4 * matcherSize * 10_000, () -> {
+            int missCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                missCount += captureSearchMisses(noqa, awsKeys, shortRow) + captureSearchMisses(noqa, awsKeys, longRow);
+            }
+            return missCount;
+        });
+    }
+
+    private static int captureSearchMisses(TrinoRegexp noqa, TrinoRegexp awsKeys, Slice row)
+    {
+        int missCount = !noqa.matcher(row).find() ? 1 : 0;
+        missCount += !awsKeys.matcher(row).find() ? 1 : 0;
+        missCount += noqa.extract(row, 2) == null ? 1 : 0;
+        missCount += awsKeys.extractAll(row, 3).isEmpty() ? 1 : 0;
+        return missCount;
     }
 
     @Test

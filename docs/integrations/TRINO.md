@@ -161,6 +161,12 @@ A Trino integration should:
 
 The shared compiled object is safe to reuse. Mutable matching state belongs to a
 `TrinoRegexpMatcher`, `RegexpMatcher`, or operation-local workspace.
+When the pattern keeps required bytes and its capture find takes the general
+route, a capture matcher defers its engine matcher until a find passes the
+length and short-window required-bytes checks, so a matcher created for a row
+those checks reject allocates no engine state. Other capture matchers, such as
+those of `(.)` and `^(a)$`, build it at once, as does a match-result accessor
+called before a find.
 
 ## Correctness evidence
 

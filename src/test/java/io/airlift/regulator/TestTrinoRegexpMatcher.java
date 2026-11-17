@@ -23,6 +23,7 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -35,6 +36,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoRegexpMatcher
 {
+    // Ruff's noqa comment pattern, whose matchers reject a row without `# noqa` before building
+    // the engine matcher.
+    private static final String NOQA = "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)";
+
     @Test
     public void testIterationMatchesJoni()
     {
@@ -61,13 +66,14 @@ public class TestTrinoRegexpMatcher
                 "(?m)^$",
                 "(?m)a\\n^",
                 "(?m)^a$",
-                "(?<word>a+)(b)?")) {
+                "(?<word>a+)(b)?",
+                NOQA)) {
             Slice pattern = utf8Slice(expression);
             Regex joni = new Regex(pattern.getBytes(), 0, pattern.length(), Option.DEFAULT, NonStrictUTF8Encoding.INSTANCE, Syntax.Java);
             TrinoRegexp compiled = TrinoRegexp.compile(pattern);
             for (int retainedGroups : new int[] {0, joni.numberOfCaptures()}) {
                 TrinoRegexpMatcher actual = compiled.matcher(EMPTY_SLICE, retainedGroups);
-                for (String text : List.of("", "x", "foobarfoo", "abcab", "a\nb\na\n", "éé💰ab", "💰\n", "!12:34:?", "δ2026-09-12💰2025-01-01")) {
+                for (String text : List.of("", "x", "foobarfoo", "abcab", "a\nb\na\n", "éé💰ab", "💰\n", "!12:34:?", "δ2026-09-12💰2025-01-01", "x = 1  # noqa: E501, W2")) {
                     Slice source = utf8Slice("padding" + text).slice(7, utf8Slice(text).length());
                     actual.reset(source);
                     assertThat(actual.groupCount()).isEqualTo(retainedGroups);
@@ -202,6 +208,58 @@ public class TestTrinoRegexpMatcher
             assertThatThrownBy(() -> regexp.matcher(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> regexp.matcher(source, -1)).isInstanceOf(IllegalArgumentException.class);
             assertThatThrownBy(() -> regexp.matcher(source, 1)).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
+    public void testDeferredEngineMatcherState()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(NOQA));
+        Regex joni = new Regex(utf8Slice(NOQA).getBytes(), 0, utf8Slice(NOQA).length(), Option.DEFAULT, NonStrictUTF8Encoding.INSTANCE, Syntax.Java);
+        Slice miss = utf8Slice("x = 1  # comment");
+        Slice hit = utf8Slice("x = 1  # NoQa:E501, W291 tail");
+        Matcher expected = joni.matcher(hit.getBytes());
+        assertThat(expected.search(0, hit.length(), Option.DEFAULT)).isNotNegative();
+        Region groups = expected.getEagerRegion();
+        for (int retainedGroups : new int[] {2, regexp.capturingGroupCount()}) {
+            // Failed finds, and each accessor called first on a new matcher, behave as on a built
+            // matcher.
+            TrinoRegexpMatcher matcher = regexp.matcher(miss, retainedGroups);
+            assertThat(matcher.groupCount()).isEqualTo(retainedGroups);
+            assertThat(matcher.find()).isFalse();
+            assertThat(matcher.find()).isFalse();
+            assertThat(matcher.defersEngineMatcherForDiagnostics()).isTrue();
+            assertThat(matcher.groupCount()).isEqualTo(retainedGroups);
+            int outOfRange = retainedGroups + 1;
+            for (Consumer<TrinoRegexpMatcher> accessor : List.<Consumer<TrinoRegexpMatcher>>of(
+                    TrinoRegexpMatcher::start,
+                    TrinoRegexpMatcher::end,
+                    first -> first.matched(outOfRange),
+                    first -> first.group(-1))) {
+                TrinoRegexpMatcher first = regexp.matcher(miss, retainedGroups);
+                assertThatThrownBy(() -> accessor.accept(first)).isInstanceOf(IllegalStateException.class);
+                assertThat(first.find()).isFalse();
+            }
+
+            // A miss followed by a match builds the engine matcher, which later rows reuse.
+            TrinoRegexpMatcher reused = regexp.matcher(miss, retainedGroups);
+            assertThat(reused.find()).isFalse();
+            reused.reset(hit);
+            assertThat(reused.find()).isTrue();
+            assertThat(reused.defersEngineMatcherForDiagnostics()).isFalse();
+            for (int group = 0; group <= retainedGroups; group++) {
+                assertThat(reused.start(group)).isEqualTo(groups.beg[group]);
+                assertThat(reused.end(group)).isEqualTo(groups.end[group]);
+                assertThat(reused.group(group)).isEqualTo(groups.beg[group] < 0 ? null : hit.slice(groups.beg[group], groups.end[group] - groups.beg[group]));
+            }
+            assertThatThrownBy(() -> reused.start(retainedGroups + 1)).isInstanceOf(IllegalArgumentException.class);
+            assertThat(reused.find()).isFalse();
+            assertThatThrownBy(reused::group).isInstanceOf(IllegalStateException.class);
+            reused.reset(miss);
+            assertThat(reused.find()).isFalse();
+            reused.reset(hit);
+            assertThat(reused.find()).isTrue();
+            assertThat(reused.group(2)).isEqualTo(utf8Slice("# NoQa:E501, W291 "));
         }
     }
 

@@ -199,10 +199,12 @@ answer, or reject the input before any engine runs.
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
   every match holds one. A window that lacks them returns no match before any
-  engine runs. The test reads 8-byte words; when the first byte is rare, it
-  loads the last byte's word only for a word that holds the first byte. A
-  single required byte takes the same scan as the inner literal search's
-  single-byte scan, two words a step. A longer window is searched for an exact
+  engine runs; Trino capture matchers and capture extractions run the check
+  before building the engine matcher. The test reads 8-byte words; when the
+  first byte is rare, it loads the last byte's word only for a word that holds
+  the first byte. A single required byte takes the same scan as the inner
+  literal search's single-byte scan, two words a step. A longer window is
+  searched for an exact
   required literal instead, with the vector pair scan from 1 KiB, or for any
   of the one-of bytes, with the vector byte-set scan from 1 KiB; where an
   inner literal search for one exact literal stands in for that check, the
