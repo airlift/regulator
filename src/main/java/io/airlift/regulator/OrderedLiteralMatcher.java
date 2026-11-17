@@ -141,8 +141,6 @@ final class OrderedLiteralMatcher
     /// after the last can match empty, so they are not read.
     int findWithCharacterGaps(Slice input)
     {
-        byte[] bytes = input.byteArray();
-        int inputOffset = input.byteArrayOffset();
         int searchOffset = 0;
         int remaining = input.length();
         boolean gapsAccepted = true;
@@ -159,7 +157,7 @@ final class OrderedLiteralMatcher
             }
             // After a rejected gap the search continues only to tell no match from undecided.
             if (literalIndex > 0 && gapsAccepted) {
-                gapsAccepted = isWholeDotCharacters(bytes, inputOffset + searchOffset, inputOffset + matchOffset);
+                gapsAccepted = isWholeDotCharacters(input, searchOffset, matchOffset);
             }
             int matchEnd = matchOffset + literal.literalLength();
             remaining -= matchEnd - searchOffset;
@@ -172,9 +170,11 @@ final class OrderedLiteralMatcher
     /// `(?s:.)` accepts: ASCII bytes, and the non-ASCII characters [Utf8#re2CharacterWidth] reads.
     /// That accepts overlong three- and four-byte forms, encoded surrogates, and values above
     /// U+10FFFF, as the engine's dot does, so it falls back less often than a strict UTF-8 check.
-    private static boolean isWholeDotCharacters(byte[] bytes, int start, int end)
+    private static boolean isWholeDotCharacters(Slice input, int from, int to)
     {
-        int position = start;
+        byte[] bytes = input.byteArray();
+        int position = input.byteArrayOffset() + from;
+        int end = input.byteArrayOffset() + to;
         while (position < end) {
             if (bytes[position] >= 0) {
                 position = asciiRunEnd(bytes, position, end);
