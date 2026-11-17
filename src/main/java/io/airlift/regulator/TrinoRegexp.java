@@ -43,6 +43,7 @@ public sealed class TrinoRegexp
                 TrinoRegexp.DotStarLiteralTrinoRegexp,
                 TrinoRegexp.ExactLiteralTrinoRegexp,
                 TrinoRegexp.FixedWidthByteTrinoRegexp,
+                TrinoRegexp.FullCaseFoldAlternationTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
                 TrinoRegexp.LiteralSetTrinoRegexp,
                 TrinoRegexp.OrderedLiteralTrinoRegexp
@@ -233,6 +234,14 @@ public sealed class TrinoRegexp
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern, inputs);
         }
+        LiteralAlternationSpanMatcher.FullCaseFoldAlternation fullCaseFoldAlternation = literalAlternationMatcher == null
+                ? LiteralAlternationSpanMatcher.analyzeFullCaseFold(parsed.regexp(), parsed.capturingGroupCount(), parsed.caseFolding())
+                : null;
+        // The folded literals answer beside the engine, so they take their memory from its forward
+        // DFA; where they do not fit, the pattern keeps the route it takes without them.
+        if (fullCaseFoldAlternation != null && compiledPattern.tryReserveForwardDfaMemory(fullCaseFoldAlternation.estimatedRetainedSize())) {
+            return new FullCaseFoldAlternationTrinoRegexp(compiledPattern, inputs, fullCaseFoldAlternation);
+        }
         OrderedLiteralMatcher orderedLiteralMatcher = compiledPattern.createOrderedLiteralMatcher();
         // The ordered matcher takes precedence over the required bytes.
         if (orderedLiteralMatcher != null && compiledPattern.tryReserveForwardDfaMemory(orderedLiteralMatcher.estimatedRetainedSize())) {
@@ -339,6 +348,13 @@ public sealed class TrinoRegexp
     boolean usesLiteralSetMatcherForDiagnostics()
     {
         return false;
+    }
+
+    /// Returns the folded literals that a case-insensitive alternation of ASCII literals runs on
+    /// inputs without its escapes, or `null`.
+    LiteralAlternationSpanMatcher fullCaseFoldAlternationForDiagnostics()
+    {
+        return null;
     }
 
     boolean usesOrderedLiteralMatcherForDiagnostics()
@@ -1323,6 +1339,16 @@ public sealed class TrinoRegexp
                 return -1;
             }
 
+            long span = occurrenceSpan(source, byteStart, occurrence);
+            if (span < 0) {
+                return -1;
+            }
+            return SliceUtf8.countCodePoints(source, 0, spanStart(span)) + 1L;
+        }
+
+        /// Returns the span of the `occurrence`th match from `byteStart`, or `-1`.
+        long occurrenceSpan(Slice source, int byteStart, long occurrence)
+        {
             // One cursor carries the filter route from match to match, so the density check
             // samples at most once per 64 KiB rather than once per match, and only once while the
             // filter routes stay sparse.
@@ -1331,10 +1357,7 @@ public sealed class TrinoRegexp
             for (long match = 1; match < occurrence && span >= 0; match++) {
                 span = spanMatcher.findSpan(source, spanEnd(span), cursor);
             }
-            if (span < 0) {
-                return -1;
-            }
-            return SliceUtf8.countCodePoints(source, 0, spanStart(span)) + 1L;
+            return span;
         }
 
         @Override
@@ -1441,6 +1464,189 @@ public sealed class TrinoRegexp
             }
             output.writeBytes(source, previousEnd, source.length() - previousEnd);
             return output.slice();
+        }
+    }
+
+    /// Runs a case-insensitive alternation of ASCII literals, such as `(?i)Sherlock|Holmes`, on
+    /// the [LiteralAlternationTrinoRegexp] of its folded literals where the input holds none of
+    /// its escapes, a conservative set of the characters outside ASCII that the literals' full
+    /// case folding may match, and on the compiled engine otherwise, as
+    /// [LiteralAlternationSpanMatcher.FullCaseFoldAlternation] explains. An operation that reads
+    /// every match checks the whole input first. For a folded match starting at byte `s`, one that
+    /// needs only its first matches, extract and position, checks escape starts in
+    /// `[searchStart, min(source.length(), s + L))`, where `L` is the longest folded literal's
+    /// byte length. Any earlier full-fold match would contain an escape beginning in this window.
+    /// Position takes `s` from the last occurrence it needs, and where the folded literals miss,
+    /// both check the rest of the input. Contains needs no check when they match, since each of
+    /// their matches is the pattern's. An answer whose window holds an escape comes from the
+    /// engine, so the two never mix in one answer; a matcher checks window by window as it finds,
+    /// as [TrinoRegexpMatcher] describes.
+    ///
+    /// Where the engine's first-match DFA searches for its own start literal filter, it already
+    /// reads an input once at vector speed, so the escape scan would be a second pass over it. A
+    /// DFA left too little memory to initialize by the folded literals' charge searches none.
+    /// Where the filter runs, an input shorter than [#SHORT_INPUT_BYTES] takes one check for bytes
+    /// outside ASCII in place of the escape scan, since every escape is outside ASCII: an
+    /// all-ASCII input runs on the folded literals and any other on the engine, for every
+    /// operation. On a longer input, the operations that read every match run on the engine, and
+    /// the first-match operations keep the window checks above.
+    static final class FullCaseFoldAlternationTrinoRegexp
+            extends TrinoRegexp
+    {
+        private static final long LITERAL_ALTERNATION_INSTANCE_SIZE = RetainedSizeSupport.instanceSize(LiteralAlternationTrinoRegexp.class);
+        // Below this length the engine's start filter scans scalar, as the ASCII check does.
+        static final int SHORT_INPUT_BYTES = Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES;
+
+        private final LiteralAlternationSpanMatcher.FullCaseFoldAlternation alternation;
+        private final LiteralAlternationTrinoRegexp admittedInputs;
+        private final boolean engineFiltersStarts;
+
+        private FullCaseFoldAlternationTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs, LiteralAlternationSpanMatcher.FullCaseFoldAlternation alternation)
+        {
+            super(re2, compileInputs);
+            this.alternation = requireNonNull(alternation, "alternation is null");
+            this.admittedInputs = new LiteralAlternationTrinoRegexp(compileInputs, alternation.matcher());
+            this.engineFiltersStarts = re2.searchesStartLiteralFilter();
+        }
+
+        /// Whether one check for bytes outside ASCII settles the route of `source`: the engine
+        /// searches for its start literal filter, and `source` is shorter than
+        /// [#SHORT_INPUT_BYTES].
+        boolean routesByAscii(Slice source)
+        {
+            return engineFiltersStarts && source != null && source.length() < SHORT_INPUT_BYTES;
+        }
+
+        // A null source takes the literal-alternation shape, which throws what the others throw.
+        private boolean admits(Slice source)
+        {
+            return source == null || alternation.admits(source, 0, source.length());
+        }
+
+        // Whether an operation that reads every match of `source` runs on the folded literals.
+        private boolean answersEveryMatch(Slice source)
+        {
+            if (source == null || !engineFiltersStarts) {
+                return admits(source);
+            }
+            return source.length() < SHORT_INPUT_BYTES && SliceUtf8.isAscii(source);
+        }
+
+        // Whether the folded literals' first match from `searchStart`, `span`, or their miss
+        // where it is negative, is the program's.
+        private boolean answers(Slice source, int searchStart, long span)
+        {
+            return alternation.admits(source, searchStart, span < 0 ? source.length() : alternation.windowEnd(source, spanStart(span)));
+        }
+
+        // The literal-alternation shape keeps its own replacement template.
+        @Override
+        long shapeRetainedSize()
+        {
+            TrinoReplacementPlan.CachedTemplate template = admittedInputs.cachedReplacementTemplate();
+            return LITERAL_ALTERNATION_INSTANCE_SIZE + alternation.estimatedRetainedSize() + (template == null ? 0 : template.estimatedRetainedSize());
+        }
+
+        @Override
+        LiteralAlternationSpanMatcher fullCaseFoldAlternationForDiagnostics()
+        {
+            return alternation.matcher();
+        }
+
+        LiteralAlternationSpanMatcher.FullCaseFoldAlternation alternation()
+        {
+            return alternation;
+        }
+
+        /// Returns a group-zero matcher of the compiled engine, which a matcher runs where the
+        /// routing rule of this class hands its input to the engine.
+        RegexpMatcher engineMatcher(Slice input)
+        {
+            return super.newGroupZeroMatcher(input);
+        }
+
+        @Override
+        public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
+        {
+            requireNonNull(source, "source is null");
+            if (retainedCapturingGroupCount != 0) {
+                throw new IllegalArgumentException("capturingGroupCount out of range: " + retainedCapturingGroupCount);
+            }
+            return TrinoRegexpMatcher.fullCaseFoldAlternation(this, source);
+        }
+
+        @Override
+        public boolean contains(Slice source)
+        {
+            if (routesByAscii(source)) {
+                return SliceUtf8.isAscii(source) ? admittedInputs.contains(source) : super.contains(source);
+            }
+            return admittedInputs.contains(source) || (!admits(source) && super.contains(source));
+        }
+
+        @Override
+        public long count(Slice source)
+        {
+            return answersEveryMatch(source) ? admittedInputs.count(source) : super.count(source);
+        }
+
+        // Each earlier occurrence is the program's where the window of the next one holds no
+        // escape, so one window from the search start through the last occurrence's covers all.
+        @Override
+        public long position(Slice source, long start, long occurrence)
+        {
+            if (routesByAscii(source)) {
+                return SliceUtf8.isAscii(source) ? admittedInputs.position(source, start, occurrence) : super.position(source, start, occurrence);
+            }
+            requireNonNull(source, "source is null");
+            int byteStart = positionSearchStart(source, start, occurrence);
+            if (byteStart < 0) {
+                return -1;
+            }
+            long span = admittedInputs.occurrenceSpan(source, byteStart, occurrence);
+            if (!answers(source, byteStart, span)) {
+                return super.position(source, start, occurrence);
+            }
+            return span < 0 ? -1 : SliceUtf8.countCodePoints(source, 0, spanStart(span)) + 1L;
+        }
+
+        @Override
+        public Slice extract(Slice source, int group)
+        {
+            if (routesByAscii(source)) {
+                return SliceUtf8.isAscii(source) ? admittedInputs.extract(source, group) : super.extract(source, group);
+            }
+            validateCapturingGroup(group);
+            requireNonNull(source, "source is null");
+            long span = alternation.matcher().findSpan(source, 0);
+            if (!answers(source, 0, span)) {
+                return super.extract(source, group);
+            }
+            return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
+        }
+
+        @Override
+        public List<Slice> extractAll(Slice source, int group)
+        {
+            return answersEveryMatch(source) ? admittedInputs.extractAll(source, group) : super.extractAll(source, group);
+        }
+
+        @Override
+        public List<Slice> split(Slice source)
+        {
+            return answersEveryMatch(source) ? admittedInputs.split(source) : super.split(source);
+        }
+
+        @Override
+        public Slice replace(Slice source, Slice replacement)
+        {
+            return answersEveryMatch(source) ? admittedInputs.replace(source, replacement) : super.replace(source, replacement);
+        }
+
+        @Override
+        public Slice replace(Slice source, Function<List<Slice>, Slice> replacement)
+        {
+            return answersEveryMatch(source) ? admittedInputs.replace(source, replacement) : super.replace(source, replacement);
         }
     }
 

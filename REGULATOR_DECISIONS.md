@@ -4713,13 +4713,62 @@ the two cases of an ASCII letter, so non-ASCII literals, such as Cyrillic
 names, keep the general engine. Where a language gives a letter a third case,
 as RE2 in UTF-8 mode and Rust with Unicode do for s and k (the long s and the
 Kelvin sign) and Java's `(?iu)` does for s, k, and i, the parser leaves a
-larger class and the pattern keeps the general engine, as does Trino's `(?i)`,
-which folds case fully; a Trino pattern that spells a letter as a class of its
-two cases, such as `[Tt]om|[Ss]awyer`, takes the matcher. The matcher stops
-where the DFA's filter stopped, 793 times on `sherlock-casei-en` and 12,047
-on `tom-sawyer-huckle-fin-insensitive`, and compares there instead of walking
-the DFA from each. Combined with the twelve-byte start literal filter, it takes
-the `sherlock-casei-en` count to 0.43x / 0.31x of main's time on r9g / r8i.
+larger class and the pattern keeps the general engine. In Rust's bytes mode,
+the matcher stops where the DFA's filter stopped, 793 times on
+`sherlock-casei-en` and 12,047 on `tom-sawyer-huckle-fin-insensitive`, and
+compares there instead of walking the DFA from each. Combined with the
+twelve-byte start literal filter, it takes the `sherlock-casei-en` count to
+0.43x / 0.31x of main's time on r9g / r8i.
+
+A Trino pattern that spells a letter as a class of its two cases, such as
+`[Tt]om|[Ss]awyer`, takes the matcher. Trino's `(?i)` folds case fully, so its
+literals also match characters outside ASCII: the other members of each
+letter's fold class, such as the long s and the Kelvin sign, and the characters
+whose multi-character fold begins with one of its folded letters, such as `ß`
+for `ss`. In rebar's `name-alt3-casei`, those paths pushed the DFA's start
+literal filter past its eight groups, so Trino ran the DFA byte by byte, at
+9.7x / 12.1x the Rust row's time on r9g / r8i. Such a pattern keeps its
+compiled engine and also builds the matcher from its ASCII spellings, with
+those characters, read from the Trino tables, as escapes. The escapes are a
+conservative set: a multi-character fold counts whether or not the literal
+holds the rest of it, so `(?i)foo|bar` escapes the ligature ff. A scan for the
+escapes' leading bytes, comparing the escapes at each stop, decides where the
+matcher answers and where the engine does. On an input without escapes a match
+that used a character outside ASCII would hold that escape, so only the ASCII
+spellings can match, as in Rust's bytes mode. An escape split by malformed
+bytes is not one the program matches either, and a stop that begins no escape
+resumes the scan at the next byte. Operations that read every match, count,
+extract all, split, and replace, scan the whole input first and run the matcher
+when it holds no escape and the engine otherwise. Operations that need only the
+first matches scan less. Every character of a match before its first escape is
+one ASCII byte that spells one literal character. For a folded match starting
+at byte `s`, extract, position, and a matcher's find check escape starts in
+`[searchStart, min(source.length(), s + L))`, where `L` is the longest folded
+literal's byte length. Any earlier full-fold match would contain an escape
+beginning in this window. Position takes `s` from the last occurrence it needs,
+and where the matcher finds too few, the check covers the rest of the input.
+Contains scans only on a miss, since every match of the matcher is the
+pattern's. A matcher checks its window find by find, each find the part no
+earlier one read, and once an escape shows, the engine finds the rest of the
+input from the previous match end. An escape that begins in a window counts
+even where it ends past it, so the windows join without gaps, and an answer
+whose window holds an escape comes from the engine, so one answer never mixes
+the two. On a long input with an early match, a first-match operation scans a
+few bytes past it instead of the whole input. An input that holds an escape
+where an operation scans pays the scan and then the earlier route. Where the
+engine's own first-match DFA searches for a start literal filter, as for
+`sherlock-casei-en`, it already reads the input once at vector speed, and the
+escape scan was a second full pass: that pattern's count took 1.375x / 1.430x
+the engine's time on r9g / r8i. There an input under 1 KiB, below which that
+filter scans scalar, takes one check for bytes outside ASCII instead: every
+escape is outside ASCII, so an all-ASCII input runs on the matcher with no
+escape scan, and any other on the engine, for every operation. On a longer
+input, operations that read every match run on the engine, and first-match
+operations keep the window checks. The matcher and escapes take their memory
+from the engine's forward DFA, so the pattern stays within its budget; where
+they do not fit, the pattern keeps the earlier route. Their charge can leave
+the first-match DFA too little memory to initialize; that DFA then runs no
+start literal filter, and the pattern keeps the escape scans.
 
 Folded literals have a matcher class of their own, chosen when the pattern
 compiles, so an alternation of exact literals runs search methods whose

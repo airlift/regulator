@@ -2371,6 +2371,17 @@ abstract sealed class CompiledPattern
         return retainedSize > 0 && booleanPlans.loweredProgram() == null && booleanPlans.taggedAlternationProgram() == null;
     }
 
+    /// Whether the forward first-match DFA searches for its start literal filter, which
+    /// [Dfa.DfaInstance#searchesStartLiteralFilter] selects without building the DFA. A program
+    /// whose assertions the DFA cannot run, or whose first-match DFA cannot initialize in what the
+    /// budget leaves after the reservations made so far, runs no DFA and so searches no filter.
+    boolean searchesStartLiteralFilter()
+    {
+        return !partialProg.hasDfaUnsupportedAssertions() &&
+                partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
+                Dfa.DfaInstance.searchesStartLiteralFilter(partialProg, Dfa.DfaInstance.Kind.FIRST_MATCH);
+    }
+
     /// Returns the fixed-width matcher this pattern retains, or else one analyzed from `regexp`,
     /// the parse tree this pattern was compiled from, which it does not keep, or `null`.
     FixedWidthByteSpanMatcher createFixedWidthByteSpanMatcher(Regexp regexp)

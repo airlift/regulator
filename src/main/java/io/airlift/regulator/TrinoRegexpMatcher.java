@@ -16,6 +16,8 @@ package io.airlift.regulator;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
+import io.airlift.slice.SliceUtf8;
+import io.airlift.slice.Slices;
 
 import static java.util.Objects.requireNonNull;
 
@@ -26,7 +28,9 @@ import static java.util.Objects.requireNonNull;
 /// may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
 /// mutations to their original input storage. Do not mutate input while matching it.
 public sealed class TrinoRegexpMatcher
-        permits TrinoRegexpMatcher.CompiledScanMatcher, TrinoRegexpMatcher.LiteralSetMatcher
+        permits TrinoRegexpMatcher.CompiledScanMatcher,
+                TrinoRegexpMatcher.FullCaseFoldAlternationMatcher,
+                TrinoRegexpMatcher.LiteralSetMatcher
 {
     private static final int CURSOR_INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.Cursor.class);
 
@@ -202,6 +206,14 @@ public sealed class TrinoRegexpMatcher
         return LiteralSetMatcher.create(literalSet, input);
     }
 
+    /// Returns a group-zero matcher of a case-insensitive alternation of ASCII literals that finds
+    /// on the folded literals of `pattern` and on its engine, as
+    /// [TrinoRegexp.FullCaseFoldAlternationTrinoRegexp] routes them.
+    static TrinoRegexpMatcher fullCaseFoldAlternation(TrinoRegexp.FullCaseFoldAlternationTrinoRegexp pattern, Slice input)
+    {
+        return FullCaseFoldAlternationMatcher.create(pattern, input);
+    }
+
     private void checkSpanGroup(int group)
     {
         if (span < 0) {
@@ -327,6 +339,147 @@ public sealed class TrinoRegexpMatcher
             if (group < 0 || group > groupCount()) {
                 throw new IllegalArgumentException("group index out of range: " + group);
             }
+        }
+    }
+
+    /// A group-zero matcher that finds on the folded literals of a case-insensitive alternation of
+    /// ASCII literals until an escape could change a find, and on the engine from then until the
+    /// next reset. Each find checks the part of its window, as the pattern's first-match
+    /// operations check it, that no earlier find checked: to the longest literal's length past the
+    /// folded match, or to the end of the input where the folded literals miss. On an escape
+    /// there, the engine takes over. On handoff, a fresh engine region starts at the previous match
+    /// end. These nonempty literals need no earlier context. The engine matcher is created the
+    /// first time an input needs it, and a reset leaves it on an empty input, so it holds no
+    /// reference to the caller's previous input. Where one check for bytes outside ASCII settles
+    /// an input's route, as [TrinoRegexp.FullCaseFoldAlternationTrinoRegexp] describes, the
+    /// matcher takes it as the input is set: an all-ASCII input counts as checked to its end, and
+    /// any other starts on the engine.
+    private static final class FullCaseFoldAlternationMatcher
+            extends TrinoRegexpMatcher
+    {
+        private final TrinoRegexp.FullCaseFoldAlternationTrinoRegexp pattern;
+        private final TrinoRegexpMatcher literalMatcher;
+        private RegexpMatcher engine;
+        private TrinoRegexpMatcher engineMatcher;
+        private Slice input;
+        // The end of the input's prefix that the finds have checked for escapes.
+        private int checkedEnd;
+        // Where the next find searches from: the end of the last match, or zero.
+        private int searchStart;
+        private boolean onEngine;
+
+        private FullCaseFoldAlternationMatcher(TrinoRegexp.FullCaseFoldAlternationTrinoRegexp pattern, Slice input)
+        {
+            this.pattern = requireNonNull(pattern, "pattern is null");
+            this.input = requireNonNull(input, "input is null");
+            literalMatcher = new TrinoRegexpMatcher(pattern.alternation().matcher(), input);
+            routeByAscii();
+        }
+
+        /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this
+        /// class.
+        static TrinoRegexpMatcher create(TrinoRegexp.FullCaseFoldAlternationTrinoRegexp pattern, Slice input)
+        {
+            return new FullCaseFoldAlternationMatcher(pattern, input);
+        }
+
+        @Override
+        public long retainedSizeInBytes()
+        {
+            return super.retainedSizeInBytes() + literalMatcher.retainedSizeInBytes() + (engineMatcher == null ? 0 : engineMatcher.retainedSizeInBytes());
+        }
+
+        @Override
+        public TrinoRegexpMatcher reset(Slice input)
+        {
+            this.input = requireNonNull(input, "input is null");
+            literalMatcher.reset(input);
+            if (onEngine) {
+                engine.reset(Slices.EMPTY_SLICE);
+                onEngine = false;
+            }
+            checkedEnd = 0;
+            searchStart = 0;
+            routeByAscii();
+            return this;
+        }
+
+        private void routeByAscii()
+        {
+            if (pattern.routesByAscii(input)) {
+                if (SliceUtf8.isAscii(input)) {
+                    checkedEnd = input.length();
+                }
+                else {
+                    startEngine();
+                }
+            }
+        }
+
+        @Override
+        public boolean find()
+        {
+            if (onEngine) {
+                return engineMatcher.find();
+            }
+            LiteralAlternationSpanMatcher.FullCaseFoldAlternation alternation = pattern.alternation();
+            boolean found = literalMatcher.find();
+            int windowEnd = found ? alternation.windowEnd(input, literalMatcher.start()) : input.length();
+            if (alternation.admits(input, checkedEnd, windowEnd)) {
+                checkedEnd = Math.max(checkedEnd, windowEnd);
+                if (found) {
+                    searchStart = literalMatcher.end();
+                }
+                return found;
+            }
+            startEngine();
+            return engineMatcher.find();
+        }
+
+        // Hands the finds to the engine, from the end of the last match.
+        private void startEngine()
+        {
+            if (engine == null) {
+                engine = pattern.engineMatcher(input);
+                engineMatcher = new TrinoRegexpMatcher(engine);
+            }
+            engine.reset(input, searchStart, input.length());
+            onEngine = true;
+        }
+
+        private TrinoRegexpMatcher current()
+        {
+            return onEngine ? engineMatcher : literalMatcher;
+        }
+
+        @Override
+        public int groupCount()
+        {
+            return current().groupCount();
+        }
+
+        @Override
+        public boolean matched(int group)
+        {
+            return current().matched(group);
+        }
+
+        @Override
+        public int start(int group)
+        {
+            return current().start(group);
+        }
+
+        @Override
+        public int end(int group)
+        {
+            return current().end(group);
+        }
+
+        @Override
+        public Slice group(int group)
+        {
+            return current().group(group);
         }
     }
 
