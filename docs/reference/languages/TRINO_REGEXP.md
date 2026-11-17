@@ -20,8 +20,11 @@ last code point, as every search of an empty source does, finds nothing, even
 where the pattern matches empty text, while an earlier start can still find an
 empty match at the end, so `$` on `a` from start 1 returns `2`.
 
-As in Trino's Joni implementation, inputs are not validated as UTF-8, and
-malformed input is garbage in, garbage out. A pattern must be valid UTF-8: one
+As in Trino's Joni implementation, inputs are not validated as UTF-8. On
+malformed input a pattern follows Regulator's shared engine, not Joni, and
+gives the same answer on every route: the engine reads a class or a dot only as
+the UTF-8 sequences it compiles for it, so `[^/]` does not take a lone `FF`
+byte, which Joni reads as one character. A pattern must be valid UTF-8: one
 that is not throws `RegexpParseException` with error code `BAD_UTF8` at its
 first invalid byte. This differs from Trino, which accepts such a pattern and
 compares its malformed bytes byte-for-byte.

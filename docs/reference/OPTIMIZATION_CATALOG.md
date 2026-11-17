@@ -1689,7 +1689,7 @@ byte operations instead of an automaton.
   four optionals with no stack by duplicating the continuation in code, skips
   past a failed leading run, and jumps an all-byte run straight to the input
   end. Regulator: a Java interpreter instead of LLVM code, dedicated
-  delimited-capture and tail operations, its own operation, literal, and
+  delimited-capture operations, its own operation, literal, and
   group limits, retry state packed into primitive locals, the resume into a
   superset run, the work-budget and failure-density handoff, and extract
   without a matcher ([#10], [#17], [#31], [#41], [#158]).
@@ -1714,16 +1714,15 @@ byte operations instead of an automaton.
   literal with at least 256 bytes left, once the failures average fewer than
   32 bytes apart, so plan searches stay linear
 - **What it does:** A pattern is lowered to literal, folded literal, optional,
-  fork, run, save, delimited capture, and tail operations, run by a dedicated
+  fork, run, save, and delimited capture operations, run by a dedicated
   interpreter or a generated class. Plans are capped at 32 operations plus an
   end operation, 4 optionals or forks, 256-byte literals, 16 groups, nesting
   depth 16, and repeat counts of 1000, so attempts stay bounded; retry
   positions are packed as 32-bit values into two `long` locals and 6-bit
   operation indexes into an `int`, with no heap stack. On start-anchored,
   fork-free plans with at most three captures, run, delimiter, and capture
-  fold into one delimited-capture operation, and on such Trino plans that are
-  also end-anchored, `.*` and `[^\n]*` tails fold into tail operations; and a
-  small bounded repeat of a literal of two or more bytes, `lit{n,m}`, expands
+  fold into one delimited-capture operation; and a small bounded repeat of a
+  literal of two or more bytes, `lit{n,m}`, expands
   into one literal of `n` copies and `m-n` optional literals instead of a
   counted loop. An unanchored plan scans for the next candidate start, and a
   plan led by a case-sensitive literal checks the whole literal at each
@@ -1764,7 +1763,7 @@ byte operations instead of an automaton.
 - **Applies when:** Boolean calls on scan plans; OnePass searches that request
   no captures, or only group zero; group-zero and boolean NFA searches. The
   48-byte DFA route needs the plan's find to take the general route and the
-  DFA to evaluate its assertions; Trino plans also need to consume only ASCII
+  DFA to evaluate its assertions.
 - **What it does:** An unanchored plan, or a start-anchored one with forks,
   answers a boolean call with a copy of the plan without saves; a plan with no
   end anchor returns once a run reaches its minimum when everything after it
@@ -1789,9 +1788,9 @@ byte operations instead of an automaton.
   [#52], [#107]).
 - **Where:** `ScanPlan.Builder.useRe2Runs`, `ScanPlanRun.re2Match`,
   `ScanPlanRun.re2SetMatch`, `Utf8MemberTable.of`
-- **Applies when:** RE2, Java, and Rust plans with non-ASCII classes
-- **What it does:** In RE2, Java, and Rust plans, non-ASCII classes become
-  runs or set runs, so they stay on the plan. A run reads UTF-8 by RE2's
+- **Applies when:** RE2, Java, Rust, and Trino plans with non-ASCII classes
+- **What it does:** In RE2, Java, Rust, and Trino plans, non-ASCII classes
+  become runs or set runs, so they stay on the plan. A run reads UTF-8 by RE2's
   compiled byte ranges, accepting the overlong and surrogate forms RE2 admits,
   and ends at a rejected byte. A set run tests membership in a UTF-8 member
   trie whose identical nodes are shared, interned in primitive open-addressing
