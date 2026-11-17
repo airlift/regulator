@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -157,6 +158,7 @@ public class TestPositionNfa
     /// Boolean searches of short lines judge the resets of the DFA they share across searches:
     /// after two slow resets in a row, the next searches skip the DFA and answer from the position
     /// automaton directly, without trying BitState.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testLineSearchesSkipDfaAfterSlowResets()
     {
@@ -196,6 +198,7 @@ public class TestPositionNfa
 
     /// At most 65,536 boolean searches skip the DFA after their window opens, whichever threads
     /// take them, and the next public search runs the DFA again.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testLineSearchWindowBoundsConcurrentSkips()
             throws Exception
@@ -258,6 +261,7 @@ public class TestPositionNfa
     /// searches across one reset that is not slow open no window, an older search that judges
     /// after a newer one started past its reset count does not end the streak, and two slow
     /// resets, each judged by one search, open the window.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testLineSearchesJudgeEachResetOnce()
     {
@@ -377,6 +381,7 @@ public class TestPositionNfa
     /// megabytes, each of whose searches resets the cache after reading far more than ten bytes
     /// for each state, keep the DFA, and searches of long windows that match within a kilobyte,
     /// over a DFA that thrashes, skip it, in each of [#THRASHING_MODES].
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testLineSearchesChargeTheProgressTheyReturn()
     {
@@ -468,6 +473,7 @@ public class TestPositionNfa
     /// A full-Slice find that runs its inner literal search first makes the ordinary engine's skip
     /// of a thrashing DFA after the search falls back, in bytes and UTF-8 modes. The bytes mode
     /// also shows that a skipped search answers from the position automaton directly.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testInnerLiteralFirstLineSearchesSkipDfaAfterSlowResets()
     {
@@ -503,6 +509,7 @@ public class TestPositionNfa
     /// A full-Slice find of a pattern with a window literal search leaves the find to the skip of
     /// a thrashing DFA once boolean searches skip it, and answers from the position automaton
     /// instead of trying the window on that DFA.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testWindowLiteralLineSearchesSkipDfaAfterSlowResets()
     {
@@ -544,6 +551,7 @@ public class TestPositionNfa
 
     /// Boolean searches and counts that run one DFA keep their own skip windows: neither path's
     /// judgements or skips move the other's window, in bytes and UTF-8 modes.
+    @Disabled("Sweep leg b2-no-e5-boolean: pins the switched-off mechanism")
     @Test
     public void testLineSearchesAndCountsKeepTheirOwnSkipWindows()
     {

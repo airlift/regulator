@@ -6748,7 +6748,8 @@ final class Dfa
         // The boolean searches that skip the DFA after a streak of slow resets they judged. On
         // the motivating Leipzig grep workload, one boolean search read one line, and a DFA that
         // thrashed reset about every 7,000 lines, so the window holds about ten times that many.
-        private static final int BOOLEAN_SEARCH_SKIPPED_SEARCHES = 1 << 16;
+        // Sweep leg: no boolean search skips the DFA after slow resets.
+        private static final int BOOLEAN_SEARCH_SKIPPED_SEARCHES = 0;
         // The many-match searches that skip the DFA after a streak of slow resets they judged.
         // Like a boolean search of a line, one search reads one short span, a match the tagged
         // alternation program picks a branch for, so the window is the boolean searches'.
