@@ -445,7 +445,6 @@ final class ScanKernelGenerator
                 case END -> attempt != Attempt.PARTIAL;
                 case DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
                 case DOT_ALL_TAIL, LINE_TAIL -> attempt == Attempt.END_ANCHORED;
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
             };
             if (!supported) {
                 throw new IllegalArgumentException("%s scan kernel cannot run %s".formatted(attempt, step.kind()));
@@ -621,7 +620,6 @@ final class ScanKernelGenerator
                         .then(groups.setElement(constantInt(step.slot()), cursor.subtract(base)))
                         .build());
                 case FORK -> emitPush(index);
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> throw new IllegalStateException("unexpected " + step.kind());
             }
         }
 
@@ -938,9 +936,6 @@ final class ScanKernelGenerator
 
         private void defineClass(String className)
         {
-            if (plan.usesAsciiFoldedExecutor()) {
-                throw new IllegalArgumentException("ASCII-folded scan plans have no generated class");
-            }
             definition = ClassDefinition.define(ClassDesc.of(className)).access(PUBLIC, FINAL);
         }
 

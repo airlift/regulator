@@ -342,7 +342,9 @@ public class TestBenchmarkPatternDispatch
     private static void assertRoute(String target, CompiledPattern compiled, RegexpMatcher matcher, String description)
     {
         Shape expected = switch (target) {
-            case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
+            case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET" -> SCAN_PLAN;
+            // Sweep leg a5-no-p2: an ASCII-folded literal declines the plan.
+            case "FOLDED_PLAN" -> ENGINE;
             case "EXACT_LITERAL", "SINGLE_BYTE" -> EXACT_LITERAL;
             case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES", "DOT_STAR_LITERAL" -> LITERAL_KERNEL;
             case "CHARACTER_CLASS" -> CLASS_RUN;
@@ -371,7 +373,6 @@ public class TestBenchmarkPatternDispatch
             assertThat(compiled.usesScanPlanForFindForDiagnostics()).as(description).isTrue();
         }
         switch (target) {
-            case "FOLDED_PLAN" -> assertThat(compiled.usesAsciiFoldedScanExecutorForDiagnostics()).as(description).isTrue();
             case "CONTAINS" -> {
                 assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
                 assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();

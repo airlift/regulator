@@ -26,7 +26,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it; in RE2, Java, and Rust plans also one character of a set of some non-ASCII characters, or an unbounded run of such a set holding every ASCII byte except that literal |
 | End assertions | Optional; strict end, final-LF `$` (Trino's, or Java's under `UNIX_LINES`), and Java's final-terminator `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
-| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables, and ASCII letter pairs such as `[Kk]`, which match only their two letters; separate folded executors; in RE2, Java, and Rust plans, folds that add non-ASCII members, such as `k` with the Kelvin sign, as sets of some non-ASCII characters; other Unicode folding uses the ordinary engine |
+| Case folding | Restricted ASCII run folds proven safe against the Unicode fold tables; a pattern with an ASCII-folded literal, an ASCII letter pair such as `[Kk]` included, uses the ordinary engine; in RE2, Java, and Rust plans, folds that add non-ASCII members, such as `k` with the Kelvin sign, as sets of some non-ASCII characters; other Unicode folding uses the ordinary engine |
 | Empty overall matches | Ordinary engine |
 | Program size | At most 32 operations plus one terminal operation |
 

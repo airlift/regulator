@@ -5929,8 +5929,7 @@ and keep each search linear in its input:
   writes no group and is not a boolean tail, the interpreter's case-sensitive
   executor starts an attempt at an ASCII candidate after that character,
   because the candidate scan finds exactly the run's member bytes; a lead-byte
-  candidate still runs the run, and the ASCII-folded executor and generated
-  kernels run every operation. In `BenchmarkLanguageComparison`, `keyValue`
+  candidate still runs the run, and generated kernels run every operation. In `BenchmarkLanguageComparison`, `keyValue`
   `reusedContains` takes 0.715 times its earlier time on R9g and 0.634 times on
   R8i. The one control that moved, `quotedField` `reusedCount` on R8i, took
   1.025 times, an accepted marginal cost of about 0.75 ns per call.
@@ -5942,19 +5941,8 @@ ranged boolean `find` use the ordinary engine only where both engines agree, so
 `find`, `count`, `extract`, `position`, `extractAll`, replacement, and split
 report one match sequence.
 
-Retain restricted ASCII case folding when every Unicode fold cycle remains in
-ASCII and requires no full multi-character fold. An ASCII letter pair, such as
-`[Kk]` or a Java letter folded without `UNICODE_CASE`, matches only its two
-letters, as [Pinned Unicode Case Folding](#pinned-unicode-case-folding) states,
-so a plan folds it as that pair even for `k` and `s`, whose cycles leave ASCII.
-The pair is the same tree in every language, so this holds for each of them.
-Folded plans use separate executors. On R9g, folded anchored, optional,
-unanchored, run, and mixed workloads take 0.20 to 1.10 times the ordinary
-engine's time for `contains`, extraction, and replacement, with a geometric mean
-of 0.38. The accepted costs are folded optional boolean matching, at about 1.10
-times the ordinary engine's time, and unanchored folded compilation, at about
-1.19 times. Ordinary URL and mixed operations remain faster than the ordinary
-engine on R8i and R9g.
+A pattern with an ASCII-folded literal, such as `(?i)abc` or an ASCII letter
+pair like `[Kk]`, declines its plan and runs the ordinary engine.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
@@ -6020,7 +6008,7 @@ development campaign evidence is in the private archive; see the
 ## RE2 Scan Plans
 
 RE2 patterns select the same scan plans as Trino patterns: the same eligible
-shapes, ASCII-folded ones included, reached by the same operations with the
+shapes, reached by the same operations with the
 same memory charge, and on by default. They also admit runs of sets of some
 non-ASCII characters, which Trino plans decline. Trino captures and extraction
 run about eight times faster on a plan than on the ordinary engine, and nothing
@@ -6313,9 +6301,8 @@ which differential tests check operation by operation.
 - A pattern is eligible when it would compile to the base `TrinoRegexp` class
   with a case-sensitive plan that every operation but `contains` reaches, and
   cannot match empty, which no pattern with a plan can: each generated match
-  loop resumes its search at the previous match end. Any other pattern,
-  including one with an ASCII-folded plan, compiles exactly as it does without
-  the option.
+  loop resumes its search at the previous match end. Any other pattern
+  compiles exactly as it does without the option.
 - Generation happens once, when the pattern is compiled, never on first match.
   A pattern whose class cannot be generated or defined is silently
   interpreted; generation never makes compilation fail and has no mandatory
@@ -6410,8 +6397,7 @@ plans; the last bullets record the rules and measurements specific to each.
   its entries directly; callers still cannot extend the pattern classes. The
   generated class adds no fields, so it keeps the scan-plan shape's 120-byte
   layout.
-- Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino. Unlike Trino, a count that skips the plan
+- Any pattern with a case-sensitive plan is eligible. Unlike Trino, a count that skips the plan
   does not exclude a pattern, because only the calls that reach the plan
   change. Route selection gives no pattern with a plan a single-byte table.
 - Short boolean calls that the interpreter hands to the DFA stay on the

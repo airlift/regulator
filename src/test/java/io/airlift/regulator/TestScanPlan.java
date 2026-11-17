@@ -50,16 +50,12 @@ public class TestScanPlan
     private static final List<ExecutorRoute> EXECUTOR_ROUTES = List.of(
             new ExecutorRoute(URL, "https://www.%s/path", true, false, false),
             new ExecutorRoute("^https?://([^/]+)/", "https://%s/path", true, true, false),
-            new ExecutorRoute("https?://([^/]+)/", "x https://%s/ y", false, false, false),
-            new ExecutorRoute("(?i)^ABC([^:]+):DEF$", "AbC%s:dEf", true, false, true),
-            new ExecutorRoute("(?i)^ABC([^:]+):", "abc%s:rest", true, true, true),
-            new ExecutorRoute("(?i)content-type:([^;]+);", "x Content-Type:%s; y", false, false, true));
+            new ExecutorRoute("https?://([^/]+)/", "x https://%s/ y", false, false, false));
 
     // Each failed attempt over the repeated units reads to the failure. Two matches follow it.
     static final List<QuadraticSearch> QUADRATIC_SEARCHES = List.of(
             new QuadraticSearch("id=([^&]+)&x", "id=a", "&y", "id=b&xid=c&x"),
             new QuadraticSearch("x([^z]+)zq", "xa", "zr", "xbzqxczq"),
-            new QuadraticSearch("(?i)x([^z]+)zq", "Xa", "zr", "xbZqXcZQ"),
             new QuadraticSearch("([^/]+)/([^!]+)!x", "a/", "!y!x", "/b/c!xd/e!x"),
             new QuadraticSearch("([ab]a*)c", "a", "bc", "bac"));
 
@@ -240,14 +236,9 @@ public class TestScanPlan
                 "");
         for (String expression : eligible) {
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics())
-                    .as(expression).isTrue();
+                    .as(expression).isEqualTo(plannedUnlessFolded(expression, true));
             verifyAgainstJoni(expression, inputs);
         }
-
-        assertThat(scanOperations(eligible.getFirst()))
-                .isEqualTo("ASCII_FOLDED_LITERAL,RUN,ASCII_FOLDED_LITERAL,END");
-        assertThat(scanOperations(eligible.get(1)))
-                .isEqualTo("ASCII_FOLDED_LITERAL,ASCII_FOLDED_OPTIONAL,ASCII_FOLDED_LITERAL,RUN,END");
 
         String alphabet = "abcdegh";
         for (int length : new int[] {1, 2, 4, 8, 9, 16, 17, 32, 128}) {
@@ -257,7 +248,7 @@ public class TestScanPlan
             }
             String expression = "(?i)^" + literal + "([^/]+)/$";
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics())
-                    .as(expression).isTrue();
+                    .as(expression).isEqualTo(plannedUnlessFolded(expression, true));
             verifyAgainstJoni(expression, List.of(literal.toString().toUpperCase(Locale.ROOT) + "Host/", literal + "例/", literal + "/", ""));
         }
 
@@ -272,83 +263,9 @@ public class TestScanPlan
         }
         verifyAgainstJoni("(?i)^K([a-h]+):$", List.of("Kabc:", "kBAG:", "Kabc:"), false);
         verifyAgainstJoni("(?i)^S([a-h]+):$", List.of("Sabc:", "sBAG:", "ſabc:"), false);
-        // An explicit pair matches only its two ASCII letters, so it reaches a plan even for k
-        // and s.
-        assertThat(TrinoRegexp.compile(utf8Slice("^[Ss][Kk]([a-h]+):$")).re2().usesScanPlanForDiagnostics()).isTrue();
+        // An explicit pair matches only its two ASCII letters, even for k and s.
+        assertThat(TrinoRegexp.compile(utf8Slice("^[Ss][Kk]([a-h]+):$")).re2().usesScanPlanForDiagnostics()).isEqualTo(plannedUnlessFolded("^[Ss][Kk]([a-h]+):$", true));
         verifyAgainstJoni("^[Ss][Kk]([a-h]+):$", List.of("skabc:", "SKbag:", "ſkabc:", "sKabc:", "sKBAG:"));
-    }
-
-    @Test
-    public void testAsciiCaseFoldUsesSeparateExecutors()
-    {
-        for (String expression : List.of(
-                "(?i)^ABC([a-h]+):DEF$",
-                "(?i)^ABC([a-h]+)",
-                "(?i)content-type:([^;]+);")) {
-            assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesAsciiFoldedScanExecutorForDiagnostics())
-                    .as(expression)
-                    .isTrue();
-        }
-
-        for (String expression : List.of(
-                "^ABC([a-h]+):DEF$",
-                "^ABC([a-h]+)",
-                "content-type:([^;]+);",
-                "(?i)^([a-h]+):$")) {
-            assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesAsciiFoldedScanExecutorForDiagnostics())
-                    .as(expression)
-                    .isFalse();
-        }
-    }
-
-    @Test
-    public void testAsciiFoldedPartialPlansAgainstJoni()
-    {
-        List<String> inputs = List.of(
-                "abcbag",
-                "ABCBAG:rest",
-                "AbCdEfGhI",
-                "abcbag\nabc",
-                "abc",
-                "abci",
-                "xabcbag",
-                "ABC例",
-                "color:bag",
-                "COLOUR:ABCdef!",
-                "CoLoUr:",
-                "colouur:abc",
-                "colr:abc",
-                "color:ab\n",
-                "abch",
-                "ABABch",
-                "abababCHEF",
-                "ababababch",
-                "abab",
-                "ab",
-                "");
-        for (String expression : List.of(
-                "(?i)^ABC([a-h]+)",
-                "(?i)^colou?r:([a-h]+)",
-                "(?i)^(?:ab){1,3}([c-h]+)")) {
-            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
-            assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(expression).isTrue();
-            assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isTrue();
-            verifyAgainstJoni(expression, inputs);
-        }
-
-        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("(?i)^ABC([a-h]+)"));
-        disableOrdinaryEngine(regexp);
-        Slice source = utf8Slice("!aBcBaG:rest?").slice(1, "aBcBaG:rest".length());
-        assertThat(regexp.contains(source)).isTrue();
-        assertThat(regexp.extract(source, 1)).isEqualTo(utf8Slice("BaG"));
-        assertThat(regexp.replace(source, utf8Slice("$1"))).isEqualTo(utf8Slice("BaG:rest"));
-        TrinoRegexpMatcher matcher = regexp.matcher(source);
-        assertThat(matcher.find()).isTrue();
-        assertThat(matcher.end()).isEqualTo("aBcBaG".length());
-        assertThat(matcher.find()).isFalse();
-        assertThat(regexp.re2().matches(utf8Slice("abcbag"))).isTrue();
-        assertThat(regexp.re2().matches(source)).isFalse();
-        assertThat(regexp.re2().lookingAt(source)).isTrue();
     }
 
     @Test
@@ -365,7 +282,7 @@ public class TestScanPlan
             String expression = entry.expression();
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics())
                     .as(expression)
-                    .isTrue();
+                    .isEqualTo(plannedUnlessFolded(expression, true));
             verifyAgainstJoni(expression, entry.inputs());
         }
 
@@ -373,8 +290,6 @@ public class TestScanPlan
                 .isEqualTo("LITERAL,DELIMITED_CAPTURE,END");
         assertThat(scanOperations("^(?:ab){2,4}([^/]+)/$"))
                 .isEqualTo("LITERAL,OPTIONAL,OPTIONAL,DELIMITED_CAPTURE,END");
-        assertThat(scanOperations("(?i)^(?:ab){2,4}([c-h]+):$"))
-                .isEqualTo("ASCII_FOLDED_LITERAL,ASCII_FOLDED_OPTIONAL,ASCII_FOLDED_OPTIONAL,RUN,LITERAL,END");
 
         for (String expression : List.of(
                 "^(?:(a)b){2}([^/]+)/$",
@@ -390,42 +305,6 @@ public class TestScanPlan
     private static String scanOperations(String expression)
     {
         return requireNonNull(analyze(expression)).operationsForDiagnostics();
-    }
-
-    @Test
-    public void testGeneratedAsciiCaseFoldPatternsAgainstJoni()
-    {
-        String alphabet = "abcdefghijlmnopqrtuvwxyz";
-        for (long seed : new long[] {179, 181, 191}) {
-            Random random = new Random(seed);
-            int eligible = 0;
-            for (int iteration = 0; iteration < 200; iteration++) {
-                int prefixLength = 1 + random.nextInt(24);
-                StringBuilder prefix = new StringBuilder(prefixLength);
-                for (int index = 0; index < prefixLength; index++) {
-                    prefix.append(alphabet.charAt(random.nextInt(alphabet.length())));
-                }
-                boolean anchored = random.nextBoolean();
-                boolean optional = random.nextBoolean();
-                String expression = "(?i)" + (anchored ? "^" : "") + prefix + (optional ? "u?" : "") + "([a-h]{1,8}):END$";
-                TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-                if (!regexp.re2().usesScanPlanForDiagnostics()) {
-                    continue;
-                }
-                eligible++;
-                String witness = prefix + (optional ? "u" : "") + "bag:end";
-                String alternatingCase = alternatingAsciiCase(witness);
-                verifyAgainstJoni(expression, List.of(
-                        witness,
-                        witness.toUpperCase(Locale.ROOT),
-                        alternatingCase,
-                        anchored ? "lead" + alternatingCase : "x".repeat(64) + alternatingCase,
-                        witness.substring(0, witness.length() - 1),
-                        prefix + ":end",
-                        ""));
-            }
-            assertThat(eligible).as("eligible folded patterns for seed %s", seed).isGreaterThan(100);
-        }
     }
 
     private static String alternatingAsciiCase(String value)
@@ -615,7 +494,7 @@ public class TestScanPlan
                 "12zz",
                 "abcX 12x");
         for (PlanAdmission admission : admissions) {
-            assertThat(analyze(admission.expression()) != null).as(admission.expression()).isEqualTo(admission.admitted());
+            assertThat(analyze(admission.expression()) != null).as(admission.expression()).isEqualTo(plannedUnlessFolded(admission.expression(), admission.admitted()));
             verifyAgainstJoni(admission.expression(), inputs, admission.admitted());
         }
     }
@@ -671,13 +550,11 @@ public class TestScanPlan
         Slice input = utf8Slice("The quick brown fox jumps over the lazy dog 12345 again ok");
         List<ExpressionAttempts> cases = List.of(
                 new ExpressionAttempts("[a-c](\\d+)", 5),
-                new ExpressionAttempts("(?i)[a-c](\\d+)zz", 5),
                 new ExpressionAttempts("([^/]+)/", 1));
         for (ExpressionAttempts attempts : cases) {
             String expression = attempts.expression();
             TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isTrue();
-            assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
             ScanPlan plan = requireNonNull(analyze(expression));
             assertThat(plan.candidateAttemptsForDiagnostics(input)).as("%s candidate attempts", expression).isEqualTo(attempts.attempts());
         }
@@ -696,10 +573,6 @@ public class TestScanPlan
         assertThat(input.chars().filter(value -> value == 'h').count()).isGreaterThan(10);
         assertThat(candidateAttempts("https?://(?:www\\.)?([^/]+)/", input)).isEqualTo(2);
         assertThat(candidateAttempts("https?://([^/]+)/", input)).isEqualTo(2);
-        // The ASCII-folded executor finds a case-sensitive leading literal the same way.
-        String folded = "https?://(?i:www\\.)?([^/]+)/";
-        assertThat(TrinoRegexp.compile(utf8Slice(folded)).re2().usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
-        assertThat(candidateAttempts(folded, input)).isEqualTo(2);
         // Overlapping occurrences each start an attempt, and a partial literal at the end starts none.
         assertThat(candidateAttempts("aab([0-9]+)", "aaab aab aaa aa")).isEqualTo(2);
     }
@@ -748,8 +621,6 @@ public class TestScanPlan
         ByteFrequencies json = TestingByteFrequencies.learnedJsonRecords();
         assertThat(leadingLiteralProbe("svc1://(?:www\\.)?([^/]+)/", json)).isEqualTo(1);
         assertThat(leadingLiteralProbe("https://(?:www\\.)?([^/]+)/", json)).isZero();
-        // The ASCII-folded executor probes a case-sensitive leading literal the same way.
-        assertThat(leadingLiteralProbe("svc1://(?i:www\\.)?([^/]+)/", json)).isEqualTo(1);
         // A literal led by a non-ASCII byte moves its probe, though the prefix scan of the same
         // pattern keeps the first byte.
         assertThat(leadingLiteralProbe("été=([a-z]+)", json)).isEqualTo(5);
@@ -769,8 +640,7 @@ public class TestScanPlan
         TrinoCompiledPattern compiled = TrinoRegexp.compile(utf8Slice("https://(?:www\\.)?([^/]+)/"), TrinoRegexp.Options.defaults().setByteFrequencies(rareNonLetters)).re2();
         assertThat(compiled.usesScanPlanForDiagnostics()).isTrue();
         assertThat(compiled.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isEqualTo(5);
-        // ASCII-folded literals and run-leading plans keep their own scans.
-        assertThat(leadingLiteralProbe("(?i)content-type:([^;]+);", json)).isEqualTo(-1);
+        // Run-leading plans keep their own scans.
         assertThat(leadingLiteralProbe("[?&]([^=]+)=", json)).isEqualTo(-1);
     }
 
@@ -1032,9 +902,8 @@ public class TestScanPlan
         assertThat(candidateAttempts(keyValue, "standalone")).isEqualTo(1);
         assertThat(candidateAttempts(keyValue, "request id=abc-123")).isEqualTo(2);
         assertThat(candidateAttempts(keyValue, "completed elapsed_ms=42")).isEqualTo(2);
-        // Zero-width saves may separate the runs, and the ASCII-folded executor resumes the same way.
+        // Zero-width saves may separate the runs.
         assertThat(candidateAttempts("([a-z])([a-z]*)=", "abcdefgh abcdefgh")).isEqualTo(2);
-        assertThat(candidateAttempts("(?i)([a-h][a-h0-9]*)=v", "abcdefgh abcdefgh")).isEqualTo(2);
     }
 
     @Test
@@ -1664,8 +1533,6 @@ public class TestScanPlan
         assertThat(booleanTails("^abc.*")).isEqualTo("1:RUN");
         assertThat(booleanTails("^https?://([^/]+)")).isEqualTo("3:RUN");
         assertThat(booleanTails("(x)[^/]+")).isEqualTo("3:RUN");
-        assertThat(booleanTails("(?i)^ABC([^:]+)")).isEqualTo("1:RUN");
-        assertThat(booleanTails("(?i)content-type:(.*)")).isEqualTo("2:RUN");
         assertThat(booleanTails("x([0-9]+)y?")).isEqualTo("2:RUN");
         assertThat(booleanTails("^a([^/]{2,4})")).isEqualTo("1:RUN");
         // Both the optional body and its skip arm reach a nullable run.
@@ -1681,8 +1548,6 @@ public class TestScanPlan
                 "^https?://([^/]+)/",
                 "https?://([^/]+)/",
                 "https?://(?:www\\.)?([^/]+)/.*$",
-                "(?i)^ABC([^:]+):",
-                "(?i)^ABC([^:]+):DEF$",
                 "[0-9]([0-9]*)a",
                 "^abc(x)?")) {
             assertThat(booleanTails(expression)).as(expression).isEmpty();
@@ -1702,8 +1567,7 @@ public class TestScanPlan
                 new BooleanTailShape("abc(.*)", "abc", 3),
                 new BooleanTailShape("(abc).*", "abc", 3),
                 new BooleanTailShape("(x)[^/]+", "x", 2),
-                new BooleanTailShape("x([^/]{3,})", "xé😀", 8),
-                new BooleanTailShape("(?i)content-type:(.*)", "Content-Type:", 13))) {
+                new BooleanTailShape("x([^/]{3,})", "xé😀", 8))) {
             ScanPlan plan = requireNonNull(analyze(shape.expression()));
             assertThat(plan.isAnchoredStart()).as(shape.expression()).isFalse();
             Slice input = utf8Slice("padding" + shape.text() + tail).slice(7, utf8Slice(shape.text() + tail).length());
@@ -1713,7 +1577,7 @@ public class TestScanPlan
         assertThat(plan.booleanAttemptEndForDiagnostics(utf8Slice("x/" + tail), 0)).isEqualTo(-1);
 
         // Boolean calls on these shapes reach the executors that contain the early return.
-        for (String expression : List.of("^abc.*", "^https?://([^/]+)", "(?i)^ABC([^:]+)")) {
+        for (String expression : List.of("^abc.*", "^https?://([^/]+)")) {
             TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
             assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(expression).isTrue();
@@ -1824,7 +1688,6 @@ public class TestScanPlan
             TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(route.expression()).isEqualTo(route.partial());
-            assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(route.expression()).isEqualTo(route.folded());
             assertThat(requireNonNull(analyze(route.expression())).isAnchoredStart())
                     .as(route.expression())
                     .isEqualTo(route.anchoredStart());
@@ -2221,7 +2084,6 @@ public class TestScanPlan
                 new ExpressionTemplates("https?://([^/]+)/", List.of("x https://ho%sst/ y", "http://a/ https://b%sc/ http://d/")),
                 new ExpressionTemplates("([^/]+)/", List.of("ho%sst/ y", "%sa/b%sc/")),
                 new ExpressionTemplates("a([^:]+):", List.of("za%sb: y", "a%sb:a%sc:a:")),
-                new ExpressionTemplates("(?i)a([^:]+):", List.of("zAb%sc: y", "A%sb:a%sC:")),
                 new ExpressionTemplates("([^/]{2,})/", List.of("x%sy/", "/x%sz/a/bc%sd/")));
         for (ExpressionTemplates entry : cases) {
             String expression = entry.expression();
@@ -2256,7 +2118,6 @@ public class TestScanPlan
                 new BooleanSearchRoute("[0-9]([0-9]*)a", true),
                 new BooleanSearchRoute("\\w(\\w*)@(\\w+)", true),
                 new BooleanSearchRoute("[a-c]([a-c]+):", true),
-                new BooleanSearchRoute("(?i)\\d(\\d*)zz", true),
                 new BooleanSearchRoute("\\d(\\d*)(?:abc)?z", true),
                 new BooleanSearchRoute("[?&]([^=]+)=", false),
                 new BooleanSearchRoute("([^/]+)/", false),
@@ -2264,7 +2125,6 @@ public class TestScanPlan
                 new BooleanSearchRoute("\\d(\\d*)zz(é)", false),
                 new BooleanSearchRoute("x(\\d+)zz", false),
                 new BooleanSearchRoute("https?://([^/]+)/", false),
-                new BooleanSearchRoute("(?i)content-type:([^;]+);", false),
                 new BooleanSearchRoute("^(\\d+)zz", false));
         for (BooleanSearchRoute route : routes) {
             TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
@@ -2291,9 +2151,7 @@ public class TestScanPlan
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/$", true, false),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/\\z", true, true),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([^/]+)/\\z", true, false),
-                new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/\\z", true, true),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/", true, true),
-                new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/", true, true),
                 // A boolean tail ends the attempt early, optional literals need no fork, the
                 // pattern's boolean route with planning disabled uses a literal kernel, and
                 // unanchored plans have their own ordinary boolean search.
@@ -2326,7 +2184,7 @@ public class TestScanPlan
         Slice longInput = view("aabcd" + "1".repeat(43) + "/");
         assertThat(shortInput.length()).isEqualTo(48);
         int[] bounds = new int[2];
-        for (String expression : List.of("^(a)?(b)?abcd([0-9]+)/\\z", "(?i)^(a)?(b)?abcd([0-9]+)/")) {
+        for (String expression : List.of("^(a)?(b)?abcd([0-9]+)/\\z")) {
             for (CompiledPattern pattern : List.of(Re2.compile(utf8Slice(expression)), TrinoRegexp.compile(utf8Slice(expression)).re2())) {
                 disableOrdinaryEngine(pattern);
                 assertThat(pattern.find(shortInput)).as(expression).isFalse();
@@ -2351,14 +2209,14 @@ public class TestScanPlan
         String padding = " ".repeat(256);
         String dense = "1 2 3 4 5 6 7 8 9zz" + padding;
         Slice denseInput = view(dense);
-        assertThat(plan.searchBeforeHandoff(denseInput, 0, denseInput.length(), 0, false)).isEqualTo(~(dense.indexOf('8') + 1));
+        assertThat(plan.searchBeforeHandoff(denseInput, 0, denseInput.length(), 0)).isEqualTo(~(dense.indexOf('8') + 1));
         Slice shortInput = view("1 2 3 4 5 6 7 8 9zz");
-        assertThat(plan.searchBeforeHandoff(shortInput, 0, shortInput.length(), 0, false)).isNotNegative();
+        assertThat(plan.searchBeforeHandoff(shortInput, 0, shortInput.length(), 0)).isNotNegative();
         String sparse = String.join(" ".repeat(40), "1", "2", "3", "4", "5", "6", "7", "8", "9zz") + padding;
         Slice sparseInput = view(sparse);
-        assertThat(plan.searchBeforeHandoff(sparseInput, 0, sparseInput.length(), 0, false)).isNotNegative();
+        assertThat(plan.searchBeforeHandoff(sparseInput, 0, sparseInput.length(), 0)).isNotNegative();
         Slice missingLiteral = view("1 2 3 4 5 6 7 8 9z" + padding);
-        assertThat(plan.searchBeforeHandoff(missingLiteral, 0, missingLiteral.length(), 0, false)).isEqualTo(ScanPlan.NO_MATCH);
+        assertThat(plan.searchBeforeHandoff(missingLiteral, 0, missingLiteral.length(), 0)).isEqualTo(ScanPlan.NO_MATCH);
 
         Regex oracle = joniPattern(expression);
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
@@ -2398,7 +2256,7 @@ public class TestScanPlan
                 new ExpressionTemplates("([0-9]+)a", List.of("%s9a", "9%sa", "x99%s1a", "99a%s")),
                 new ExpressionTemplates("(\\w+)@(\\w+)", List.of("%sa@b", "a%s@b", "a@%sb", "ab@cd%s ef@%s", "%s@%s")),
                 new ExpressionTemplates("(?i)(\\d+)zz", List.of("%s1ZZ", "1%sZz", "12z%sz")));
-        List<String> withoutPlan = List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "(?i)(\\d+)zz");
+        List<String> withoutPlan = List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "(?i)(\\d+)zz", "(?i)\\d(\\d*)zz");
         // Enough dense failures before each template, and enough input after it, that full-Slice
         // find hands off to the ordinary engine before reaching the malformed bytes.
         List<String> contexts = List.of("%s", "1 2 3 4 5 6 7 8 9 %s" + " ".repeat(256));
@@ -2448,20 +2306,15 @@ public class TestScanPlan
             Slice input = search.input(units);
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             ScanPlan plan = requireNonNull(analyze(expression), expression);
-            boolean folded = plan.usesAsciiFoldedExecutor();
             int[] groups = new int[2 * (regexp.capturingGroupCount() + 1)];
             for (int[] searchGroups : Arrays.asList(null, groups)) {
-                int result = folded
-                        ? plan.searchAsciiFolded(input, 0, input.length(), 0, false, false, searchGroups)
-                        : plan.search(input, 0, input.length(), 0, false, false, searchGroups);
+                int result = plan.search(input, 0, input.length(), 0, false, false, searchGroups);
                 assertThat(result).as(expression).isEqualTo(~1);
             }
             assertThat(groups).as(expression).containsOnly(-1);
-            assertThat(plan.searchBeforeHandoff(input, 0, input.length(), 0, folded)).as(expression).isEqualTo(~1);
+            assertThat(plan.searchBeforeHandoff(input, 0, input.length(), 0)).as(expression).isEqualTo(~1);
             // An anchored search makes one attempt and never hands off.
-            int anchored = folded
-                    ? plan.searchAsciiFolded(input, 0, input.length(), 0, true, false, groups)
-                    : plan.search(input, 0, input.length(), 0, true, false, groups);
+            int anchored = plan.search(input, 0, input.length(), 0, true, false, groups);
             assertThat(anchored).as(expression).isEqualTo(ScanPlan.NO_MATCH);
 
             // A search that hands off finds nothing when the ordinary engine cannot match, so
@@ -2495,7 +2348,6 @@ public class TestScanPlan
                 new ExpressionInput("[?&]([^=]+)=", query.toString()),
                 new ExpressionInput("https?://([^/]+)/", urls.toString()),
                 new ExpressionInput("([^/]+)/", paths.toString()),
-                new ExpressionInput("(?i)content-type:([^;]+);", headers.toString()),
                 // Each failed attempt reads only to the next 'z', before the next candidate.
                 new ExpressionInput("x([^z]+)zq", "xaaazr".repeat(20000) + "xbzq"));
         for (ExpressionInput row : rows) {
@@ -2594,7 +2446,6 @@ public class TestScanPlan
             String expression = entry.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             assertThat(regexp.re2().usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(expression).isFalse();
-            assertThat(regexp.re2().usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
             for (String template : entry.templates()) {
                 for (byte[] bytes : MALFORMED_SEQUENCES) {
                     Slice input = malformedText(template, bytes);
@@ -2613,7 +2464,7 @@ public class TestScanPlan
         // its first attempt, so an ordinary engine that cannot match finds nothing. Anchored
         // plans never hand off.
         Slice input = utf8Slice("x https://host/ Content-Type:text; 12zz");
-        for (String expression : List.of("https?://([^/]+)/", "([^/]+)/", "(?i)content-type:([^;]+);", "\\d(\\d*)zz")) {
+        for (String expression : List.of("https?://([^/]+)/", "([^/]+)/", "\\d(\\d*)zz")) {
             TrinoRegexp handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(utf8Slice(expression));
             assertThat(handoff.re2().usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(handoff.contains(input)).as(expression).isTrue();
@@ -2745,9 +2596,7 @@ public class TestScanPlan
                 // Literal-led plans scan for their leading literal and never check a later one.
                 new RequiredLiteral("x(\\d+)zz", null),
                 new RequiredLiteral("https?://(?:www\\.)?([^/]+)/", null),
-                new RequiredLiteral("(?i)content-type:([^;]+);", null),
                 new RequiredLiteral("zz(\\d+)", null),
-                new RequiredLiteral("(?i)\\d(\\d*)zz", null),
                 new RequiredLiteral("\\d(\\d*)(?:abc)?", null),
                 new RequiredLiteral("^(\\d+)zz", null));
         for (RequiredLiteral entry : literals) {
@@ -2914,7 +2763,7 @@ public class TestScanPlan
                     }
                     Regex oracle = joniPattern(expression);
                     verifyOperations(expression, regexp, source -> joniMatches(oracle, source), sources, true);
-                    if (!requireNonNull(analyze(expression), expression).isAnchoredStart()) {
+                    if (plannedUnlessFolded(expression, true) && !requireNonNull(analyze(expression), expression).isAnchoredStart()) {
                         TrinoRegexp handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(data.expressions[plan]);
                         verifyOperations(expression + " after handoff", handoff, source -> joniMatches(oracle, source), sources, true);
                     }
@@ -2992,17 +2841,45 @@ public class TestScanPlan
     {
         Slice pattern = utf8Slice(expression);
         Regex oracle = joniPattern(expression);
-        verifyOperations(expression, TrinoRegexp.compile(pattern, options), source -> joniMatches(oracle, source), sources, scanPlan);
         List<Slice> validSources = sources.stream()
                 .filter(source -> Utf8.firstInvalidOffset(source) < 0)
                 .toList();
+        // Sweep leg a5-no-p2: a folded pattern that declines its plan gets the ordinary engine's
+        // answer on malformed input, which Trino leaves unspecified.
+        boolean declined = scanPlan && !plannedUnlessFolded(expression, true);
+        verifyOperations(expression, TrinoRegexp.compile(pattern, options), source -> joniMatches(oracle, source), declined ? validSources : sources, scanPlan);
         verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), source -> joniMatches(oracle, source), validSources, scanPlan);
     }
 
     private static void verifyOperations(String description, TrinoRegexp regexp, Function<Slice, List<int[]>> expectedMatches, List<Slice> sources, boolean scanPlan)
     {
-        assertThat(regexp.re2().usesScanPlanForDiagnostics()).as(description).isEqualTo(scanPlan);
+        assertThat(regexp.re2().usesScanPlanForDiagnostics()).as(description).isEqualTo(plannedUnlessFolded(regexp.pattern().toStringUtf8(), scanPlan));
         TestingTrinoJoni.verifyOperations(description, regexp, expectedMatches, sources);
+    }
+
+    // Sweep leg a5-no-p2: a plan declines a pattern with an ASCII-folded literal, which the
+    // ordinary engine then answers.
+    private static boolean plannedUnlessFolded(String expression, boolean planned)
+    {
+        return planned && !hasAsciiFoldedLiteral(TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL).regexp());
+    }
+
+    static boolean hasAsciiFoldedLiteral(Regexp expression)
+    {
+        if ((expression.op() == RegexpOp.LITERAL || expression.op() == RegexpOp.LITERAL_STRING) && (expression.parseFlags() & Regexp.FOLD_CASE) != 0) {
+            int[] runes = expression.op() == RegexpOp.LITERAL ? new int[] {expression.rune()} : expression.runes();
+            for (int rune : runes) {
+                if ((rune >= 'a' && rune <= 'z') || (rune >= 'A' && rune <= 'Z')) {
+                    return true;
+                }
+            }
+        }
+        for (Regexp child : expression.children()) {
+            if (hasAsciiFoldedLiteral(child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static Slice callbackReplacement(List<Slice> groups)

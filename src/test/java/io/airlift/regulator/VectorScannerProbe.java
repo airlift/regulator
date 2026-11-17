@@ -36,14 +36,12 @@ public final class VectorScannerProbe
         verify("^abc(?:(x+))?y*$",
                 "LITERAL,FORK,SAVE,RUN,SAVE,RUN,END",
                 null,
-                false,
                 "abc" + "x".repeat(64) + FILLER,
                 "x".repeat(64),
                 1);
         verify("^([^/]{2,})/$",
                 "RUN,LITERAL,END",
                 null,
-                false,
                 "h".repeat(64) + "/",
                 "h".repeat(64),
                 1);
@@ -51,7 +49,6 @@ public final class VectorScannerProbe
         verify("https?://([^/]+)/",
                 "LITERAL,OPTIONAL,LITERAL,SAVE,RUN,SAVE,LITERAL",
                 null,
-                false,
                 FILLER + "https://" + "h".repeat(64) + "/" + FILLER,
                 "h".repeat(64),
                 1);
@@ -59,7 +56,6 @@ public final class VectorScannerProbe
         verify("([^/]+)/",
                 "SAVE,RUN,SAVE,LITERAL",
                 "/",
-                false,
                 "/".repeat(64) + "host/",
                 "host",
                 1);
@@ -67,14 +63,12 @@ public final class VectorScannerProbe
         verify("[?&]([^=]+)=",
                 "RUN,SAVE,RUN,SAVE,LITERAL",
                 "=",
-                false,
                 FILLER + "?key=" + FILLER + "&other=",
                 "key",
                 2);
         verify("[a-e](\\d+)",
                 "RUN,SAVE,RUN,SAVE",
                 null,
-                false,
                 "x".repeat(64) + "c12" + "x".repeat(64),
                 "12",
                 1);
@@ -82,7 +76,6 @@ public final class VectorScannerProbe
         verify("[hxyz](\\d+)",
                 "RUN,SAVE,RUN,SAVE",
                 null,
-                false,
                 "-".repeat(64) + "z12" + "-".repeat(64),
                 "12",
                 1);
@@ -90,25 +83,15 @@ public final class VectorScannerProbe
         verify("([^:]+):([0-9]+)",
                 "SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE",
                 ":",
-                false,
                 "abc:x" + FILLER + ":12",
                 "x" + FILLER,
                 1);
         verify("([^:]+):([0-9]+)",
                 "SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE",
                 ":",
-                false,
                 "abc:x" + FILLER,
                 null,
                 0);
-        // The ASCII-folded executor finds a folded leading letter in either case.
-        verify("(?i)content-type:([^;]+);",
-                "ASCII_FOLDED_LITERAL,SAVE,RUN,SAVE,LITERAL",
-                null,
-                true,
-                FILLER + "CONTENT-TYPE:text;" + FILLER + "content-type:html;",
-                "text",
-                2);
 
         // The DFA's mixed start-byte scan uses the same nibble-table lookup for texts of at least 1 KiB.
         // The unbounded repeat keeps the pattern off the fixed-width matcher, so a boolean find runs
@@ -145,11 +128,10 @@ public final class VectorScannerProbe
         System.out.printf("OK %s%n", expectedVectorScans ? "vector" : "scalar");
     }
 
-    private static void verify(String expression, String operations, String requiredLiteral, boolean asciiFolded, String text, String group, int count)
+    private static void verify(String expression, String operations, String requiredLiteral, String text, String group, int count)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         check(regexp.re2().usesScanPlanForDiagnostics(), expression + ": no scan plan");
-        check(regexp.re2().usesAsciiFoldedScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
         ScanPlan plan = ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform());
         check(plan != null, expression + ": no plan");
