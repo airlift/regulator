@@ -517,6 +517,14 @@ public sealed class TrinoRegexp
         public boolean contains(Slice source)
         {
             requireNonNull(source, "source is null");
+            if (!matcher.matches(source, 0, source.length())) {
+                return false;
+            }
+            return containsWithCharacterGaps(source);
+        }
+
+        private boolean containsWithCharacterGaps(Slice source)
+        {
             int decision = matcher.findWithCharacterGaps(source);
             if (decision == OrderedLiteralMatcher.UNDECIDED) {
                 return super.contains(source);
