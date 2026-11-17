@@ -21,6 +21,7 @@ import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
 import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.lang.classfile.Attributes;
@@ -181,6 +182,7 @@ public class TestHotMethodSize
     /// caller that holds the pattern as a constant; the attempt loop and searches stay static
     /// calls. The patterns cover start-anchored and unanchored plans, a search that hands off to
     /// the ordinary engine, retries, and several groups.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedEntriesFitInlineSize()
     {

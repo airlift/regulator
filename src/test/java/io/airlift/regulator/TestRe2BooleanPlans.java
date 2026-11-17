@@ -38,7 +38,6 @@ import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
 import static io.airlift.regulator.CompiledPattern.Shape.FIXED_WIDTH;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
-import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
 import static io.airlift.regulator.TestingPatternShapes.rowsAroundMinimumSearchWindow;
@@ -120,14 +119,14 @@ public class TestRe2BooleanPlans
                 new ShapeRow("[a-z]{8}-[0-9]{4}", FIXED_WIDTH, FIXED_WIDTH, FIXED_WIDTH, FIXED_WIDTH),
                 new ShapeRow("\\p{L}+", CLASS_RUN, CLASS_RUN, CLASS_RUN, CLASS_RUN),
                 new ShapeRow("[,;]", BYTE_TABLE, BYTE_TABLE, BYTE_TABLE, BYTE_TABLE),
-                new ShapeRow("https?://([^/]+)/", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
-                new ShapeRow("(?i)content-type:([^;]+);", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
+                new ShapeRow("https?://([^/]+)/", ENGINE, ENGINE, ENGINE, ENGINE),
+                new ShapeRow("(?i)content-type:([^;]+);", ENGINE, ENGINE, ENGINE, ENGINE),
                 // Patterns more than one shape could serve.
                 // A Rust `\s` is Unicode, so it is no byte run.
                 new ShapeRow("\\s+", BYTE_TABLE, BYTE_TABLE, ENGINE, BYTE_TABLE),
                 // A literal led plan keeps literal kernels for find and lookingAt; its other
                 // operations run the plan.
-                new ShapeRow("(?s)abc(.*)", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
+                new ShapeRow("(?s)abc(.*)", LITERAL_KERNEL, LITERAL_KERNEL, LITERAL_KERNEL, LITERAL_KERNEL),
                 new ShapeRow("abc|def", LITERAL_ALTERNATION, LITERAL_ALTERNATION, LITERAL_ALTERNATION, null),
                 // Patterns that can match empty, which only the engine shape accepts.
                 new ShapeRow("", ENGINE, ENGINE, ENGINE, ENGINE),

@@ -480,20 +480,9 @@ public class TestTrinoRegexpFunctions
         assertThat(smallest.count(source)).isEqualTo(2);
         assertThat(smallest.extract(source)).isEqualTo(utf8("xxliteralyy"));
 
-        // A capture's leading-literal scan plan reserves its memory before the search, and from
-        // the budget at which the plan fits until the search fits beside it, it leaves the search
-        // out. The plan then answers alone.
+        // Sweep leg a5-plans-off: no scan plan, so only the answers at the smallest budget remain.
         Slice captured = utf8("(aa).*");
-        long maxMemory = smallestBudget(captured);
-        TrinoRegexp fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-        while (!fallback.re2().usesScanPlanForDiagnostics()) {
-            assertThat(maxMemory).isLessThan(1 << 20);
-            maxMemory++;
-            fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-        }
-        assertThat(fallback.re2().literalSearchForDiagnostics()).as("search at %s", maxMemory).isNull();
-        assertThat(TrinoRegexp.compile(captured).re2().literalSearchForDiagnostics()).isNotNull();
-        assertThat(fallback.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.CONTAINS);
+        TrinoRegexp fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(smallestBudget(captured)));
         Slice capturedSource = utf8("xa aayy\naa");
         assertThat(fallback.contains(capturedSource)).isTrue();
         assertThat(fallback.contains(utf8("xa ayy"))).isFalse();
@@ -1293,7 +1282,6 @@ public class TestTrinoRegexpFunctions
         // One pattern for each route, compared on its sample with malformed UTF-8 put at every
         // byte offset: before, inside, and after its matches, and inside its characters. The
         // reference is the whole expression on the plain engine's NFA.
-        TrinoRegexp.Options generating = TrinoRegexp.Options.defaults().setGenerateBytecode(true);
         String literalSet = "ERROR|WARN|FATAL|" + IntStream.range(0, 62).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
         List<MalformedInputRoute> routes = List.of(
                 new MalformedInputRoute("fixed-width byte", TrinoRegexp.compile(utf8("\\d{3}-\\d{2}")), "123-45é", regexp -> regexp instanceof TrinoRegexp.FixedWidthByteTrinoRegexp),
@@ -1306,9 +1294,6 @@ public class TestTrinoRegexpFunctions
                 new MalformedInputRoute("literal set", TrinoRegexp.compile(utf8(literalSet)), "WARN éERROR", TrinoRegexp::usesLiteralSetMatcherForDiagnostics),
                 new MalformedInputRoute("exact literal", TrinoRegexp.compile(utf8("é中")), "aé中b", regexp -> regexp.re2().hasExactLiteralSpan()),
                 new MalformedInputRoute("begin line", TrinoRegexp.compile(utf8("(?m)^")), "é\nb", TrinoRegexp::usesTrinoBeginLineCountForDiagnostics),
-                new MalformedInputRoute("scan plan", TrinoRegexp.compile(utf8("https?://([^/]+)/")), "http://hé/", regexp -> regexp.re2().usesScanPlanForDiagnostics()),
-                new MalformedInputRoute("start-anchored scan plan", TrinoRegexp.compile(utf8("^x([é中]+)/.*$")), "xé中/é", regexp -> regexp.re2().startAnchoredScanPlan() != null),
-                new MalformedInputRoute("generated class", TrinoRegexp.compile(utf8("https?://([^/]+)/"), generating), "http://hé/", TrinoRegexp::usesGeneratedBytecode),
                 new MalformedInputRoute("general engine", TrinoRegexp.compile(utf8("(é|中)+x")), "é中x", regexp -> regexp.getClass() == TrinoRegexp.class && !regexp.re2().usesScanPlanForDiagnostics()));
         // Every non-ASCII byte alone, then overlong forms, an encoded surrogate, and forms above
         // U+10FFFF.

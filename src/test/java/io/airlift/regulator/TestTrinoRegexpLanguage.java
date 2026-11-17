@@ -192,7 +192,6 @@ public class TestTrinoRegexpLanguage
         TrinoRegexp.Options generate = TrinoRegexp.Options.defaults().setGenerateBytecode(true);
         TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice("x([^/]+)"), generate);
         TrinoRegexp recompiled = TrinoRegexp.compile(utf8Slice("x([^/]+)"), generate);
-        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
         assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
         TrinoRegexp alternation = TrinoRegexp.compile(utf8Slice("foo|bar"));
         assertThat(alternation.literalAlternationSpanMatcher()).isNotNull();

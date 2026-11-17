@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.regulator.GeneratedPatternInliningProbe.FirstGroup;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -122,6 +123,7 @@ public class TestGeneratedPatternInlining
             "callee is too large",
             "size > DesiredMethodLimit");
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testConstantCallersReachGeneratedPatternsDirectly(@TempDir Path temporaryDirectory)
             throws Exception

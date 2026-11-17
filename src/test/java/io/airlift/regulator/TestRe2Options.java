@@ -59,7 +59,6 @@ public class TestRe2Options
         Re2.Options generate = Re2.Options.defaults().setGenerateBytecode(true);
         Re2 compiled = Re2.compile(utf8("x([^/]+)"), generate);
         Re2 recompiled = Re2.compile(utf8("x([^/]+)"), generate);
-        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
         assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
 
         // A different pattern, or any option that changes the compile, including options that

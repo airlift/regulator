@@ -19,6 +19,7 @@ import io.airlift.joni.Regex;
 import io.airlift.joni.Region;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -114,6 +115,7 @@ public class TestScanPlan
 
     private record MalformedRow(String expression, String template, byte[] malformed, String match) {}
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPublicCallsBypassTheSemanticProgram()
     {
@@ -136,6 +138,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLiteralWidthsAndPartialCaptureRetention()
     {
@@ -161,6 +164,7 @@ public class TestScanPlan
         assertThat(groups).containsExactly(0, finalLf.length() - 1, 8, 12);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlanUsesTheForwardMemoryBudget()
     {
@@ -181,6 +185,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testUrlUsesScanPlan()
     {
@@ -194,6 +199,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testClickHouseAnchoredPartialPatternsUseScanPlan()
     {
@@ -222,6 +228,7 @@ public class TestScanPlan
         assertThat(plan.operationsForDiagnostics()).isEqualTo("LITERAL,OPTIONAL,LITERAL,RE2_RUN");
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testAsciiCaseFoldEligibility()
     {
@@ -281,6 +288,7 @@ public class TestScanPlan
         verifyAgainstJoni("^[Ss][Kk]([a-h]+):$", List.of("skabc:", "SKbag:", "ſkabc:", "sKabc:", "sKBAG:"));
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testAsciiCaseFoldUsesSeparateExecutors()
     {
@@ -304,6 +312,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testAsciiFoldedPartialPlansAgainstJoni()
     {
@@ -354,6 +363,7 @@ public class TestScanPlan
         assertThat(regexp.re2().lookingAt(source)).isTrue();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testBoundedLiteralSequenceRepetition()
     {
@@ -395,6 +405,7 @@ public class TestScanPlan
         return requireNonNull(analyze(expression)).operationsForDiagnostics();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedAsciiCaseFoldPatternsAgainstJoni()
     {
@@ -441,6 +452,7 @@ public class TestScanPlan
         return result.toString();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testAnchoredPartialMatchModes()
     {
@@ -501,6 +513,7 @@ public class TestScanPlan
         assertThat(dotAllMatcher.end()).isEqualTo("xabc\nrest".length());
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testUnanchoredSearchPlans()
     {
@@ -623,6 +636,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testUnanchoredSearchBypassesSemanticProgram()
     {
@@ -665,6 +679,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRunLeadingSearchSkipsToCandidateBytes()
     {
@@ -690,6 +705,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLiteralLeadingSearchSkipsToWholeLiteral()
     {
@@ -743,6 +759,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLeadingLiteralProbeOffset()
     {
@@ -777,6 +794,7 @@ public class TestScanPlan
         assertThat(leadingLiteralProbe("[?&]([^=]+)=", json)).isEqualTo(-1);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLeadingLiteralProbeFindsWholeLiterals()
     {
@@ -1025,6 +1043,7 @@ public class TestScanPlan
         verifyAgainstJoni("([é-ü]+)x", inputs, false);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testFailedAttemptResumesAfterFollowingRun()
     {
@@ -1076,6 +1095,7 @@ public class TestScanPlan
         verifyAgainstJoni("[a-z]([0-9]+)=", List.of("ab=", "a1b=", "ab2= c=", "é1="));
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testFailedAttemptResumeRequiresAdjacentUnboundedSuperset()
     {
@@ -1366,6 +1386,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testByteSetPublicCallsBypassTheSemanticProgram()
     {
@@ -1395,6 +1416,7 @@ public class TestScanPlan
         verifyAgainstJoni("^x(?:(?<host>[^/]{2,4})/)?end$", List.of("xend", "xé😀/end", "xé/end", "x例え😀界/end", "x例え😀界道/end"));
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRunCapturesAfterFailedAttempts()
     {
@@ -1441,6 +1463,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testOptionalCaptureRoutingAndClearing()
     {
@@ -1605,6 +1628,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRegionsMemoryAndFailureStorage()
     {
@@ -1703,6 +1727,7 @@ public class TestScanPlan
         return requireNonNull(analyze(expression)).booleanTailOperationsForDiagnostics();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testBooleanTailAttemptStopsAfterRunMinimum()
     {
@@ -1732,6 +1757,7 @@ public class TestScanPlan
         assertThat(unanchored.usesScanPlanForFindForDiagnostics()).isTrue();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLiteralBooleanKernelsKeepPlanForBoundaries()
     {
@@ -1826,6 +1852,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testExecutorRoutes()
     {
@@ -1906,6 +1933,7 @@ public class TestScanPlan
         verifyAgainstJoni(expression, List.of("a:".repeat(14) + "first/second;third|", "b:".repeat(14) + "//;|"));
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testScanMatchModesWithFinalLineEnd()
     {
@@ -1929,6 +1957,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedPatternsAndWitnessesAgainstJoni()
     {
@@ -2010,6 +2039,7 @@ public class TestScanPlan
         assertThat(delimitedCaptures).isGreaterThan(50);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedUnanchoredPatternsAgainstJoni()
     {
@@ -2138,6 +2168,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testMalformedViewsEndingAtArrayEnd()
     {
@@ -2186,6 +2217,7 @@ public class TestScanPlan
         TestingTrinoJoni.verifyOperations(List.of(description), regexp, source -> matcherMatches(ordinary, source), List.of(input));
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testUnanchoredCountAgreesWithFindOnMalformedInput()
     {
@@ -2218,6 +2250,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlansMatchTheOrdinaryEngineOnMalformedInput()
     {
@@ -2260,6 +2293,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testOrdinaryUnanchoredBooleanSearchRoutes()
     {
@@ -2292,6 +2326,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testOrdinaryShortBooleanMatchRoutes()
     {
@@ -2393,6 +2428,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testOrdinaryUnanchoredBooleanSearchAgreesOnMalformedInput()
     {
@@ -2487,6 +2523,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testWorkBudgetChargesFailedRunMinimums()
     {
@@ -2538,6 +2575,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testWorkBudgetKeepsLinearSearchesOnPlan()
     {
@@ -2577,6 +2615,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testNaturalHandoffKeepsContextAndCaptures()
     {
@@ -2638,6 +2677,7 @@ public class TestScanPlan
         verifyRegionAgainstJoni(expression, input, 3, input.length() - 3);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testOperationsAgreeOnMalformedInputAfterHandoff()
     {
@@ -2675,6 +2715,7 @@ public class TestScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testForcedHandoffSkipsUnanchoredPlanSearch()
     {
@@ -2839,6 +2880,7 @@ public class TestScanPlan
         verifyAgainstJoni("(\\d+)ab(\\d+)cde", List.of("1ab2cde", "1ab2cd", "1ab2cd 3ab4cde", "cde1ab2", "1ab2cdcde"), false);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRequiredLiteralRejectionKeepsRegionResults()
     {
@@ -3068,7 +3110,6 @@ public class TestScanPlan
 
     private static void verifyOperations(String description, TrinoRegexp regexp, Function<Slice, List<int[]>> expectedMatches, List<Slice> sources, boolean scanPlan)
     {
-        assertThat(regexp.re2().usesScanPlanForDiagnostics()).as(description).isEqualTo(scanPlan);
         TestingTrinoJoni.verifyOperations(description, regexp, expectedMatches, sources);
     }
 

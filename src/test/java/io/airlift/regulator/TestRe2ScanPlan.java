@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -162,6 +163,7 @@ public class TestRe2ScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPublicCallsBypassTheSemanticProgram()
             throws ReflectiveOperationException
@@ -222,6 +224,7 @@ public class TestRe2ScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedCallsBypassTheInterpretedPlan()
             throws ReflectiveOperationException
@@ -247,6 +250,7 @@ public class TestRe2ScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedClassDeclaresTheEntriesThatReachThePlan()
     {
@@ -268,6 +272,7 @@ public class TestRe2ScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRouteSelection()
     {
@@ -307,6 +312,7 @@ public class TestRe2ScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlansMatchTheOrdinaryEngine()
     {
@@ -357,6 +363,7 @@ public class TestRe2ScanPlan
         assertThat(leadingCharacter.unanchoredAttemptForDiagnostics(utf8Slice("ſa="), 0, false, false, null)).isEqualTo(4);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRandomPlansMatchTheOrdinaryEngine()
     {
@@ -425,6 +432,7 @@ public class TestRe2ScanPlan
         assertThat(plansWithMovedProbes).as("plans probing a leading literal past its first byte").isGreaterThan(30);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGoldenPatternsSelectingPlans()
     {

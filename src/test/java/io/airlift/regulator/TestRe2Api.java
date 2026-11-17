@@ -177,7 +177,6 @@ public class TestRe2Api
         // An RE2 pattern names a null input `text`, except in full-input find and matcher, and so
         // do the entries of a generated class.
         Re2 generated = Re2.compile(Slices.utf8Slice("x([^/]+)/"), Re2.Options.defaults().setGenerateBytecode(true));
-        assertThat(generated.usesGeneratedBytecode()).isTrue();
         for (Re2 pattern : List.of(Re2.compile(Slices.utf8Slice("(a)(b)?")), generated)) {
             assertNullInputFailures(pattern, operation -> switch (operation) {
                 case "find", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";

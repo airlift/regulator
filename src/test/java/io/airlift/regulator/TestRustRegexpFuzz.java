@@ -44,6 +44,7 @@ import io.airlift.regulator.TestingPatternTree.Property;
 import io.airlift.regulator.TestingPatternTree.Quote;
 import io.airlift.regulator.TestingPatternTree.Repeat;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -263,6 +264,7 @@ public class TestRustRegexpFuzz
         TestingDifferentialFuzzer.fuzz(LANGUAGE, SEED, PATTERNS);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testScanPlanShapes()
     {

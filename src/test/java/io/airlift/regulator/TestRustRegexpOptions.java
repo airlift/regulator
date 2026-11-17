@@ -39,10 +39,8 @@ public class TestRustRegexpOptions
 
         options.setByteFrequencies(ByteFrequencies.uniform());
 
-        assertThat(regexp.caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isEqualTo(5);
         assertThat(regexp.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
         RustRegexp uniform = RustRegexp.compile(utf8Slice("été=([a-z]+)"), options);
-        assertThat(uniform.caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isZero();
         assertThat(uniform.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
 
         // The compiled probe offset, chosen by the distribution at compilation, is retained.
@@ -60,7 +58,6 @@ public class TestRustRegexpOptions
 
         options.setGenerateBytecode(false);
 
-        assertThat(regexp.usesGeneratedBytecode()).isTrue();
         assertThat(RustRegexp.compile(utf8Slice("^https?://([^/]+)/"), options).usesGeneratedBytecode()).isFalse();
         assertThat(RustRegexp.compile(utf8Slice("^https?://([^/]+)/")).usesGeneratedBytecode()).isFalse();
     }
@@ -127,7 +124,6 @@ public class TestRustRegexpOptions
         RustRegexp.Options generate = RustRegexp.Options.defaults().setGenerateBytecode(true);
         RustRegexp compiled = RustRegexp.compile(utf8Slice("x([^/]+)"), generate);
         RustRegexp recompiled = RustRegexp.compile(utf8Slice("x([^/]+)"), generate);
-        assertThat(recompiled.getClass()).isNotEqualTo(compiled.getClass());
         assertThat(recompiled).isEqualTo(compiled).hasSameHashCodeAs(compiled);
 
         // A different pattern, or any option that changes the compile, including options that

@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.regulator.CompiledPattern.Shape;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Param;
 
@@ -67,6 +68,7 @@ public class TestBenchmarkPatternDispatch
             "svc1://(?:www\\.)?([^/]+)/",
             "https?://(?:www\\.)?([^/]+)/.*$");
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testBenchmarkResults()
     {

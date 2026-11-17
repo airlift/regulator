@@ -86,6 +86,10 @@ abstract sealed class CompiledPattern
         DISABLED,
     }
 
+    // Sweep leg a5-plans-off: every compile behaves as ScanPlanMode.DISABLED. The flag is not a
+    // compile-time constant, so the plan build stays in the class file for the checks.
+    private static final boolean SCAN_PLANS_ENABLED = Boolean.getBoolean("regulator.sweep.scanPlansEnabled");
+
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk. A
     // 64-byte input still takes the table here, unlike MINIMUM_LONG_SEARCH_BYTES below: these
     // full-Slice byte-table routes were measured that way before the shared hand-off existed.
@@ -984,7 +988,7 @@ abstract sealed class CompiledPattern
                 semanticProgram);
         // The frontend chooses the plan's mode. A plan reports leftmost-first matches, so a
         // longest-match pattern has none.
-        ScanPlan scanPlan = scanPlanMode != ScanPlanMode.DISABLED && !longestMatch && !expressionAnalysis.canMatchEmpty()
+        ScanPlan scanPlan = SCAN_PLANS_ENABLED && scanPlanMode != ScanPlanMode.DISABLED && !longestMatch && !expressionAnalysis.canMatchEmpty()
                 ? ScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanMode == ScanPlanMode.FORCE_HANDOFF, caseFolding, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led

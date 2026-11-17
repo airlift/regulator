@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -22,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkTrinoScanProfiles
 {
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testSelectionsPreserveInputsAndResults()
             throws Throwable

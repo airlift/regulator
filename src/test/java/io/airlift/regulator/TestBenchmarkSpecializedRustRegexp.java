@@ -18,6 +18,7 @@ import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarks.Variant;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Param;
 
@@ -67,6 +68,7 @@ public class TestBenchmarkSpecializedRustRegexp
                 .toList());
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testEveryPassHandsEachInputToItsOperation()
             throws Exception
@@ -74,6 +76,7 @@ public class TestBenchmarkSpecializedRustRegexp
         TestingSpecializedPatternBenchmarks.verifyPasses(new BenchmarkSpecializedRustRegexp(), BenchmarkSpecializedRustRegexp::variantsForTesting);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testEveryVariantProducesTheSameResult()
             throws ReflectiveOperationException

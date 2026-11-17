@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -39,6 +40,7 @@ public class TestBenchmarkTrinoScanPlan
             "FALLBACK",
             "LOWERED_FALLBACK");
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testBenchmarkResults()
             throws ReflectiveOperationException
