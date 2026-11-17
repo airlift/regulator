@@ -289,8 +289,8 @@ Upstream's own never-capture test uses only unnamed groups.
   [Rust Frontend](#rust-frontend)): between ASCII bytes and region edges each
   is its ASCII form, because the JDK's word characters there are
   `[0-9A-Za-z_]` in both character-class modes and a nonspacing mark is never
-  ASCII. A search that reaches one next to any other byte quits to the
-  fallback engines. OnePass evaluates them exactly, as
+  ASCII. Next to any other byte the DFA decides them with the JDK's rule, as
+  it does Rust's. OnePass evaluates them exactly, as
   [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
   describes.
 - Java patterns use the shared `RegexpMatcher`. A matcher region is the
@@ -443,17 +443,34 @@ original pattern, including when quoting rewrites it before parsing.
   character, and `\B` also requires each side that is present to decode; byte
   mode exposes both rules.
 - The forward and reverse DFAs evaluate these predicates. A state records
-  whether the byte before its position is an ASCII word byte, a CR (an LF in
-  reverse), or a byte outside ASCII. The DFA evaluates a Unicode word
-  assertion only between ASCII bytes and text edges, where it is its ASCII
-  form. In a program with a Unicode word assertion, a transition from a
-  state that needs any assertion quits when the byte before or after it is
-  outside ASCII, and the search reruns on OnePass, BitState, or the NFA. A
-  state that needs only a line anchor quits too, because a line anchor that
-  holds can lead to a word assertion the state does not need yet. The crate's
-  lazy DFA makes the same ASCII assumption but quits on every byte outside
-  ASCII; this DFA quits only at those transitions, so text with non-ASCII bytes
-  away from the assertions keeps it. A quit depends on the text, so it is never
+  whether the byte before its position is an ASCII word byte or a CR (an LF in
+  reverse). In a program with a Unicode word assertion, four flag bits instead
+  record the last character: an ASCII byte or text edge, a word or non-word
+  character, the class of a character whose continuation bytes are still
+  being read, or unknown. Between ASCII bytes and text edges each assertion is
+  its ASCII form, so ASCII text takes the same states as before. Inside a
+  valid character every Unicode word assertion is false. A lead byte whose
+  every valid character has one class under the language's word rule decides
+  the assertion from its byte class, and the state claims that class until the
+  character ends. Every other transition that needs a non-ASCII neighbor,
+  including every such reverse transition, decodes both sides from the text
+  with the language's own predicate and caches the destination in a side
+  table keyed by state, neighbor kinds, and byte class, so a destination that
+  depends on the text never enters the shared byte slot. A claimed lead's
+  transition that would end the search or report a match is not cached in the
+  byte slot, because the rest of the character could still show the claim
+  wrong; it too is decided from the text and cached under its decoded context
+  like any other context transition. The forward byte map refines its classes
+  once for each kind of non-ASCII byte the DFA tells apart, wherever its bytes
+  lie, so a kind splits only where the pattern's own classes split it. The
+  kinds are a continuation byte, a word or non-word lead of each length, and
+  every other byte. The crate's lazy
+  DFA makes the ASCII assumption and quits on every byte outside ASCII. This
+  DFA quits only when a character it claimed from its lead byte turns out
+  malformed, or when a forward range ends just before a malformed character,
+  and the search reruns on OnePass, BitState, or the NFA. The side table is
+  allocated when such a program first meets non-ASCII text and is charged to
+  the DFA's memory budget. A quit depends on the text, so it is never
   cached, and apart from ending a count's bail streak, as
   [Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
   describes, it marks nothing on the program. Only the matcher that saw it
@@ -462,7 +479,15 @@ original pattern, including when quoting rewrites it before parsing.
   text that quits one search usually quits the next, and each quit costs a DFA
   start before the fallback. A search whose DFA completes ends the streak. The
   transition loops contain no Rust-language branches; the predicates live where
-  states are built.
+  states are built. The text context a decoding transition reads is the last
+  parameter of each search loop, and the uncomputed transition and the start
+  lookup reach the decoding steps through one branch, so a DFA that never
+  decodes keeps its argument registers and inlining. With the context among
+  the loops' leading parameters, where x86 passes six arguments in registers
+  and AArch64 eight, and with the decoding steps inside the transition, which
+  grew past C2's 200-byte limit for inlining a method that throws often,
+  searches that never decode ran 2 to 5% slower on Intel and no slower on
+  Graviton.
 - OnePass evaluates these predicates too, as
   [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
   describes.
@@ -1819,7 +1844,7 @@ counts, from any matcher or thread, then skip the DFA and fall back at once,
 and the DFA count after them tries it again: if it gives up, the next 16 skip
 again, and if it does not, the streak ends. One DFA count that gives up opens
 no window. Any DFA count that does not give up ends the streak, including one
-the DFA cannot finish, such as a count that quits on a byte outside ASCII. A
+the DFA cannot finish, such as a count that quits on malformed text. A
 count through the inner-literal search makes a DFA count for each dense run,
 and one that completes ends the streak, so rows whose earlier runs count on the
 DFA before a later one gives up pay a DFA attempt on each row. One row's count
@@ -5341,8 +5366,9 @@ the group-zero NFA's skip when no thread is live. Compilation reserves the
 literal's retained memory from the forward DFA budget and drops the literal if
 the reservation would prevent DFA initialization.
 
-A word assertion that decodes characters quits the DFA next to a byte outside
-ASCII, so a check of an occurrence there quits. Where the pattern's matches have
+A word assertion that decodes characters quits the DFA when a character it
+claimed from its lead byte is malformed, or when a forward range ends just
+before a malformed character, so a check of an occurrence there quits. Where the pattern's matches have
 a longest length, the matcher settles that one occurrence without the DFA and
 the cursor resumes at the byte after it when it holds no match. Every earlier
 occurrence this find checked holds no match, and occurrences are checked in
@@ -5363,10 +5389,11 @@ work refunded to the budget, in a sibling loop that reports it, and the cursor
 keeps that loop until the next reset; a matcher whose text never quits never
 runs it. A cursor that scans for a folded start run keeps the quit streak, since
 the run's search is a separate candidate loop and settling there is unmeasured.
-Without the settling, one byte outside ASCII next to an occurrence sent the rest
-of the find to the NFA: a count of `\bgot(?i)syou` over 899 KB of English with
-one `É` before an early occurrence took 364 to 628 times as long as its ASCII
-twin in Rust, Java, and Trino on Graviton and Intel.
+Before the DFA decided non-ASCII neighbors, without the settling, one byte
+outside ASCII next to an occurrence sent the rest of the find to the NFA: a
+count of `\bgot(?i)syou` over 899 KB of English with one `É` before an early
+occurrence took 364 to 628 times as long as its ASCII twin in Rust, Java, and
+Trino on Graviton and Intel.
 
 Where matches have no longest length, as in `\bfoo\w*`, no window bounds a
 settle, so a quit there still sends the rest of the find to the other routes,
@@ -5414,7 +5441,7 @@ the base. r9g `letters-upper` is flat throughout.
 Eligibility is limited to first-match programs without a required prefix,
 anchors, assertions the DFA cannot run, a class counter that finds the matches,
 or a word-run plan, which matcher iteration reaches directly. Where the DFA can
-quit beside a byte outside ASCII, the cursor follows the matcher's quit streak:
+quit beside malformed text, the cursor follows the matcher's quit streak:
 its quit counts once and the find's ordinary path skips the DFA, a search it
 completes ends the streak, and at the limit it is skipped until a reset. Empty
 matches are still handled by the existing empty-at-start check before the
@@ -5759,8 +5786,8 @@ boundaries from a terminal LF, including nonzero Slice offsets. Unicode `\b`
 and `\B` run on the DFA as Rust's Unicode word assertions do (see
 [Rust Frontend](#rust-frontend)): between ASCII bytes and text edges each is
 its ASCII form, because Joni's word characters there are `[0-9A-Za-z_]` and its
-six extra Latin-1 numbers are outside ASCII. A search that reaches one next to
-any other byte quits to the fallback engines. Other text-dependent assertions,
+six extra Latin-1 numbers are outside ASCII. Next to any other byte the DFA
+decides them with Joni's rule, as it does Rust's. Other text-dependent assertions,
 except Rust's and the Java word boundaries, remain ineligible for DFA
 execution. OnePass evaluates the final-line `$` (see
 [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)),

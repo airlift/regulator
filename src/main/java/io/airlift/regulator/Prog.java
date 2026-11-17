@@ -807,9 +807,9 @@ final class Prog
         return (textDependentAssertions & ~dfaSupported) != 0;
     }
 
-    /// Returns whether this program's DFA can quit on a byte outside ASCII, as one with a Rust
-    /// Unicode word assertion or a Java or Trino word boundary does, so that an engine that
-    /// decodes the text runs the search.
+    /// Returns whether this program has a word assertion that decodes the text, a Rust Unicode
+    /// word assertion or a Java or Trino word boundary, whose DFA can quit on malformed text, so
+    /// that an engine that decodes the text runs the search.
     public boolean dfaQuitsOnNonAscii()
     {
         return (textDependentAssertions & EmptyOp.DECODING_WORD_ASSERTIONS) != 0;
@@ -3660,9 +3660,9 @@ final class Prog
                 }
                 // The DFA evaluates a Rust CRLF anchor from CR and LF separately, and a word
                 // assertion from whether each neighboring byte is an ASCII word byte. In a program
-                // with a word assertion that decodes the text, it quits on a byte outside ASCII,
-                // which a byte class can carry only if the bytes 0x80-0xFF never share it with an
-                // ASCII byte.
+                // with a word assertion that decodes the text, a byte outside ASCII decides the
+                // assertion from its lead kind or from the text, which a byte class can carry only
+                // if the bytes 0x80-0xFF never share it with an ASCII byte.
                 if ((empty & EmptyOp.RUST_CRLF_LINE) != 0 && !markedCarriageReturn) {
                     builder.mark('\r', '\r');
                     builder.merge();
@@ -3682,6 +3682,43 @@ final class Prog
                     builder.merge();
                     markedWordBoundaries = true;
                 }
+            }
+        }
+
+        // A forward DFA that decides a decoding word assertion caches one transition for each byte
+        // class, read from the kind of byte the class holds: a continuation, a lead of a given
+        // length whose characters are all word characters or all non-word characters, or a byte
+        // whose transition next to an assertion is read from the text. So no class holds two
+        // kinds. One refinement pass per kind splits off that kind's bytes wherever they lie, so
+        // the bytes of a kind split only where other instructions already split them. A reverse
+        // DFA reads the text beside every byte outside ASCII and needs none.
+        if ((textDependentAssertions & EmptyOp.DECODING_WORD_ASSERTIONS) != 0 && !reversed) {
+            int wordRules = EmptyOp.wordRules(textDependentAssertions);
+            int[] kinds = new int[0x80];
+            for (int value = 0x80; value <= 0xFF; value++) {
+                kinds[value - 0x80] = EmptyOp.decodingByteKind(value, wordRules);
+            }
+            // Each pass marks every run of one kind, then retires the kind's bytes.
+            for (int first = 0; first < kinds.length; first++) {
+                int kind = kinds[first];
+                if (kind < 0) {
+                    continue;
+                }
+                int runStart = -1;
+                for (int index = first; index <= kinds.length; index++) {
+                    boolean member = index < kinds.length && kinds[index] == kind;
+                    if (member) {
+                        kinds[index] = -1;
+                        if (runStart < 0) {
+                            runStart = index;
+                        }
+                    }
+                    else if (runStart >= 0) {
+                        builder.mark(0x80 + runStart, 0x80 + index - 1);
+                        runStart = -1;
+                    }
+                }
+                builder.merge();
             }
         }
 

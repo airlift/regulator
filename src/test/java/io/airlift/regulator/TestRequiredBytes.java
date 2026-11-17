@@ -30,6 +30,7 @@ import java.util.function.Predicate;
 
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -964,18 +965,18 @@ public class TestRequiredBytes
     public void testSkippedDfaRejectsWindowWithoutInnerLiteral()
     {
         // A find that skips the DFA skips the inner literal search too, so it scans for the
-        // search's literal instead. A Unicode word boundary makes the DFA quit on a byte outside
-        // ASCII, and after DFA_QUIT_STREAK_LIMIT finds in a row whose DFA quit, a matcher's finds
-        // skip the DFA. Every window up to the last match is longer than BitState holds, so those
-        // finds run the NFA, and the last window, which holds no literal, would be the first that
-        // BitState holds.
+        // search's literal instead. A Unicode word boundary makes the DFA quit beside a lead byte
+        // that no continuation byte finishes, and after DFA_QUIT_STREAK_LIMIT finds in a row whose
+        // DFA quit, a matcher's finds skip the DFA. Every window up to the last match is longer
+        // than BitState holds, so those finds run the NFA, and the last window, which holds no
+        // literal, would be the first that BitState holds.
         Map<String, CompiledPattern> boundaries = compile("\\b[a-z]+,z\\b");
         for (String language : List.of("Java", "Trino", "Rust")) {
             CompiledPattern pattern = boundaries.get(language);
             assertThat(pattern.forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language).isTrue();
             assertThat(pattern.longWindowRequiredLiteral()).as(language).isNull();
             int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - 1;
-            Slice input = utf8Slice("\u00E9 ab,z ".repeat(6) + "-".repeat(tail));
+            Slice input = Slices.wrappedBuffer(("\u00D0 ab,z ".repeat(6) + "-".repeat(tail)).getBytes(ISO_8859_1));
             RegexpMatcher matcher = pattern.matcher(input);
             assertThat(spans(matcher)).as(language).hasSize(6);
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(language).isTrue();
@@ -1003,12 +1004,13 @@ public class TestRequiredBytes
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
             assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
         }
-        // A Unicode \B makes the DFA quit on a byte outside ASCII after xyz, and after
+        // A Unicode \b makes the DFA quit after xyz beside a lead byte that no continuation byte
+        // finishes, which every language reads as a non-word side, and after
         // DFA_QUIT_STREAK_LIMIT finds in a row whose DFA quit, a matcher's finds skip the DFA and
         // the window search with it. The windows up to the last match are longer than BitState
         // holds and run the NFA, and the last, which holds no xyz, is rejected before BitState
-        // would search it. Java's \B is Unicode only with (?U).
-        String boundary = "(?:yz|x){0,1}xyz\\B";
+        // would search it. Java's \b reads a lead as a word character only with (?U).
+        String boundary = "(?:yz|x){0,1}xyz\\b";
         Map<String, CompiledPattern> boundaries = Map.of(
                 "Java", JavaRegexp.compile(utf8Slice("(?U)" + boundary)),
                 "Trino", TrinoRegexp.compile(utf8Slice(boundary)).re2(),
@@ -1019,10 +1021,10 @@ public class TestRequiredBytes
             assertThat(pattern.forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language).isTrue();
             assertThat(pattern.windowLiteralSearchForDiagnostics()).as(language).isNotNull();
             assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("xyz");
-            String last = "\u00E9 ";
-            int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - last.getBytes(UTF_8).length;
+            String last = "\u00D0 ";
+            int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - last.getBytes(ISO_8859_1).length;
             int finds = CompiledPattern.DFA_QUIT_STREAK_LIMIT + 2;
-            Slice input = utf8Slice(("xyz" + last).repeat(finds) + "-".repeat(tail));
+            Slice input = Slices.wrappedBuffer((("xyz" + last).repeat(finds) + "-".repeat(tail)).getBytes(ISO_8859_1));
             RegexpMatcher matcher = pattern.matcher(input);
             assertThat(spans(matcher)).as(language).hasSize(finds);
             assertThat(matcher.dfaQuitStreak()).as(language).isGreaterThanOrEqualTo(CompiledPattern.DFA_QUIT_STREAK_LIMIT);

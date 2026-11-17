@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -35,9 +36,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestJavaRegexp
 {
     // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, LF, both
-    // bytes of ², and both bytes of a combining acute accent.
+    // bytes of ², both bytes of a combining acute accent, and both bytes of ж.
     private static final List<byte[]> WORD_BOUNDARY_TEXTS = TestingEngineAgreement.shortTexts(
-            (byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81);
+            (byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81, (byte) 0xD0, (byte) 0xB6);
 
     @Test
     public void testNullInputFailures()
@@ -229,9 +230,10 @@ public class TestJavaRegexp
     public void testWordBoundariesRunOnDfaAndOnePass()
     {
         // Java's \b and \B decode the character on each side, and a nonspacing mark after a
-        // letter or digit counts as a word character. The forward and reverse DFAs evaluate them
-        // between ASCII bytes and quit next to any other byte, and OnePass evaluates them as
-        // BitState does, over text with ², a combining acute accent, and their bytes alone.
+        // letter or digit counts as a word character. The forward DFA decides them from a lead
+        // byte whose characters share one class, and otherwise from the text, as the reverse DFA
+        // does, and quits only on malformed text; OnePass evaluates them as BitState does. Both
+        // run over text with ², a combining acute accent, ж, and their bytes alone.
         Slice text = utf8Slice("x foo bar");
         JavaRegexp words = JavaRegexp.compile(utf8Slice("\\bfoo\\b"));
         assertThat(words.findInto(text, new int[2])).isTrue();
@@ -247,28 +249,38 @@ public class TestJavaRegexp
             assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
             TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), WORD_BOUNDARY_TEXTS, "Java");
         }
+
+        // Each pattern, compiled once, finds what the JDK finds beside characters outside ASCII,
+        // and its forward DFA ends the first match without quitting.
+        assertDfaFindsJdkSpans("(?U)\\b\\w+\\b", "жж жж", "a\u0301 ١ a‿b", "☃foo☃");
+        assertDfaFindsJdkSpans("\\bfoo\\b", "☃foo☃", "foo—", "жfooж");
+        assertDfaFindsJdkSpans("foo\\b", "foo☃", "fooж", "foo\u0301");
+        assertDfaFindsJdkSpans("(?U)foo\\b", "foo☃", "fooж");
+        assertDfaFindsJdkSpans("a|é\\b", "aé", "éa");
     }
 
     @Test
     public void testWordBoundaryCursorFollowsQuitStreak()
     {
         // A matcher's group-zero forward cursor runs the same DFA and follows the quit streak: each
-        // find whose cursor quits beside 中 counts once, at the limit later finds skip the cursor
-        // until a reset, and a find the cursor completes ends the streak.
+        // find whose cursor quits after a Cyrillic lead with no character counts once, at the limit
+        // later finds skip the cursor until a reset, and a find the cursor completes ends the
+        // streak. Beside 中 the DFA decides the boundary, and the streak never starts.
         JavaRegexp endsInN = JavaRegexp.compile(utf8Slice("\\b\\w+n\\b"));
-        assertQuitStreaks(endsInN, "中an ".repeat(8) + "an ".repeat(4), List.of(1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4));
-        assertQuitStreaks(endsInN, ("中an " + "an ".repeat(3)).repeat(8), IntStream.range(0, 32).mapToObj(find -> find % 4 == 0 ? 1 : 0).toList());
+        assertQuitStreaks(endsInN, "#an ".repeat(8) + "an ".repeat(4), List.of(1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4));
+        assertQuitStreaks(endsInN, ("#an " + "an ".repeat(3)).repeat(8), IntStream.range(0, 32).mapToObj(find -> find % 4 == 0 ? 1 : 0).toList());
+        assertQuitStreaks(endsInN, "中an ".repeat(8), IntStream.range(0, 8).mapToObj(_ -> 0).toList());
 
         // A cursor search that completes without a match ends the streak too.
-        RegexpMatcher matcher = endsInN.matcher(utf8Slice("中an n1 "));
+        RegexpMatcher matcher = endsInN.matcher(truncatedLeads("#an n1 "));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.dfaQuitStreak()).isEqualTo(1);
         assertThat(matcher.find()).isFalse();
         assertThat(matcher.dfaQuitStreak()).isZero();
         assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
 
-        // Where the cursor finds a match but the tagged DFA quits picking its branch beside é, the
-        // find falls back from the match start and the streak never starts.
+        // Where the cursor finds a match, the tagged DFA picks its branch beside é, and the streak
+        // never starts.
         JavaRegexp branches = JavaRegexp.compile(utf8Slice("(a)|(a\\b)"));
         assertThat(branches.taggedAlternationProgramForDiagnostics()).isNotNull();
         assertQuitStreaks(branches, "aé".repeat(6), List.of(0, 0, 0, 0, 0, 0));
@@ -309,9 +321,11 @@ public class TestJavaRegexp
         assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
     }
 
+    // Finds every match in `text`, with each # read as 0xD0, a Cyrillic lead with no character
+    // after it, which Java reads as one character that is not a word character, as the JDK reads #.
     private static void assertQuitStreaks(JavaRegexp pattern, String text, List<Integer> expectedStreaks)
     {
-        RegexpMatcher matcher = pattern.matcher(utf8Slice(text));
+        RegexpMatcher matcher = pattern.matcher(truncatedLeads(text));
         Matcher jdkMatcher = Pattern.compile(pattern.pattern().toStringUtf8()).matcher(text);
         List<Integer> streaks = new ArrayList<>();
         while (matcher.find()) {
@@ -325,6 +339,39 @@ public class TestJavaRegexp
         assertThat(jdkMatcher.find()).isFalse();
         assertThat(streaks).isEqualTo(expectedStreaks);
         assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
+    }
+
+    private static void assertDfaFindsJdkSpans(String pattern, String... texts)
+    {
+        JavaRegexp compiled = JavaRegexp.compile(utf8Slice(pattern));
+        Prog forward = compileJavaProgram(pattern, false);
+        for (String text : texts) {
+            Matcher jdkMatcher = Pattern.compile(pattern).matcher(text);
+            RegexpMatcher matcher = compiled.matcher(utf8Slice(text));
+            String description = "%s on %s".formatted(pattern, text);
+            long firstEnd = Dfa.SEARCH_NO_MATCH;
+            while (jdkMatcher.find()) {
+                assertThat(matcher.find()).as(description).isTrue();
+                assertThat(matcher.start()).as(description).isEqualTo(utf8Offset(text, jdkMatcher.start()));
+                assertThat(matcher.end()).as(description).isEqualTo(utf8Offset(text, jdkMatcher.end()));
+                if (firstEnd == Dfa.SEARCH_NO_MATCH) {
+                    firstEnd = utf8Offset(text, jdkMatcher.end());
+                }
+            }
+            assertThat(matcher.find()).as(description).isFalse();
+            assertThat(Dfa.search(forward, utf8Slice(text), false, Prog.MatchKind.FIRST_MATCH, true)).as(description).isEqualTo(firstEnd);
+        }
+    }
+
+    private static Slice truncatedLeads(String text)
+    {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        for (int index = 0; index < bytes.length; index++) {
+            if (bytes[index] == '#') {
+                bytes[index] = (byte) 0xD0;
+            }
+        }
+        return Slices.wrappedBuffer(bytes);
     }
 
     private static Prog compileJavaProgram(String pattern, boolean reversed)
