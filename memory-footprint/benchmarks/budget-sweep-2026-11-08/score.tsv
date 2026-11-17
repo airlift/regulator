@@ -1,0 +1,497 @@
+kind	case	language	mode	budget_mib	platform	base_ns	cand_ns	ratio	base_min	base_max	cand_min	cand_max	n_base	n_cand	material	flip_est
+control	captures/contiguous-letters	java	native	16	r8i	5239477	5356569	1.022	5158298	5303397	5241382	5466246	4	4	no	-
+control	captures/contiguous-letters	java	native	16	r9g	4598426	4558749	0.991	4534786	4646742	4517833	4594724	4	4	no	-
+control	captures/contiguous-letters	java	safe	16	r8i	5387191	5461183	1.014	5342514	5432566	5322575	5542133	4	4	no	flips to slower than JDK (est. 1.01x its time)
+control	captures/contiguous-letters	java	safe	16	r9g	4656588	4583601	0.984	4637374	4675964	4538905	4621089	4	4	no	-
+control	captures/contiguous-letters	re2	native	16	r8i	5367744	5341867	0.995	5285375	5507939	5262756	5442043	4	4	no	-
+control	captures/contiguous-letters	re2	native	16	r9g	4583114	4551216	0.993	4481993	4691071	4460516	4600587	4	4	no	-
+control	captures/contiguous-letters	re2	safe	16	r8i	5367801	5315394	0.990	5266846	5513619	5280415	5340159	4	4	no	-
+control	captures/contiguous-letters	re2	safe	16	r9g	4692489	4654169	0.992	4578874	4876751	4619920	4697910	4	4	no	-
+control	captures/contiguous-letters	rust	native	16	r8i	5338840	5322507	0.997	5299271	5383488	5278220	5402376	4	4	no	-
+control	captures/contiguous-letters	rust	native	16	r9g	4526889	4574633	1.011	4497919	4551341	4480494	4668633	4	4	no	-
+control	captures/contiguous-letters	rust	safe	16	r8i	5398433	5444524	1.009	5279314	5529909	5392323	5484895	4	4	no	-
+control	captures/contiguous-letters	rust	safe	16	r9g	4626755	4624225	0.999	4542535	4701557	4583740	4666386	4	4	no	-
+control	captures/contiguous-letters	trino	native	16	r8i	5371365	5322370	0.991	5299052	5436242	5289974	5415761	4	4	no	-
+control	captures/contiguous-letters	trino	native	16	r9g	4526752	4533201	1.001	4501388	4570132	4462835	4642858	4	4	no	-
+control	captures/contiguous-letters	trino	safe	16	r8i	5451663	5456764	1.001	5324787	5533340	5399638	5524787	4	4	no	-
+control	captures/contiguous-letters	trino	safe	16	r9g	4668320	4598424	0.985	4576350	4754106	4542362	4668500	4	4	no	-
+control	curated/01-literal/sherlock-en	java	native	16	r8i	22428	22426	1.000	22401	22446	22403	22459	4	4	no	-
+control	curated/01-literal/sherlock-en	java	native	16	r9g	32453	32492	1.001	32309	32508	32461	32519	4	4	no	-
+control	curated/01-literal/sherlock-en	java	safe	16	r8i	22380	22436	1.002	22339	22398	22412	22456	4	4	no	-
+control	curated/01-literal/sherlock-en	java	safe	16	r9g	32443	32477	1.001	32329	32491	32427	32558	4	4	no	-
+control	curated/01-literal/sherlock-en	re2	native	16	r8i	22442	22443	1.000	22426	22475	22388	22477	4	4	no	-
+control	curated/01-literal/sherlock-en	re2	native	16	r9g	32513	32501	1.000	32492	32528	32466	32523	4	4	no	-
+control	curated/01-literal/sherlock-en	re2	safe	16	r8i	22414	22404	1.000	22410	22421	22399	22419	4	4	no	-
+control	curated/01-literal/sherlock-en	re2	safe	16	r9g	32509	32530	1.001	32470	32546	32483	32565	4	4	no	-
+control	curated/01-literal/sherlock-en	rust	native	16	r8i	22426	22427	1.000	22384	22455	22406	22456	4	4	no	-
+control	curated/01-literal/sherlock-en	rust	native	16	r9g	32506	32360	0.996	32488	32521	32259	32509	4	4	no	-
+control	curated/01-literal/sherlock-en	rust	safe	16	r8i	22407	22421	1.001	22361	22438	22407	22439	4	4	no	-
+control	curated/01-literal/sherlock-en	rust	safe	16	r9g	32482	32529	1.001	32398	32569	32497	32576	4	4	no	-
+control	curated/01-literal/sherlock-en	trino	native	16	r8i	23466	23476	1.000	23413	23493	23439	23502	4	4	no	-
+control	curated/01-literal/sherlock-en	trino	native	16	r9g	33171	33260	1.003	33011	33268	33224	33354	4	4	no	-
+control	curated/01-literal/sherlock-en	trino	safe	16	r8i	23498	23469	0.999	23472	23514	23449	23492	4	4	no	-
+control	curated/01-literal/sherlock-en	trino	safe	16	r9g	33252	33158	0.997	33209	33301	32867	33284	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	java	native	16	r8i	180560	179107	0.992	176855	184705	175128	184543	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	java	native	16	r9g	254518	255722	1.005	254009	255001	254288	257299	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	java	safe	16	r8i	180174	177596	0.986	175695	183756	175263	183019	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	java	safe	16	r9g	254044	257114	1.012	251448	255859	253726	258832	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	re2	native	16	r8i	181050	182676	1.009	177988	183879	176247	185672	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	re2	native	16	r9g	256415	254791	0.994	253227	257570	253403	257476	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	re2	safe	16	r8i	184124	181981	0.988	182097	185062	177972	185004	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	re2	safe	16	r9g	256760	256434	0.999	253680	258539	251694	258228	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	rust	native	16	r8i	182373	183863	1.008	179081	184437	183483	184316	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	rust	native	16	r9g	257699	253569	0.984	257296	258002	251748	255315	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	rust	safe	16	r8i	182318	182778	1.003	177650	184863	182425	183124	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	rust	safe	16	r9g	257765	256938	0.997	256987	258352	253524	258797	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	trino	native	16	r8i	183256	182445	0.996	179685	185083	176400	185458	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	trino	native	16	r9g	255228	254841	0.998	254660	256093	253949	255446	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	trino	safe	16	r8i	179975	181521	1.009	175461	185620	175272	185412	4	4	no	-
+control	curated/02-literal-alternate/sherlock-ru	trino	safe	16	r9g	254356	256209	1.007	253468	255699	254596	260054	4	4	no	-
+control	curated/03-date/ascii	java	native	16	r8i	3352229	3383807	1.009	3332175	3367233	3367856	3405443	4	4	no	-
+control	curated/03-date/ascii	java	native	16	r9g	3046992	3061406	1.005	3000861	3083515	3008893	3093213	4	4	no	-
+control	curated/03-date/ascii	java	safe	16	r8i	3618395	3619092	1.000	3593936	3635019	3597830	3647278	4	4	no	-
+control	curated/03-date/ascii	java	safe	16	r9g	3173147	3161243	0.996	3101629	3294670	3149515	3175409	4	4	no	-
+control	curated/03-date/ascii	re2	native	16	r8i	3386483	3366518	0.994	3369361	3403548	3360857	3370761	4	4	no	-
+control	curated/03-date/ascii	re2	native	16	r9g	3079454	3045712	0.989	3070682	3087859	3016569	3103455	4	4	no	-
+control	curated/03-date/ascii	re2	safe	16	r8i	3625223	3604923	0.994	3609839	3638672	3591074	3615336	4	4	no	-
+control	curated/03-date/ascii	re2	safe	16	r9g	3121698	3151996	1.010	3103401	3160762	3111830	3171794	4	4	no	-
+control	curated/03-date/ascii	rust	native	16	r8i	3407008	3410563	1.001	3400039	3414213	3391983	3428276	4	4	no	-
+control	curated/03-date/ascii	rust	native	16	r9g	3087365	3077265	0.997	3033967	3117385	3044945	3113559	4	4	no	-
+control	curated/03-date/ascii	rust	safe	16	r8i	3639222	3636964	0.999	3605889	3654136	3624052	3652621	4	4	no	-
+control	curated/03-date/ascii	rust	safe	16	r9g	3159572	3167861	1.003	3110327	3182773	3136534	3189278	4	4	no	-
+control	curated/03-date/ascii	trino	native	16	r8i	233855589	234643844	1.003	233361668	234319311	234037601	235339582	4	4	no	-
+control	curated/03-date/ascii	trino	native	16	r9g	174541641	174454408	1.000	174208952	174730609	174309696	174709215	4	4	no	-
+control	curated/03-date/ascii	trino	safe	16	r8i	231720331	229421061	0.990	228045549	234038377	226950650	233980203	4	4	no	-
+control	curated/03-date/ascii	trino	safe	16	r9g	174505783	174995248	1.003	174079024	175355147	174432538	175784086	4	4	no	-
+control	curated/05-lexer-veryl/single	java	native	16	r8i	81842385	81879629	1.000	80953297	82472218	81061685	82519079	4	4	no	-
+control	curated/05-lexer-veryl/single	java	native	16	r9g	87707324	88064363	1.004	87548192	87886241	87729649	88344040	4	4	no	-
+control	curated/05-lexer-veryl/single	java	safe	16	r8i	81704121	82362588	1.008	81321861	82137042	82138316	82467894	4	4	no	-
+control	curated/05-lexer-veryl/single	java	safe	16	r9g	88336093	88429299	1.001	88040358	88716805	88148904	88793834	4	4	no	-
+control	curated/05-lexer-veryl/single	re2	native	16	r8i	5954678	5786201	0.972	5832006	6144941	5776604	5799609	4	4	no	-
+control	curated/05-lexer-veryl/single	re2	native	16	r9g	6147772	6120621	0.996	5885901	6652522	6025157	6379504	4	4	no	-
+control	curated/05-lexer-veryl/single	re2	safe	16	r8i	6129788	6123514	0.999	6000455	6264535	6032008	6244837	4	4	no	-
+control	curated/05-lexer-veryl/single	re2	safe	16	r9g	6294636	6303964	1.001	6196816	6563283	6184943	6617755	4	4	no	-
+control	curated/05-lexer-veryl/single	rust	native	16	r8i	5869680	5858033	0.998	5844310	5883901	5847594	5865605	4	4	no	-
+control	curated/05-lexer-veryl/single	rust	native	16	r9g	6039112	6058824	1.003	6026242	6063151	6050274	6067517	4	4	no	-
+control	curated/05-lexer-veryl/single	rust	safe	16	r8i	6338353	6173478	0.974	6118572	6543755	6090145	6323049	4	4	no	-
+control	curated/05-lexer-veryl/single	rust	safe	16	r9g	6464696	6532975	1.011	6211061	6807432	6223597	6859684	4	4	no	-
+control	curated/05-lexer-veryl/single	trino	native	16	r8i	76141163	76139012	1.000	75951440	76293065	75847935	76630925	4	4	no	-
+control	curated/05-lexer-veryl/single	trino	native	16	r9g	88364446	88353345	1.000	87975004	88709405	87987963	88781654	4	4	no	-
+control	curated/05-lexer-veryl/single	trino	safe	16	r8i	76516481	76390474	0.998	75967783	77116186	76271776	76548585	4	4	no	-
+control	curated/05-lexer-veryl/single	trino	safe	16	r9g	88477890	88349040	0.999	87683308	89056334	88084889	88596056	4	4	no	-
+target	curated/10-bounded-repeat/context	java	native	16	r8i	12707755	240316378	18.911	12521179	12977345	237555616	242858249	4	4	yes	flips to slower than JDK (est. 2.82x its time)
+target	curated/10-bounded-repeat/context	java	native	16	r9g	14019865	234241797	16.708	13580107	14218816	231856509	240453428	4	4	yes	flips to slower than JDK (est. 3.09x its time)
+target	curated/10-bounded-repeat/context	java	native	24	r8i	12707755	244835464	19.267	12521179	12977345	240514464	248714465	4	4	yes	flips to slower than JDK (est. 2.87x its time)
+target	curated/10-bounded-repeat/context	java	native	24	r9g	14019865	232393260	16.576	13580107	14218816	231884171	233527082	4	4	yes	flips to slower than JDK (est. 3.07x its time)
+target	curated/10-bounded-repeat/context	java	native	32	r8i	12707755	241725308	19.022	12521179	12977345	240668408	243052435	4	4	yes	flips to slower than JDK (est. 2.83x its time)
+target	curated/10-bounded-repeat/context	java	native	32	r9g	14019865	232476317	16.582	13580107	14218816	232187748	232810309	4	4	yes	flips to slower than JDK (est. 3.07x its time)
+target	curated/10-bounded-repeat/context	java	native	48	r8i	12707755	242472487	19.081	12521179	12977345	240897600	244227957	4	4	yes	flips to slower than JDK (est. 2.84x its time)
+target	curated/10-bounded-repeat/context	java	native	48	r9g	14019865	233014678	16.620	13580107	14218816	232650470	233405059	4	4	yes	flips to slower than JDK (est. 3.07x its time)
+target	curated/10-bounded-repeat/context	java	native	64	r8i	12707755	92837948	7.306	12521179	12977345	91164947	94902472	4	4	yes	flips to slower than JDK (est. 1.09x its time)
+target	curated/10-bounded-repeat/context	java	native	64	r9g	14019865	92191901	6.576	13580107	14218816	90799597	94056791	4	4	yes	flips to slower than JDK (est. 1.22x its time)
+target	curated/10-bounded-repeat/context	java	safe	16	r8i	16876137	240851367	14.272	16415936	18115109	239217924	243476933	4	4	yes	flips to slower than JDK (est. 3.31x its time)
+target	curated/10-bounded-repeat/context	java	safe	16	r9g	15577667	232490644	14.925	15145849	16416350	232303103	232812048	4	4	yes	flips to slower than JDK (est. 4.37x its time)
+target	curated/10-bounded-repeat/context	java	safe	24	r8i	16876137	243538944	14.431	16415936	18115109	241215417	247098689	4	4	yes	flips to slower than JDK (est. 3.35x its time)
+target	curated/10-bounded-repeat/context	java	safe	24	r9g	15577667	232214703	14.907	15145849	16416350	232017035	232480740	4	4	yes	flips to slower than JDK (est. 4.37x its time)
+target	curated/10-bounded-repeat/context	java	safe	32	r8i	16876137	245404366	14.542	16415936	18115109	242914356	248780972	4	4	yes	flips to slower than JDK (est. 3.37x its time)
+target	curated/10-bounded-repeat/context	java	safe	32	r9g	15577667	232245268	14.909	15145849	16416350	231932810	232525749	4	4	yes	flips to slower than JDK (est. 4.37x its time)
+target	curated/10-bounded-repeat/context	java	safe	48	r8i	16876137	244406299	14.482	16415936	18115109	240557111	246888902	4	4	yes	flips to slower than JDK (est. 3.36x its time)
+target	curated/10-bounded-repeat/context	java	safe	48	r9g	15577667	232457588	14.922	15145849	16416350	231989789	233046250	4	4	yes	flips to slower than JDK (est. 4.37x its time)
+target	curated/10-bounded-repeat/context	java	safe	64	r8i	16876137	241077978	14.285	16415936	18115109	237825605	243681265	4	4	yes	flips to slower than JDK (est. 3.31x its time)
+target	curated/10-bounded-repeat/context	java	safe	64	r9g	15577667	231006019	14.829	15145849	16416350	229417282	233032762	4	4	yes	flips to slower than JDK (est. 4.35x its time)
+target	curated/10-bounded-repeat/context	re2	native	16	r8i	11917083	243509218	20.434	11899497	11934070	237859081	249217844	4	4	yes	flips to slower than RE2/J (est. 2.72x its time)
+target	curated/10-bounded-repeat/context	re2	native	16	r9g	13194509	231834014	17.570	13054614	13342558	227105776	233729519	4	4	yes	flips to slower than RE2/J (est. 2.69x its time)
+target	curated/10-bounded-repeat/context	re2	native	24	r8i	11917083	242972418	20.389	11899497	11934070	239812894	248136119	4	4	yes	flips to slower than RE2/J (est. 2.71x its time)
+target	curated/10-bounded-repeat/context	re2	native	24	r9g	13194509	229362586	17.383	13054614	13342558	227289630	232010077	4	4	yes	flips to slower than RE2/J (est. 2.67x its time)
+target	curated/10-bounded-repeat/context	re2	native	32	r8i	11917083	244413932	20.510	11899497	11934070	241111228	251857420	4	4	yes	flips to slower than RE2/J (est. 2.73x its time)
+target	curated/10-bounded-repeat/context	re2	native	32	r9g	13194509	230947467	17.503	13054614	13342558	226432019	232604274	4	4	yes	flips to slower than RE2/J (est. 2.68x its time)
+target	curated/10-bounded-repeat/context	re2	native	48	r8i	11917083	243822892	20.460	11899497	11934070	242547162	244361583	4	4	yes	flips to slower than RE2/J (est. 2.72x its time)
+target	curated/10-bounded-repeat/context	re2	native	48	r9g	13194509	236488093	17.923	13054614	13342558	233102893	246133006	4	4	yes	flips to slower than RE2/J (est. 2.75x its time)
+target	curated/10-bounded-repeat/context	re2	native	64	r8i	11917083	20299580	1.703	11899497	11934070	18632065	24803826	4	4	yes	-
+target	curated/10-bounded-repeat/context	re2	native	64	r9g	13194509	20082488	1.522	13054614	13342558	19582722	21220029	4	4	yes	-
+target	curated/10-bounded-repeat/context	re2	safe	16	r8i	16240689	244334728	15.045	15851267	16920487	241844860	247071722	4	4	yes	flips to slower than RE2/J (est. 3.17x its time)
+target	curated/10-bounded-repeat/context	re2	safe	16	r9g	15038079	231779568	15.413	14905775	15302767	230121000	234174368	4	4	yes	flips to slower than RE2/J (est. 3.93x its time)
+target	curated/10-bounded-repeat/context	re2	safe	24	r8i	16240689	240707074	14.821	15851267	16920487	239700949	242197259	4	4	yes	flips to slower than RE2/J (est. 3.12x its time)
+target	curated/10-bounded-repeat/context	re2	safe	24	r9g	15038079	232126987	15.436	14905775	15302767	230636524	232976737	4	4	yes	flips to slower than RE2/J (est. 3.94x its time)
+target	curated/10-bounded-repeat/context	re2	safe	32	r8i	16240689	244579560	15.060	15851267	16920487	244167478	245478179	4	4	yes	flips to slower than RE2/J (est. 3.17x its time)
+target	curated/10-bounded-repeat/context	re2	safe	32	r9g	15038079	233836366	15.550	14905775	15302767	232657275	236458924	4	4	yes	flips to slower than RE2/J (est. 3.97x its time)
+target	curated/10-bounded-repeat/context	re2	safe	48	r8i	16240689	242761673	14.948	15851267	16920487	236016094	246688221	4	4	yes	flips to slower than RE2/J (est. 3.15x its time)
+target	curated/10-bounded-repeat/context	re2	safe	48	r9g	15038079	229825287	15.283	14905775	15302767	227632664	232981222	4	4	yes	flips to slower than RE2/J (est. 3.90x its time)
+target	curated/10-bounded-repeat/context	re2	safe	64	r8i	16240689	21510372	1.324	15851267	16920487	18688306	25695087	4	4	yes	-
+target	curated/10-bounded-repeat/context	re2	safe	64	r9g	15038079	20142167	1.339	14905775	15302767	19654023	21376903	4	4	yes	-
+target	curated/10-bounded-repeat/context	rust	native	16	r8i	11944301	240251212	20.114	11931094	11956790	239827888	240776974	4	4	yes	flips to slower than regex crate (est. 2.63x its time)
+target	curated/10-bounded-repeat/context	rust	native	16	r9g	13132348	232629553	17.714	12948950	13314495	232141022	233274397	4	4	yes	flips to slower than regex crate (est. 2.81x its time)
+target	curated/10-bounded-repeat/context	rust	native	24	r8i	11944301	241853353	20.248	11931094	11956790	241287601	242889441	4	4	yes	flips to slower than regex crate (est. 2.65x its time)
+target	curated/10-bounded-repeat/context	rust	native	24	r9g	13132348	233268299	17.763	12948950	13314495	231832107	234631911	4	4	yes	flips to slower than regex crate (est. 2.82x its time)
+target	curated/10-bounded-repeat/context	rust	native	32	r8i	11944301	244424310	20.464	11931094	11956790	241701476	250683217	4	4	yes	flips to slower than regex crate (est. 2.68x its time)
+target	curated/10-bounded-repeat/context	rust	native	32	r9g	13132348	230554695	17.556	12948950	13314495	226422057	232176613	4	4	yes	flips to slower than regex crate (est. 2.78x its time)
+target	curated/10-bounded-repeat/context	rust	native	48	r8i	11944301	241887541	20.251	11931094	11956790	239562995	244306139	4	4	yes	flips to slower than regex crate (est. 2.65x its time)
+target	curated/10-bounded-repeat/context	rust	native	48	r9g	13132348	229477919	17.474	12948950	13314495	226513936	231791511	4	4	yes	flips to slower than regex crate (est. 2.77x its time)
+target	curated/10-bounded-repeat/context	rust	native	64	r8i	11944301	19199767	1.607	11931094	11956790	18120799	21126540	4	4	yes	-
+target	curated/10-bounded-repeat/context	rust	native	64	r9g	13132348	19049902	1.451	12948950	13314495	18245063	19830772	4	4	yes	-
+target	curated/10-bounded-repeat/context	rust	safe	16	r8i	16058469	241503785	15.039	15882407	16531912	238368614	247785046	4	4	yes	flips to slower than regex crate (est. 3.11x its time)
+target	curated/10-bounded-repeat/context	rust	safe	16	r9g	14830839	231867620	15.634	14602439	15089240	229391196	232910624	4	4	yes	flips to slower than regex crate (est. 4.31x its time)
+target	curated/10-bounded-repeat/context	rust	safe	24	r8i	16058469	244201599	15.207	15882407	16531912	240840934	247881178	4	4	yes	flips to slower than regex crate (est. 3.15x its time)
+target	curated/10-bounded-repeat/context	rust	safe	24	r9g	14830839	233452942	15.741	14602439	15089240	232724448	234468730	4	4	yes	flips to slower than regex crate (est. 4.34x its time)
+target	curated/10-bounded-repeat/context	rust	safe	32	r8i	16058469	242084430	15.075	15882407	16531912	239147506	244485223	4	4	yes	flips to slower than regex crate (est. 3.12x its time)
+target	curated/10-bounded-repeat/context	rust	safe	32	r9g	14830839	231619319	15.617	14602439	15089240	229586630	233043144	4	4	yes	flips to slower than regex crate (est. 4.30x its time)
+target	curated/10-bounded-repeat/context	rust	safe	48	r8i	16058469	241809764	15.058	15882407	16531912	238158329	243799479	4	4	yes	flips to slower than regex crate (est. 3.12x its time)
+target	curated/10-bounded-repeat/context	rust	safe	48	r9g	14830839	229955226	15.505	14602439	15089240	227376749	232677998	4	4	yes	flips to slower than regex crate (est. 4.27x its time)
+target	curated/10-bounded-repeat/context	rust	safe	64	r8i	16058469	19646110	1.223	15882407	16531912	17994402	23383667	4	4	yes	-
+target	curated/10-bounded-repeat/context	rust	safe	64	r9g	14830839	18477385	1.246	14602439	15089240	18196712	18642050	4	4	yes	-
+target	curated/10-bounded-repeat/context	trino	native	16	r8i	12853214	244516196	19.024	12541651	13446479	239551478	247386991	4	4	yes	flips to slower than Joni (est. 1.52x its time)
+target	curated/10-bounded-repeat/context	trino	native	16	r9g	14012933	232864299	16.618	13571637	14681414	231887712	233789949	4	4	yes	flips to slower than Joni (est. 1.45x its time)
+target	curated/10-bounded-repeat/context	trino	native	24	r8i	12853214	241435824	18.784	12541651	13446479	240984701	242352337	4	4	yes	flips to slower than Joni (est. 1.50x its time)
+target	curated/10-bounded-repeat/context	trino	native	24	r9g	14012933	232321628	16.579	13571637	14681414	231525494	232917895	4	4	yes	flips to slower than Joni (est. 1.44x its time)
+target	curated/10-bounded-repeat/context	trino	native	32	r8i	12853214	241326680	18.776	12541651	13446479	239209991	245452017	4	4	yes	flips to slower than Joni (est. 1.50x its time)
+target	curated/10-bounded-repeat/context	trino	native	32	r9g	14012933	230687384	16.462	13571637	14681414	226902489	232210414	4	4	yes	flips to slower than Joni (est. 1.43x its time)
+target	curated/10-bounded-repeat/context	trino	native	48	r8i	12853214	242934184	18.901	12541651	13446479	240147504	247095914	4	4	yes	flips to slower than Joni (est. 1.51x its time)
+target	curated/10-bounded-repeat/context	trino	native	48	r9g	14012933	232661039	16.603	13571637	14681414	232163634	233181253	4	4	yes	flips to slower than Joni (est. 1.44x its time)
+target	curated/10-bounded-repeat/context	trino	native	64	r8i	12853214	95881957	7.460	12541651	13446479	92007225	103122757	4	4	yes	-
+target	curated/10-bounded-repeat/context	trino	native	64	r9g	14012933	92954348	6.633	13571637	14681414	90473409	97050638	4	4	yes	-
+target	curated/10-bounded-repeat/context	trino	safe	16	r8i	17184950	240777365	14.011	16519224	19106403	239162395	242425126	4	4	yes	flips to slower than Joni (est. 1.76x its time)
+target	curated/10-bounded-repeat/context	trino	safe	16	r9g	15646491	231903910	14.821	15157434	15993257	231630780	232326015	4	4	yes	flips to slower than Joni (est. 2.05x its time)
+target	curated/10-bounded-repeat/context	trino	safe	24	r8i	17184950	242623752	14.118	16519224	19106403	239430232	244882236	4	4	yes	flips to slower than Joni (est. 1.78x its time)
+target	curated/10-bounded-repeat/context	trino	safe	24	r9g	15646491	232447618	14.856	15157434	15993257	231510551	232944090	4	4	yes	flips to slower than Joni (est. 2.05x its time)
+target	curated/10-bounded-repeat/context	trino	safe	32	r8i	17184950	244786637	14.244	16519224	19106403	238282819	248699293	4	4	yes	flips to slower than Joni (est. 1.79x its time)
+target	curated/10-bounded-repeat/context	trino	safe	32	r9g	15646491	231159777	14.774	15157434	15993257	226970039	233192313	4	4	yes	flips to slower than Joni (est. 2.04x its time)
+target	curated/10-bounded-repeat/context	trino	safe	48	r8i	17184950	244492986	14.227	16519224	19106403	239933155	250127499	4	4	yes	flips to slower than Joni (est. 1.79x its time)
+target	curated/10-bounded-repeat/context	trino	safe	48	r9g	15646491	231327927	14.785	15157434	15993257	227370542	233781424	4	4	yes	flips to slower than Joni (est. 2.04x its time)
+target	curated/10-bounded-repeat/context	trino	safe	64	r8i	17184950	243219304	14.153	16519224	19106403	241084036	244501689	4	4	yes	flips to slower than Joni (est. 1.78x its time)
+target	curated/10-bounded-repeat/context	trino	safe	64	r9g	15646491	229476777	14.666	15157434	15993257	227233630	231619219	4	4	yes	flips to slower than Joni (est. 2.02x its time)
+control	curated/10-bounded-repeat/letters-en	java	native	16	r8i	216324	216186	0.999	216045	216566	215925	216460	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	java	native	16	r9g	199185	199359	1.001	197682	200017	198723	200139	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	java	safe	16	r8i	216464	216462	1.000	216273	216772	216332	216661	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	java	safe	16	r9g	199659	199408	0.999	199183	200622	198909	200417	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	re2	native	16	r8i	216369	216384	1.000	216042	216705	216101	216665	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	re2	native	16	r9g	199759	199565	0.999	198969	200309	198797	200265	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	re2	safe	16	r8i	216395	216220	0.999	216068	216751	215957	216490	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	re2	safe	16	r9g	199688	199503	0.999	197637	200475	198135	200734	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	rust	native	16	r8i	216300	216399	1.000	216003	216809	216088	216560	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	rust	native	16	r9g	198686	199107	1.002	197968	199471	198796	199295	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	rust	safe	16	r8i	216403	216362	1.000	216269	216544	216231	216564	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	rust	safe	16	r9g	199372	198514	0.996	198339	200895	197565	199113	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	trino	native	16	r8i	214811	214835	1.000	214621	215195	214562	215021	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	trino	native	16	r9g	188036	188029	1.000	187886	188138	187946	188126	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	trino	safe	16	r8i	214828	214779	1.000	214682	215121	214600	214942	4	4	no	-
+control	curated/10-bounded-repeat/letters-en	trino	safe	16	r9g	188033	188023	1.000	187917	188179	187968	188126	4	4	no	-
+target	curated/12-dictionary/single	java	native	8	r8i	155825	597034	3.831	155274	156225	595719	597917	4	4	yes	-
+target	curated/12-dictionary/single	java	native	8	r9g	150865	317949	2.108	140972	154320	298218	363370	4	4	yes	-
+target	curated/12-dictionary/single	java	native	16	r8i	155825	155355	0.997	155274	156225	154904	155793	4	4	no	-
+target	curated/12-dictionary/single	java	native	16	r9g	150865	150369	0.997	140972	154320	146356	157677	4	4	no	-
+target	curated/12-dictionary/single	java	native	24	r8i	155825	155023	0.995	155274	156225	154806	155409	4	4	no	-
+target	curated/12-dictionary/single	java	native	24	r9g	150865	150506	0.998	140972	154320	145409	154541	4	4	no	-
+target	curated/12-dictionary/single	java	safe	8	r8i	155699	597715	3.839	154917	156298	597096	598296	4	4	yes	-
+target	curated/12-dictionary/single	java	safe	8	r9g	151122	303503	2.008	144895	155479	298472	306546	4	4	yes	-
+target	curated/12-dictionary/single	java	safe	16	r8i	155699	155032	0.996	154917	156298	154926	155147	4	4	no	-
+target	curated/12-dictionary/single	java	safe	16	r9g	151122	151505	1.003	144895	155479	148371	155328	4	4	no	-
+target	curated/12-dictionary/single	java	safe	24	r8i	155699	154967	0.995	154917	156298	154491	155315	4	4	no	-
+target	curated/12-dictionary/single	java	safe	24	r9g	151122	147545	0.976	144895	155479	139758	152778	4	4	no	-
+target	curated/12-dictionary/single	re2	native	8	r8i	155230	599382	3.861	154385	156325	595164	603958	4	4	yes	-
+target	curated/12-dictionary/single	re2	native	8	r9g	150628	293377	1.948	148194	155326	265974	320070	4	4	yes	-
+target	curated/12-dictionary/single	re2	native	16	r8i	155230	155588	1.002	154385	156325	155351	155830	4	4	no	-
+target	curated/12-dictionary/single	re2	native	16	r9g	150628	154139	1.023	148194	155326	152578	156113	4	4	no	-
+target	curated/12-dictionary/single	re2	native	24	r8i	155230	155662	1.003	154385	156325	155121	156242	4	4	no	-
+target	curated/12-dictionary/single	re2	native	24	r9g	150628	145828	0.968	148194	155326	138324	149378	4	4	no	-
+target	curated/12-dictionary/single	re2	safe	8	r8i	155044	598189	3.858	154605	155396	590174	604145	4	4	yes	-
+target	curated/12-dictionary/single	re2	safe	8	r9g	151484	296846	1.960	138735	157561	267016	322099	4	4	yes	-
+target	curated/12-dictionary/single	re2	safe	16	r8i	155044	155182	1.001	154605	155396	154934	155367	4	4	no	-
+target	curated/12-dictionary/single	re2	safe	16	r9g	151484	148674	0.981	138735	157561	148166	149624	4	4	no	-
+target	curated/12-dictionary/single	re2	safe	24	r8i	155044	155328	1.002	154605	155396	154850	155825	4	4	no	-
+target	curated/12-dictionary/single	re2	safe	24	r9g	151484	152443	1.006	138735	157561	147604	157232	4	4	no	-
+target	curated/12-dictionary/single	rust	native	8	r8i	156349	596001	3.812	154266	159998	590828	602821	4	4	yes	-
+target	curated/12-dictionary/single	rust	native	8	r9g	153031	338471	2.212	147452	155556	305084	383287	4	4	yes	-
+target	curated/12-dictionary/single	rust	native	16	r8i	156349	159405	1.020	154266	159998	156232	162222	4	4	no	-
+target	curated/12-dictionary/single	rust	native	16	r9g	153031	150356	0.983	147452	155556	146346	157644	4	4	no	-
+target	curated/12-dictionary/single	rust	native	24	r8i	156349	158193	1.012	154266	159998	154260	160898	4	4	no	-
+target	curated/12-dictionary/single	rust	native	24	r9g	153031	152043	0.994	147452	155556	148333	156897	4	4	no	-
+target	curated/12-dictionary/single	rust	safe	8	r8i	155932	596230	3.824	154112	159810	592005	598484	4	4	yes	-
+target	curated/12-dictionary/single	rust	safe	8	r9g	152464	304797	1.999	148466	155200	303488	306711	4	4	yes	-
+target	curated/12-dictionary/single	rust	safe	16	r8i	155932	158689	1.018	154112	159810	155320	161831	4	4	no	-
+target	curated/12-dictionary/single	rust	safe	16	r9g	152464	152394	1.000	148466	155200	148355	156069	4	4	no	-
+target	curated/12-dictionary/single	rust	safe	24	r8i	155932	156023	1.001	154112	159810	154281	160293	4	4	no	-
+target	curated/12-dictionary/single	rust	safe	24	r9g	152464	152195	0.998	148466	155200	145618	155798	4	4	no	-
+target	curated/12-dictionary/single	trino	native	8	r8i	573194	572947	1.000	567864	577887	570214	579208	4	4	no	-
+target	curated/12-dictionary/single	trino	native	8	r9g	281660	273141	0.970	277347	287916	266320	277154	4	4	yes	-
+target	curated/12-dictionary/single	trino	native	16	r8i	573194	575294	1.004	567864	577887	571791	577261	4	4	no	-
+target	curated/12-dictionary/single	trino	native	16	r9g	281660	274829	0.976	277347	287916	265164	280571	4	4	no	-
+target	curated/12-dictionary/single	trino	native	24	r8i	573194	573511	1.001	567864	577887	570123	577449	4	4	no	-
+target	curated/12-dictionary/single	trino	native	24	r9g	281660	280244	0.995	277347	287916	270370	288268	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	8	r8i	574421	576408	1.003	571255	578083	570823	579374	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	8	r9g	276215	275591	0.998	268713	282129	274431	277620	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	16	r8i	574421	576674	1.004	571255	578083	575530	577994	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	16	r9g	276215	282219	1.022	268713	282129	276448	289400	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	24	r8i	574421	571433	0.995	571255	578083	566957	576720	4	4	no	-
+target	curated/12-dictionary/single	trino	safe	24	r9g	276215	279315	1.011	268713	282129	275219	285806	4	4	no	-
+target	dictionary/search/english-10	java	native	48	r8i	657609	658617	1.002	652893	659770	656900	660741	4	4	no	-
+target	dictionary/search/english-10	java	native	48	r9g	415317	419170	1.009	395298	423022	416857	421941	4	4	no	-
+target	dictionary/search/english-10	java	native	64	r8i	657609	672836	1.023	652893	659770	658604	690200	4	4	no	-
+target	dictionary/search/english-10	java	native	64	r9g	415317	422331	1.017	395298	423022	417514	426526	4	4	no	-
+target	dictionary/search/english-10	java	safe	48	r8i	659651	671580	1.018	657975	661195	655237	692562	4	4	no	-
+target	dictionary/search/english-10	java	safe	48	r9g	424901	421777	0.993	421950	431703	419602	423235	4	4	no	-
+target	dictionary/search/english-10	java	safe	64	r8i	659651	677659	1.027	657975	661195	657669	692482	4	4	no	-
+target	dictionary/search/english-10	java	safe	64	r9g	424901	404847	0.953	421950	431703	396822	422519	4	4	no	-
+target	dictionary/search/english-10	re2	native	48	r8i	663195	664194	1.002	654326	679125	652350	691489	4	4	no	-
+target	dictionary/search/english-10	re2	native	48	r9g	420118	408913	0.973	417687	424932	396277	422407	4	4	no	-
+target	dictionary/search/english-10	re2	native	64	r8i	663195	658659	0.993	654326	679125	652182	662039	4	4	no	-
+target	dictionary/search/english-10	re2	native	64	r9g	420118	421033	1.002	417687	424932	418945	423248	4	4	no	-
+target	dictionary/search/english-10	re2	safe	48	r8i	657865	656126	0.997	653791	661901	647790	659282	4	4	no	-
+target	dictionary/search/english-10	re2	safe	48	r9g	412371	418330	1.014	394536	430102	416054	422951	4	4	no	-
+target	dictionary/search/english-10	re2	safe	64	r8i	657865	669673	1.018	653791	661901	655057	691109	4	4	no	-
+target	dictionary/search/english-10	re2	safe	64	r9g	412371	411563	0.998	394536	430102	395700	419070	4	4	no	-
+target	dictionary/search/english-10	rust	native	48	r8i	653385	658469	1.008	647283	658952	657316	660778	4	4	no	-
+target	dictionary/search/english-10	rust	native	48	r9g	422646	412883	0.977	419262	427319	394959	423152	4	4	no	-
+target	dictionary/search/english-10	rust	native	64	r8i	653385	665461	1.018	647283	658952	658409	682664	4	4	no	-
+target	dictionary/search/english-10	rust	native	64	r9g	422646	424202	1.004	419262	427319	420607	428323	4	4	no	-
+target	dictionary/search/english-10	rust	safe	48	r8i	657088	664240	1.011	653008	659490	655392	684220	4	4	no	-
+target	dictionary/search/english-10	rust	safe	48	r9g	414925	420345	1.013	411526	421344	415762	426469	4	4	no	-
+target	dictionary/search/english-10	rust	safe	64	r8i	657088	656628	0.999	653008	659490	653555	659868	4	4	no	-
+target	dictionary/search/english-10	rust	safe	64	r9g	414925	424078	1.022	411526	421344	418072	430529	4	4	no	-
+target	dictionary/search/english-10	trino	native	48	r8i	660526	664328	1.006	654131	668447	660326	669937	4	4	no	-
+target	dictionary/search/english-10	trino	native	48	r9g	439525	437988	0.997	422434	459310	433746	444266	4	4	no	-
+target	dictionary/search/english-10	trino	native	64	r8i	660526	663288	1.004	654131	668447	656504	669103	4	4	no	-
+target	dictionary/search/english-10	trino	native	64	r9g	439525	437552	0.996	422434	459310	417208	460847	4	4	no	-
+target	dictionary/search/english-10	trino	safe	48	r8i	665244	664551	0.999	661534	669664	660614	666582	4	4	no	-
+target	dictionary/search/english-10	trino	safe	48	r9g	416902	435823	1.045	392727	442038	427886	438822	4	4	no	-
+target	dictionary/search/english-10	trino	safe	64	r8i	665244	666219	1.001	661534	669664	661154	670791	4	4	no	-
+target	dictionary/search/english-10	trino	safe	64	r9g	416902	433564	1.040	392727	442038	388131	464572	4	4	no	-
+target	dictionary/search/english-15	java	native	8	r8i	571259	710261	1.243	570849	571563	694903	720129	4	4	yes	-
+target	dictionary/search/english-15	java	native	8	r9g	281014	417934	1.487	276517	286726	409028	427097	4	4	yes	-
+target	dictionary/search/english-15	java	native	16	r8i	571259	705559	1.235	570849	571563	703052	710083	4	4	yes	-
+target	dictionary/search/english-15	java	native	16	r9g	281014	417301	1.485	276517	286726	409633	427939	4	4	yes	-
+target	dictionary/search/english-15	java	native	24	r8i	571259	576320	1.009	570849	571563	573006	578318	4	4	no	-
+target	dictionary/search/english-15	java	native	24	r9g	281014	282287	1.005	276517	286726	277191	289421	4	4	no	-
+target	dictionary/search/english-15	java	safe	8	r8i	575113	705789	1.227	573064	576805	697183	719811	4	4	yes	-
+target	dictionary/search/english-15	java	safe	8	r9g	280857	420214	1.496	276415	289003	411630	428586	4	4	yes	-
+target	dictionary/search/english-15	java	safe	16	r8i	575113	706358	1.228	573064	576805	698775	714693	4	4	yes	-
+target	dictionary/search/english-15	java	safe	16	r9g	280857	416783	1.484	276415	289003	413700	418697	4	4	yes	-
+target	dictionary/search/english-15	java	safe	24	r8i	575113	571547	0.994	573064	576805	569441	577010	4	4	no	-
+target	dictionary/search/english-15	java	safe	24	r9g	280857	283891	1.011	276415	289003	276900	289110	4	4	no	-
+target	dictionary/search/english-15	re2	native	8	r8i	574462	707301	1.231	571598	577338	697953	727634	4	4	yes	-
+target	dictionary/search/english-15	re2	native	8	r9g	277018	423108	1.527	274671	280381	414656	427945	4	4	yes	-
+target	dictionary/search/english-15	re2	native	16	r8i	574462	704979	1.227	571598	577338	694329	715532	4	4	yes	-
+target	dictionary/search/english-15	re2	native	16	r9g	277018	420355	1.517	274671	280381	411708	429700	4	4	yes	-
+target	dictionary/search/english-15	re2	native	24	r8i	574462	574709	1.000	571598	577338	569497	578897	4	4	no	-
+target	dictionary/search/english-15	re2	native	24	r9g	277018	279166	1.008	274671	280381	269464	290160	4	4	no	-
+target	dictionary/search/english-15	re2	safe	8	r8i	571100	720190	1.261	568085	575993	713381	723528	4	4	yes	-
+target	dictionary/search/english-15	re2	safe	8	r9g	279872	419639	1.499	275996	282628	413711	423911	4	4	yes	-
+target	dictionary/search/english-15	re2	safe	16	r8i	571100	707481	1.239	568085	575993	697525	717921	4	4	yes	-
+target	dictionary/search/english-15	re2	safe	16	r9g	279872	421902	1.507	275996	282628	413618	430204	4	4	yes	-
+target	dictionary/search/english-15	re2	safe	24	r8i	571100	574375	1.006	568085	575993	571990	577745	4	4	no	-
+target	dictionary/search/english-15	re2	safe	24	r9g	279872	284734	1.017	275996	282628	277548	289056	4	4	no	-
+target	dictionary/search/english-15	rust	native	8	r8i	571831	702041	1.228	569086	575175	700196	705036	4	4	yes	-
+target	dictionary/search/english-15	rust	native	8	r9g	277652	419414	1.511	275743	281383	414382	429627	4	4	yes	-
+target	dictionary/search/english-15	rust	native	16	r8i	571831	701731	1.227	569086	575175	699660	703508	4	4	yes	-
+target	dictionary/search/english-15	rust	native	16	r9g	277652	417495	1.504	275743	281383	414587	422823	4	4	yes	-
+target	dictionary/search/english-15	rust	native	24	r8i	571831	583066	1.020	569086	575175	570601	612211	4	4	no	-
+target	dictionary/search/english-15	rust	native	24	r9g	277652	277151	0.998	275743	281383	269720	281900	4	4	no	-
+target	dictionary/search/english-15	rust	safe	8	r8i	580463	704287	1.213	570213	608727	694342	724822	4	4	yes	-
+target	dictionary/search/english-15	rust	safe	8	r9g	278150	421795	1.516	275041	281059	416302	425230	4	4	yes	-
+target	dictionary/search/english-15	rust	safe	16	r8i	580463	710511	1.224	570213	608727	693203	727945	4	4	yes	-
+target	dictionary/search/english-15	rust	safe	16	r9g	278150	419126	1.507	275041	281059	412960	428317	4	4	yes	-
+target	dictionary/search/english-15	rust	safe	24	r8i	580463	574437	0.990	570213	608727	571187	577051	4	4	no	-
+target	dictionary/search/english-15	rust	safe	24	r9g	278150	276934	0.996	275041	281059	273811	283272	4	4	no	-
+target	dictionary/search/english-15	trino	native	8	r8i	575446	574674	0.999	571783	577772	571192	578251	4	4	no	-
+target	dictionary/search/english-15	trino	native	8	r9g	280390	279323	0.996	274307	290494	277676	282192	4	4	no	-
+target	dictionary/search/english-15	trino	native	16	r8i	575446	572629	0.995	571783	577772	570411	578106	4	4	no	-
+target	dictionary/search/english-15	trino	native	16	r9g	280390	281342	1.003	274307	290494	277162	286271	4	4	no	-
+target	dictionary/search/english-15	trino	native	24	r8i	575446	574025	0.998	571783	577772	570825	576905	4	4	no	-
+target	dictionary/search/english-15	trino	native	24	r9g	280390	276905	0.988	274307	290494	276084	277736	4	4	no	-
+target	dictionary/search/english-15	trino	safe	8	r8i	571848	572108	1.000	569643	577438	570796	573934	4	4	no	-
+target	dictionary/search/english-15	trino	safe	8	r9g	275801	270007	0.979	265754	282112	262696	274491	4	4	no	-
+target	dictionary/search/english-15	trino	safe	16	r8i	571848	574019	1.004	569643	577438	570532	576859	4	4	no	-
+target	dictionary/search/english-15	trino	safe	16	r9g	275801	274619	0.996	265754	282112	267957	279387	4	4	no	-
+target	dictionary/search/english-15	trino	safe	24	r8i	571848	575675	1.007	569643	577438	571539	577842	4	4	no	-
+target	dictionary/search/english-15	trino	safe	24	r9g	275801	277591	1.006	265754	282112	276702	279125	4	4	no	-
+control	imported/lh3lh3-reb/email	java	native	16	r8i	21564735	21424654	0.994	20669542	22510093	20708240	22125658	4	4	no	-
+control	imported/lh3lh3-reb/email	java	native	16	r9g	16383513	16376039	1.000	16310463	16458945	16330786	16428113	4	4	no	-
+control	imported/lh3lh3-reb/email	java	safe	16	r8i	21915394	21124251	0.964	20919544	22586068	20447689	22061433	4	4	no	-
+control	imported/lh3lh3-reb/email	java	safe	16	r9g	16531720	16525089	1.000	16505691	16574451	16461676	16644987	4	4	no	-
+control	imported/lh3lh3-reb/email	re2	native	16	r8i	21605612	21472962	0.994	20725576	22501410	20708271	22447173	4	4	no	-
+control	imported/lh3lh3-reb/email	re2	native	16	r9g	16368471	16396261	1.002	16328926	16405351	16310962	16571276	4	4	no	-
+control	imported/lh3lh3-reb/email	re2	safe	16	r8i	21876228	21577085	0.986	21112878	23442631	20874523	22490387	4	4	no	-
+control	imported/lh3lh3-reb/email	re2	safe	16	r9g	16495384	16553934	1.004	16463290	16540022	16493939	16662259	4	4	no	-
+control	imported/lh3lh3-reb/email	rust	native	16	r8i	21123847	21196001	1.003	20705143	21621364	20620422	22189836	4	4	no	-
+control	imported/lh3lh3-reb/email	rust	native	16	r9g	16484332	16500546	1.001	16442188	16515190	16469896	16540025	4	4	no	-
+control	imported/lh3lh3-reb/email	rust	safe	16	r8i	21515737	21755905	1.011	21011925	22493302	21005055	22932178	4	4	no	-
+control	imported/lh3lh3-reb/email	rust	safe	16	r9g	16650565	16634473	0.999	16639872	16666193	16618456	16661994	4	4	no	-
+control	imported/lh3lh3-reb/email	trino	native	16	r8i	21478103	21430616	0.998	20700634	22333002	20881493	22294864	4	4	no	-
+control	imported/lh3lh3-reb/email	trino	native	16	r9g	16590713	16597621	1.000	16526636	16653607	16569976	16619936	4	4	no	-
+control	imported/lh3lh3-reb/email	trino	safe	16	r8i	21627184	21698660	1.003	20758186	23211942	20939159	22760254	4	4	no	-
+control	imported/lh3lh3-reb/email	trino	safe	16	r9g	16706699	16735214	1.002	16669110	16726544	16699201	16779588	4	4	no	-
+control	unicode/codepoints/letters-one	java	native	16	r8i	6057822	6073813	1.003	5953720	6288222	5975414	6285938	4	4	no	-
+control	unicode/codepoints/letters-one	java	native	16	r9g	6134804	6149279	1.002	6095021	6163056	6115825	6218309	4	4	no	-
+control	unicode/codepoints/letters-one	java	safe	16	r8i	6085112	6090043	1.001	5976615	6290716	5991523	6286036	4	4	no	-
+control	unicode/codepoints/letters-one	java	safe	16	r9g	6095139	6113362	1.003	5839160	6235971	6049967	6137563	4	4	no	-
+control	unicode/codepoints/letters-one	re2	native	16	r8i	6122303	6068798	0.991	5984685	6296348	5966359	6164525	4	4	no	-
+control	unicode/codepoints/letters-one	re2	native	16	r9g	6138256	6027319	0.982	6125526	6154855	5815172	6143216	4	4	no	-
+control	unicode/codepoints/letters-one	re2	safe	16	r8i	6100349	6030332	0.989	5967112	6307181	5973503	6170104	4	4	no	-
+control	unicode/codepoints/letters-one	re2	safe	16	r9g	5997887	5990902	0.999	5849746	6120222	5843815	6160767	4	4	no	-
+control	unicode/codepoints/letters-one	rust	native	16	r8i	5989667	5999570	1.002	5965206	6015425	5975217	6011797	4	4	no	-
+control	unicode/codepoints/letters-one	rust	native	16	r9g	6142913	6104520	0.994	6082807	6182959	6081462	6155140	4	4	no	-
+control	unicode/codepoints/letters-one	rust	safe	16	r8i	5986179	5997899	1.002	5962502	6011076	5980845	6011056	4	4	no	-
+control	unicode/codepoints/letters-one	rust	safe	16	r9g	6088650	6127926	1.006	6071469	6121706	6075025	6172737	4	4	no	-
+control	unicode/codepoints/letters-one	trino	native	16	r8i	5982561	6120129	1.023	5861437	6287560	5878047	6295340	4	4	no	-
+control	unicode/codepoints/letters-one	trino	native	16	r9g	6156186	6147968	0.999	6125205	6195872	6138842	6159890	4	4	no	-
+control	unicode/codepoints/letters-one	trino	safe	16	r8i	6027777	6026171	1.000	5965988	6177740	5955686	6163432	4	4	no	-
+control	unicode/codepoints/letters-one	trino	safe	16	r9g	6148275	6138598	0.998	6125974	6168849	6122248	6164105	4	4	no	-
+control	unicode/overlapping-words/ascii	java	native	16	r8i	1659662	1678994	1.012	1650364	1684463	1657885	1696754	4	4	no	-
+control	unicode/overlapping-words/ascii	java	native	16	r9g	1172970	1162959	0.991	1161533	1188968	1155242	1176414	4	4	no	-
+control	unicode/overlapping-words/ascii	java	safe	16	r8i	1685971	1691846	1.003	1679980	1691174	1678405	1707223	4	4	no	-
+control	unicode/overlapping-words/ascii	java	safe	16	r9g	1183667	1195209	1.010	1177227	1190504	1184433	1213412	4	4	no	-
+control	unicode/overlapping-words/ascii	re2	native	16	r8i	1670853	1677777	1.004	1666869	1673224	1661348	1700237	4	4	no	-
+control	unicode/overlapping-words/ascii	re2	native	16	r9g	1158836	1163758	1.004	1155204	1161679	1156009	1178439	4	4	no	-
+control	unicode/overlapping-words/ascii	re2	safe	16	r8i	1656012	1654220	0.999	1549743	1697451	1524443	1704762	4	4	no	-
+control	unicode/overlapping-words/ascii	re2	safe	16	r9g	1185488	1191255	1.005	1176544	1208225	1178120	1214872	4	4	no	-
+control	unicode/overlapping-words/ascii	rust	native	16	r8i	1662545	1615673	0.972	1653738	1675000	1494130	1665247	4	4	no	-
+control	unicode/overlapping-words/ascii	rust	native	16	r9g	1157647	1161095	1.003	1153363	1164063	1157363	1163562	4	4	no	-
+control	unicode/overlapping-words/ascii	rust	safe	16	r8i	1690117	1689255	0.999	1679026	1699164	1672221	1702703	4	4	no	-
+control	unicode/overlapping-words/ascii	rust	safe	16	r9g	1186507	1186477	1.000	1181659	1194173	1182122	1188974	4	4	no	-
+control	unicode/overlapping-words/ascii	trino	native	16	r8i	1787013	1785756	0.999	1777009	1807538	1780087	1791364	4	4	no	-
+control	unicode/overlapping-words/ascii	trino	native	16	r9g	1375084	1382055	1.005	1370546	1378767	1374227	1390437	4	4	no	-
+control	unicode/overlapping-words/ascii	trino	safe	16	r8i	1806381	1802192	0.998	1688302	1848184	1683952	1854427	4	4	no	-
+control	unicode/overlapping-words/ascii	trino	safe	16	r9g	1440883	1450990	1.007	1432077	1448224	1446721	1460885	4	4	no	-
+target	unicode/overlapping-words/english	java	native	32	r8i	388471	80645229	207.597	379173	397229	80297760	81333511	4	4	yes	flips to slower than JDK (est. 26.82x its time)
+target	unicode/overlapping-words/english	java	native	32	r9g	360108	71774547	199.314	350790	366761	70692043	72601334	4	4	yes	flips to slower than JDK (est. 22.74x its time)
+target	unicode/overlapping-words/english	java	native	48	r8i	388471	55576191	143.064	379173	397229	55120864	55790219	4	4	yes	flips to slower than JDK (est. 18.48x its time)
+target	unicode/overlapping-words/english	java	native	48	r9g	360108	48164608	133.751	350790	366761	48092402	48227565	4	4	yes	flips to slower than JDK (est. 15.26x its time)
+target	unicode/overlapping-words/english	java	safe	32	r8i	420345	81372567	193.585	412579	433185	80513712	82222870	4	4	yes	flips to slower than JDK (est. 34.22x its time)
+target	unicode/overlapping-words/english	java	safe	32	r9g	366728	71164825	194.054	361984	371772	70618698	71751240	4	4	yes	flips to slower than JDK (est. 29.50x its time)
+target	unicode/overlapping-words/english	java	safe	48	r8i	420345	55921883	133.038	412579	433185	55029617	56618637	4	4	yes	flips to slower than JDK (est. 23.52x its time)
+target	unicode/overlapping-words/english	java	safe	48	r9g	366728	48259830	131.596	361984	371772	47909858	48496452	4	4	yes	flips to slower than JDK (est. 20.00x its time)
+target	unicode/overlapping-words/english	re2	native	32	r8i	382127	81346697	212.879	380122	386816	80545404	82252428	4	4	yes	flips to slower than RE2/J (est. 1.34x its time)
+target	unicode/overlapping-words/english	re2	native	32	r9g	357228	71220301	199.369	351886	360560	70724132	72544656	4	4	yes	flips to slower than RE2/J (est. 1.31x its time)
+target	unicode/overlapping-words/english	re2	native	48	r8i	382127	55935274	146.379	380122	386816	55738438	56312255	4	4	yes	-
+target	unicode/overlapping-words/english	re2	native	48	r9g	357228	48720925	136.386	351886	360560	47770040	49341385	4	4	yes	-
+target	unicode/overlapping-words/english	re2	safe	32	r8i	414252	80408350	194.105	406624	419923	80296825	80651202	4	4	yes	flips to slower than RE2/J (est. 1.68x its time)
+target	unicode/overlapping-words/english	re2	safe	32	r9g	363161	71619496	197.212	358609	370089	71244501	71997815	4	4	yes	flips to slower than RE2/J (est. 1.73x its time)
+target	unicode/overlapping-words/english	re2	safe	48	r8i	414252	56135295	135.510	406624	419923	55740574	57045671	4	4	yes	flips to slower than RE2/J (est. 1.17x its time)
+target	unicode/overlapping-words/english	re2	safe	48	r9g	363161	49284887	135.711	358609	370089	47865902	51458756	4	4	yes	flips to slower than RE2/J (est. 1.19x its time)
+target	unicode/overlapping-words/english	rust	native	32	r8i	386830	80778442	208.822	383883	389505	80345998	81392564	4	4	yes	flips to slower than regex crate (est. 8.14x its time)
+target	unicode/overlapping-words/english	rust	native	32	r9g	361549	71904659	198.880	359548	365887	71127815	73005578	4	4	yes	flips to slower than regex crate (est. 10.70x its time)
+target	unicode/overlapping-words/english	rust	native	48	r8i	386830	55917604	144.553	383883	389505	55593922	56191405	4	4	yes	flips to slower than regex crate (est. 5.63x its time)
+target	unicode/overlapping-words/english	rust	native	48	r9g	361549	48354015	133.741	359548	365887	47974480	49240242	4	4	yes	flips to slower than regex crate (est. 7.20x its time)
+target	unicode/overlapping-words/english	rust	safe	32	r8i	422350	81081165	191.976	416231	425743	80480761	81711217	4	4	yes	flips to slower than regex crate (est. 10.16x its time)
+target	unicode/overlapping-words/english	rust	safe	32	r9g	369024	71808875	194.592	364328	373443	71286017	72614380	4	4	yes	flips to slower than regex crate (est. 14.00x its time)
+target	unicode/overlapping-words/english	rust	safe	48	r8i	422350	56030100	132.663	416231	425743	55759550	56354630	4	4	yes	flips to slower than regex crate (est. 7.02x its time)
+target	unicode/overlapping-words/english	rust	safe	48	r9g	369024	48407801	131.178	364328	373443	48122394	48891016	4	4	yes	flips to slower than regex crate (est. 9.44x its time)
+target	unicode/overlapping-words/english	trino	native	32	r8i	430150	722850847	1680.462	422148	434553	712935036	730021681	4	4	yes	flips to slower than Joni (est. 51.28x its time)
+target	unicode/overlapping-words/english	trino	native	32	r9g	427979	202739405	473.713	419719	436548	178999341	219032449	4	4	yes	flips to slower than Joni (est. 10.00x its time)
+target	unicode/overlapping-words/english	trino	native	48	r8i	430150	541355983	1258.528	422148	434553	532628448	547150126	4	4	yes	flips to slower than Joni (est. 38.41x its time)
+target	unicode/overlapping-words/english	trino	native	48	r9g	427979	144712456	338.130	419719	436548	130678647	163280694	4	4	yes	flips to slower than Joni (est. 7.14x its time)
+target	unicode/overlapping-words/english	trino	safe	32	r8i	462507	721947886	1560.944	454882	473021	713462087	727161667	4	4	yes	flips to slower than Joni (est. 62.81x its time)
+target	unicode/overlapping-words/english	trino	safe	32	r9g	433912	197866584	456.006	430389	437253	179251474	210438823	4	4	yes	flips to slower than Joni (est. 13.44x its time)
+target	unicode/overlapping-words/english	trino	safe	48	r8i	462507	541399523	1170.575	454882	473021	532074500	549177944	4	4	yes	flips to slower than Joni (est. 47.10x its time)
+target	unicode/overlapping-words/english	trino	safe	48	r9g	433912	145536752	335.406	430389	437253	132273334	159815209	4	4	yes	flips to slower than Joni (est. 9.89x its time)
+target	unicode/overlapping-words/russian	java	native	32	r8i	476333	92238677	193.643	473303	482977	90118599	96044155	4	4	yes	flips to slower than JDK (est. 60.17x its time)
+target	unicode/overlapping-words/russian	java	native	32	r9g	448830	79470700	177.062	444134	457007	79062588	80312801	4	4	yes	flips to slower than JDK (est. 43.11x its time)
+target	unicode/overlapping-words/russian	java	native	48	r8i	476333	83900966	176.139	473303	482977	83221896	84903422	4	4	yes	flips to slower than JDK (est. 54.74x its time)
+target	unicode/overlapping-words/russian	java	native	48	r9g	448830	73270323	163.247	444134	457007	72498868	74061693	4	4	yes	flips to slower than JDK (est. 39.74x its time)
+target	unicode/overlapping-words/russian	java	safe	32	r8i	531629	92204500	173.438	523810	545991	90598106	94474285	4	4	yes	flips to slower than JDK (est. 82.08x its time)
+target	unicode/overlapping-words/russian	java	safe	32	r9g	460134	80355454	174.635	456023	467323	78632752	84479331	4	4	yes	flips to slower than JDK (est. 63.62x its time)
+target	unicode/overlapping-words/russian	java	safe	48	r8i	531629	84151245	158.289	523810	545991	83409927	85042246	4	4	yes	flips to slower than JDK (est. 74.91x its time)
+target	unicode/overlapping-words/russian	java	safe	48	r9g	460134	73322798	159.351	456023	467323	72526113	74577202	4	4	yes	flips to slower than JDK (est. 58.05x its time)
+target	unicode/overlapping-words/russian	re2	native	32	r8i	472130	90410829	191.496	466380	476566	88603259	91693274	4	4	yes	flips to slower than RE2/J (est. 1.36x its time)
+target	unicode/overlapping-words/russian	re2	native	32	r9g	449629	79734693	177.335	448240	453503	79473443	80084935	4	4	yes	flips to slower than RE2/J (est. 1.28x its time)
+target	unicode/overlapping-words/russian	re2	native	48	r8i	472130	84056202	178.036	466380	476566	83267664	85340100	4	4	yes	flips to slower than RE2/J (est. 1.26x its time)
+target	unicode/overlapping-words/russian	re2	native	48	r9g	449629	73721292	163.960	448240	453503	72569935	74515847	4	4	yes	flips to slower than RE2/J (est. 1.19x its time)
+target	unicode/overlapping-words/russian	re2	safe	32	r8i	515999	94292646	182.738	512826	523791	91199957	98559345	4	4	yes	flips to slower than RE2/J (est. 1.96x its time)
+target	unicode/overlapping-words/russian	re2	safe	32	r9g	461333	79933390	173.266	458559	466688	78443734	82189341	4	4	yes	flips to slower than RE2/J (est. 1.90x its time)
+target	unicode/overlapping-words/russian	re2	safe	48	r8i	515999	84769765	164.283	512826	523791	83509074	87578377	4	4	yes	flips to slower than RE2/J (est. 1.77x its time)
+target	unicode/overlapping-words/russian	re2	safe	48	r9g	461333	73184745	158.637	458559	466688	72619787	74797806	4	4	yes	flips to slower than RE2/J (est. 1.74x its time)
+target	unicode/overlapping-words/russian	rust	native	32	r8i	483954	92472030	191.076	474133	495736	91173703	93808159	4	4	yes	flips to slower than regex crate (est. 8.43x its time)
+target	unicode/overlapping-words/russian	rust	native	32	r9g	449837	79524530	176.785	447056	453866	79341638	79658432	4	4	yes	flips to slower than regex crate (est. 9.89x its time)
+target	unicode/overlapping-words/russian	rust	native	48	r8i	483954	83835559	173.230	474133	495736	83565046	84192728	4	4	yes	flips to slower than regex crate (est. 7.65x its time)
+target	unicode/overlapping-words/russian	rust	native	48	r9g	449837	73183733	162.689	447056	453866	72627846	73931700	4	4	yes	flips to slower than regex crate (est. 9.10x its time)
+target	unicode/overlapping-words/russian	rust	safe	32	r8i	528722	91804770	173.635	514198	550360	90804850	93755021	4	4	yes	flips to slower than regex crate (est. 11.40x its time)
+target	unicode/overlapping-words/russian	rust	safe	32	r9g	464316	79730788	171.717	457159	471833	79497944	79926617	4	4	yes	flips to slower than regex crate (est. 14.41x its time)
+target	unicode/overlapping-words/russian	rust	safe	48	r8i	528722	84810727	160.407	514198	550360	83558543	86420354	4	4	yes	flips to slower than regex crate (est. 10.53x its time)
+target	unicode/overlapping-words/russian	rust	safe	48	r9g	464316	74085950	159.559	457159	471833	73332345	74790836	4	4	yes	flips to slower than regex crate (est. 13.39x its time)
+target	unicode/overlapping-words/russian	trino	native	32	r8i	514293	499140670	970.537	501444	534951	493330172	505525958	4	4	yes	flips to slower than Joni (est. 62.10x its time)
+target	unicode/overlapping-words/russian	trino	native	32	r9g	511097	164540746	321.936	505680	521894	149677504	176294176	4	4	yes	flips to slower than Joni (est. 16.15x its time)
+target	unicode/overlapping-words/russian	trino	native	48	r8i	514293	456623837	887.867	501444	534951	453783706	459602125	4	4	yes	flips to slower than Joni (est. 56.81x its time)
+target	unicode/overlapping-words/russian	trino	native	48	r9g	511097	150426935	294.322	505680	521894	138543704	162805380	4	4	yes	flips to slower than Joni (est. 14.76x its time)
+target	unicode/overlapping-words/russian	trino	safe	32	r8i	549735	510340037	928.338	539496	561283	495154537	540588083	4	4	yes	flips to slower than Joni (est. 84.92x its time)
+target	unicode/overlapping-words/russian	trino	safe	32	r9g	510933	162800761	318.634	500230	515777	148737560	174283244	4	4	yes	flips to slower than Joni (est. 21.85x its time)
+target	unicode/overlapping-words/russian	trino	safe	48	r8i	549735	474846886	863.774	539496	561283	454310633	524481521	4	4	yes	flips to slower than Joni (est. 79.02x its time)
+target	unicode/overlapping-words/russian	trino	safe	48	r9g	510933	151171765	295.874	500230	515777	139381735	160016223	4	4	yes	flips to slower than Joni (est. 20.29x its time)
+control	wild/bibleref/line	java	native	16	r8i	1501562	1497842	0.998	1493176	1510539	1467486	1514159	4	4	no	-
+control	wild/bibleref/line	java	native	16	r9g	1489076	1483948	0.997	1461108	1523210	1465420	1504986	4	4	no	-
+control	wild/bibleref/line	java	safe	16	r8i	1625324	1642453	1.011	1616401	1645133	1621255	1664593	4	4	no	-
+control	wild/bibleref/line	java	safe	16	r9g	1598877	1611352	1.008	1584253	1637649	1580489	1684054	4	4	no	-
+control	wild/bibleref/line	re2	native	16	r8i	1479868	1479552	1.000	1452587	1510011	1459000	1498986	4	4	no	-
+control	wild/bibleref/line	re2	native	16	r9g	1506916	1489763	0.989	1503864	1509028	1463578	1511485	4	4	no	-
+control	wild/bibleref/line	re2	safe	16	r8i	1614138	1635714	1.013	1581435	1627228	1619283	1665776	4	4	no	-
+control	wild/bibleref/line	re2	safe	16	r9g	1663584	1587646	0.954	1586623	1734669	1583570	1593141	4	4	no	-
+control	wild/bibleref/line	rust	native	16	r8i	1509287	1510583	1.001	1467638	1535933	1499480	1527714	4	4	no	-
+control	wild/bibleref/line	rust	native	16	r9g	1523958	1524948	1.001	1520811	1526671	1522162	1527158	4	4	no	-
+control	wild/bibleref/line	rust	safe	16	r8i	1649283	1624288	0.985	1641859	1661009	1584941	1645555	4	4	no	-
+control	wild/bibleref/line	rust	safe	16	r9g	1581357	1597838	1.010	1575452	1592319	1573972	1659135	4	4	no	-
+control	wild/bibleref/line	trino	native	16	r8i	1851567	1865963	1.008	1758124	1910266	1832803	1914398	4	4	no	-
+control	wild/bibleref/line	trino	native	16	r9g	1855495	1852282	0.998	1728011	1905350	1729556	1899650	4	4	no	-
+control	wild/bibleref/line	trino	safe	16	r8i	2021270	2117758	1.048	1903381	2100309	2037031	2154953	4	4	no	-
+control	wild/bibleref/line	trino	safe	16	r9g	2087139	2025145	0.970	2071778	2119734	1875690	2083794	4	4	no	flips to faster than Joni (est. 0.98x its time)
+target	wild/url/search	java	native	8	r8i	14094886	191971480	13.620	13986346	14374640	190898801	193079708	4	4	yes	-
+target	wild/url/search	java	native	8	r9g	15550653	190206152	12.231	15346281	15768027	185805568	199413493	4	4	yes	-
+target	wild/url/search	java	native	16	r8i	14094886	19305241	1.370	13986346	14374640	19257688	19377264	4	4	yes	-
+target	wild/url/search	java	native	16	r9g	15550653	20413073	1.313	15346281	15768027	20264764	20601810	4	4	yes	-
+target	wild/url/search	java	native	24	r8i	14094886	14002285	0.993	13986346	14374640	13981061	14019712	4	4	no	-
+target	wild/url/search	java	native	24	r9g	15550653	15726130	1.011	15346281	15768027	15580474	15872629	4	4	no	-
+target	wild/url/search	java	native	32	r8i	14094886	14006502	0.994	13986346	14374640	13964086	14070657	4	4	no	-
+target	wild/url/search	java	native	32	r9g	15550653	15584550	1.002	15346281	15768027	15496098	15681577	4	4	no	-
+target	wild/url/search	java	safe	8	r8i	18359055	380169308	20.707	18280005	18454251	377588694	384927860	4	4	yes	-
+target	wild/url/search	java	safe	8	r9g	17597043	360418854	20.482	17460910	17734380	358579510	362593920	4	4	yes	-
+target	wild/url/search	java	safe	16	r8i	18359055	111689750	6.084	18280005	18454251	110760484	112561541	4	4	yes	-
+target	wild/url/search	java	safe	16	r9g	17597043	107750484	6.123	17460910	17734380	106890487	108695310	4	4	yes	-
+target	wild/url/search	java	safe	24	r8i	18359055	18472224	1.006	18280005	18454251	18408058	18549507	4	4	no	-
+target	wild/url/search	java	safe	24	r9g	17597043	17655494	1.003	17460910	17734380	17488242	17771018	4	4	no	-
+target	wild/url/search	java	safe	32	r8i	18359055	18411973	1.003	18280005	18454251	18305687	18518568	4	4	no	-
+target	wild/url/search	java	safe	32	r9g	17597043	17657847	1.003	17460910	17734380	17529304	17809015	4	4	no	-
+target	wild/url/search	re2	native	8	r8i	13986746	183856251	13.145	13934491	14080748	181059879	187285802	4	4	yes	flips to slower than RE2/J (est. 2.75x its time)
+target	wild/url/search	re2	native	8	r9g	15297768	179195565	11.714	15215920	15377231	178327557	179608808	4	4	yes	flips to slower than RE2/J (est. 2.60x its time)
+target	wild/url/search	re2	native	16	r8i	13986746	19264310	1.377	13934491	14080748	19230799	19294463	4	4	yes	-
+target	wild/url/search	re2	native	16	r9g	15297768	20481177	1.339	15215920	15377231	20447120	20493482	4	4	yes	-
+target	wild/url/search	re2	native	24	r8i	13986746	13973058	0.999	13934491	14080748	13941288	13998460	4	4	no	-
+target	wild/url/search	re2	native	24	r9g	15297768	15408131	1.007	15215920	15377231	15169184	15676872	4	4	no	-
+target	wild/url/search	re2	native	32	r8i	13986746	13963480	0.998	13934491	14080748	13936330	14005853	4	4	no	-
+target	wild/url/search	re2	native	32	r9g	15297768	15462589	1.011	15215920	15377231	15311163	15627058	4	4	no	-
+target	wild/url/search	re2	safe	8	r8i	18344305	352993407	19.243	18229819	18413214	351943467	354158408	4	4	yes	flips to slower than RE2/J (est. 5.95x its time)
+target	wild/url/search	re2	safe	8	r9g	17648499	339761869	19.252	17389226	17806637	339075056	340735145	4	4	yes	flips to slower than RE2/J (est. 6.09x its time)
+target	wild/url/search	re2	safe	16	r8i	18344305	127687379	6.961	18229819	18413214	127102665	128334757	4	4	yes	flips to slower than RE2/J (est. 2.15x its time)
+target	wild/url/search	re2	safe	16	r9g	17648499	123597343	7.003	17389226	17806637	122799462	124530001	4	4	yes	flips to slower than RE2/J (est. 2.21x its time)
+target	wild/url/search	re2	safe	24	r8i	18344305	18388783	1.002	18229819	18413214	18311328	18438300	4	4	no	-
+target	wild/url/search	re2	safe	24	r9g	17648499	17719485	1.004	17389226	17806637	17709736	17726903	4	4	no	-
+target	wild/url/search	re2	safe	32	r8i	18344305	18325971	0.999	18229819	18413214	18296602	18343206	4	4	no	-
+target	wild/url/search	re2	safe	32	r9g	17648499	17551228	0.994	17389226	17806637	17421797	17708807	4	4	no	-
+target	wild/url/search	rust	native	8	r8i	14091991	183592286	13.028	13968965	14197359	182415267	184494916	4	4	yes	flips to slower than regex crate (est. 2.06x its time)
+target	wild/url/search	rust	native	8	r9g	15428692	179189450	11.614	15363446	15532502	178355905	180009064	4	4	yes	flips to slower than regex crate (est. 1.98x its time)
+target	wild/url/search	rust	native	16	r8i	14091991	19371269	1.375	13968965	14197359	19328791	19447726	4	4	yes	-
+target	wild/url/search	rust	native	16	r9g	15428692	20614467	1.336	15363446	15532502	20591018	20646577	4	4	yes	-
+target	wild/url/search	rust	native	24	r8i	14091991	14135349	1.003	13968965	14197359	13952400	14262799	4	4	no	-
+target	wild/url/search	rust	native	24	r9g	15428692	15447787	1.001	15363446	15532502	15293456	15712548	4	4	no	-
+target	wild/url/search	rust	native	32	r8i	14091991	13976623	0.992	13968965	14197359	13951133	14016447	4	4	no	-
+target	wild/url/search	rust	native	32	r9g	15428692	15536601	1.007	15363446	15532502	15384388	15679894	4	4	no	-
+target	wild/url/search	rust	safe	8	r8i	18389240	355455931	19.330	18297800	18453159	353488363	357094554	4	4	yes	flips to slower than regex crate (est. 4.51x its time)
+target	wild/url/search	rust	safe	8	r9g	17579785	338865676	19.276	17459975	17696817	337762693	340095334	4	4	yes	flips to slower than regex crate (est. 4.69x its time)
+target	wild/url/search	rust	safe	16	r8i	18389240	131863920	7.171	18297800	18453159	126665741	144536522	4	4	yes	flips to slower than regex crate (est. 1.67x its time)
+target	wild/url/search	rust	safe	16	r9g	17579785	123362540	7.017	17459975	17696817	121766260	124223575	4	4	yes	flips to slower than regex crate (est. 1.71x its time)
+target	wild/url/search	rust	safe	24	r8i	18389240	18377374	0.999	18297800	18453159	18320508	18432435	4	4	no	-
+target	wild/url/search	rust	safe	24	r9g	17579785	17555833	0.999	17459975	17696817	17330938	17750712	4	4	no	-
+target	wild/url/search	rust	safe	32	r8i	18389240	18435975	1.003	18297800	18453159	18404283	18473072	4	4	no	-
+target	wild/url/search	rust	safe	32	r9g	17579785	17571660	1.000	17459975	17696817	17461448	17666806	4	4	no	-
+target	wild/url/search	trino	native	8	r8i	2340554889	2670074844	1.141	2312858385	2375083207	2658685490	2691807281	4	4	yes	-
+target	wild/url/search	trino	native	8	r9g	2470605461	2770252580	1.121	2464908675	2475286238	2766009340	2780698652	4	4	yes	-
+target	wild/url/search	trino	native	16	r8i	2340554889	2478991936	1.059	2312858385	2375083207	2463338453	2492208327	4	4	yes	-
+target	wild/url/search	trino	native	16	r9g	2470605461	2593786192	1.050	2464908675	2475286238	2587167367	2596988562	4	4	yes	-
+target	wild/url/search	trino	native	24	r8i	2340554889	2347180090	1.003	2312858385	2375083207	2329686156	2363884108	4	4	no	-
+target	wild/url/search	trino	native	24	r9g	2470605461	2479705014	1.004	2464908675	2475286238	2473722917	2483253129	4	4	no	-
+target	wild/url/search	trino	native	32	r8i	2340554889	2336059487	0.998	2312858385	2375083207	2319474320	2359139538	4	4	no	-
+target	wild/url/search	trino	native	32	r9g	2470605461	2469557431	1.000	2464908675	2475286238	2465508703	2480934988	4	4	no	-
+target	wild/url/search	trino	safe	8	r8i	2353202295	3070242195	1.305	2337202696	2365302461	3038931674	3091172530	4	4	yes	-
+target	wild/url/search	trino	safe	8	r9g	2477423713	3140675338	1.268	2474905740	2480861915	3131485433	3147695268	4	4	yes	-
+target	wild/url/search	trino	safe	16	r8i	2353202295	2621801251	1.114	2337202696	2365302461	2610336309	2636215481	4	4	yes	-
+target	wild/url/search	trino	safe	16	r9g	2477423713	2716572275	1.097	2474905740	2480861915	2713845168	2719437414	4	4	yes	-
+target	wild/url/search	trino	safe	24	r8i	2353202295	2503746912	1.064	2337202696	2365302461	2492132997	2517027567	4	4	yes	-
+target	wild/url/search	trino	safe	24	r9g	2477423713	2604302514	1.051	2474905740	2480861915	2596596426	2614349159	4	4	yes	-
+target	wild/url/search	trino	safe	32	r8i	2353202295	2351559746	0.999	2337202696	2365302461	2340038882	2365731093	4	4	no	-
+target	wild/url/search	trino	safe	32	r9g	2477423713	2476087095	0.999	2474905740	2480861915	2469733086	2483151863	4	4	no	-
