@@ -195,18 +195,24 @@ public class TestLanguageBulkBenchmark
         assertThat(read(input("count", "ex", "exex")).maxMemory()).isZero();
         assertThat(read(input("count", "ex", "exex", "max-memory", Long.toString(72L << 20))).options().maxMemory()).isEqualTo(72L << 20);
 
-        // Two Unicode classes repeated 200 times compile within the default budget but not within 1 MiB.
-        Path workload = input("count", "(?:\\p{L}\\p{N}){200}", "a1", "max-memory", Long.toString(1L << 20));
-        for (String engine : ENGINES) {
-            var data = new BenchmarkLanguageBulk.BenchmarkData();
-            data.engine = engine;
-            data.workloadFile = workload.toString();
-            if (engine.equals("jdk") || engine.equals("joni")) {
-                assertThatCode(data::initialize).as(engine).doesNotThrowAnyException();
-            }
-            else {
-                assertThatThrownBy(data::initialize).as(engine)
-                        .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        // Two Unicode classes repeated 200 times compile within the default budget but not within 1 MiB,
+        // whether the workload names that budget or the budget-sweep parameter overrides the default.
+        for (long maxMemoryMiB : List.of(0L, 1L)) {
+            Path workload = maxMemoryMiB == 0
+                    ? input("count", "(?:\\p{L}\\p{N}){200}", "a1", "max-memory", Long.toString(1L << 20))
+                    : input("count", "(?:\\p{L}\\p{N}){200}", "a1");
+            for (String engine : ENGINES) {
+                var data = new BenchmarkLanguageBulk.BenchmarkData();
+                data.engine = engine;
+                data.workloadFile = workload.toString();
+                data.maxMemoryMiB = maxMemoryMiB;
+                if (engine.equals("jdk") || engine.equals("joni")) {
+                    assertThatCode(data::initialize).as(engine).doesNotThrowAnyException();
+                }
+                else {
+                    assertThatThrownBy(data::initialize).as("%s maxMemoryMiB=%s", engine, maxMemoryMiB)
+                            .isInstanceOf(RegexpCompileMemoryLimitException.class);
+                }
             }
         }
 
