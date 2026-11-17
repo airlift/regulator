@@ -52,14 +52,13 @@ public class TestOutlierSemantics
     }
 
     @Test
-    public void testWholeInputCaptureAvoidsAutomatonWorkspace()
+    public void testWholeInputCaptureOfLongInput()
     {
         String value = "abcδ💰\n".repeat(100_000);
         RegexpMatcher matcher = JavaRegexp.compile(utf8Slice("(?s)^((.*)()()($))")).matcher(utf8Slice(value));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start(2)).isZero();
         assertThat(matcher.end(2)).isEqualTo(utf8Slice(value).length());
-        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
     }
 
     @Test
@@ -80,8 +79,6 @@ public class TestOutlierSemantics
                     assertThat(matcher.start(group)).isEqualTo(expected[2 * group]);
                     assertThat(matcher.end(group)).isEqualTo(expected[2 * group + 1]);
                 }
-                assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isFalse();
-                assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
             }
         }
 

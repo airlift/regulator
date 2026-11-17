@@ -26,17 +26,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestWholeInputCapturePlan
 {
     @Test
-    public void testEligibility()
-    {
-        for (String expression : List.of("(?s)^((.*)()()($))", "(?s)\\A(()(.*)())\\z", "(?s)(^(()).*(())$)")) {
-            assertThat(analyze(expression)).as(expression).isNotNull();
-        }
-        for (String expression : List.of("^((.*)()()($))", "(?s)^((.*?)()()($))", "(?sm)^((.*)()()($))", "(?s)(.*)$", "(?s)^(.*)", "(?s)^(.*)(.*)$", "(?s)^((.)*)$", "(?s)^(.*)x$", "(?s)^((.*)?)$", "(?s)^.*$")) {
-            assertThat(analyze(expression)).as(expression).isNull();
-        }
-    }
-
-    @Test
     public void testRegionsRetainedGroupsAndReset()
     {
         for (String expression : List.of("(?s)^((.*)()()($))", "(?s)\\A(()(.*)())\\z", "(?s)(^(()).*(())$)", "(?sd)^((.*)()()($))")) {
@@ -67,24 +56,5 @@ public class TestWholeInputCapturePlan
                 }
             }
         }
-    }
-
-    @Test
-    public void testRetainedPlanUsesForwardBudget()
-    {
-        Slice pattern = utf8Slice("(?s)^((.*)()()($))");
-        int flags = JavaRegexp.Options.defaults().parseFlags();
-        ParseResult parsed = JavaRegexpParser.parse(pattern, flags);
-        long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
-        Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
-        WholeInputCapturePlan plan = WholeInputCapturePlan.analyze(parsed.regexp(), parsed.capturingGroupCount());
-        Re2 compiled = Re2.compileParsed(pattern, parsed, flags, maxMemory);
-        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize());
-    }
-
-    private static WholeInputCapturePlan analyze(String expression)
-    {
-        ParseResult parsed = JavaRegexpParser.parse(utf8Slice(expression), JavaRegexp.Options.defaults().parseFlags());
-        return WholeInputCapturePlan.analyze(parsed.regexp(), parsed.capturingGroupCount());
     }
 }
