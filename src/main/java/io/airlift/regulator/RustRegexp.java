@@ -763,12 +763,9 @@ public sealed class RustRegexp
     static final class ClassRunRustRegexp
             extends RustRegexp
     {
-        private final boolean retainedClassCountDfa;
-
         private ClassRunRustRegexp(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
-            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
         @Override
@@ -780,7 +777,7 @@ public sealed class RustRegexp
         @Override
         long countMatches(Slice text)
         {
-            return countOnClassRun(text, retainedClassCountDfa);
+            return countOnClassRun(text);
         }
 
         @Override

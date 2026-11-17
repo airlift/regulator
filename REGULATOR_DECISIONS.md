@@ -1744,9 +1744,7 @@ Decided (Dain, 2026-11-06): without native access, the DFA uses the same
 tagged pointer table on the Java heap, reversing the earlier decision that kept
 the table native-only. The AWS r9g and r8i comparison against object rows, in
 both memory modes, passed the project's performance gate with the one accepted
-loss below. With a table in both modes, a pattern counted by the compact
-character-class counter may also keep its optional count DFA without native
-access, which it previously kept only with it.
+loss below.
 
 A/B result (AWS r9g and r8i, JDK 25, two hosts per platform and two rounds, JMH
 average time; each figure is the time with this change divided by the time
@@ -2036,9 +2034,8 @@ the literal-alternation shape of a pattern that compiled no program, a class of
 its own because it routes `matchInternal` to the set and so leaves the
 program-bearing class untouched. Each override makes one call to a final
 route method of `CompiledPattern`, so a call site that sees one class can
-inline one route. The class selects the routes; within them, the class-run
-shape holds one immutable per-instance fact, whether it counts on the retained
-count DFA, and the scan-plan shape three: whether `find` keeps its literal
+inline one route. The class selects the routes; within them, the scan-plan
+shape holds three immutable per-instance facts: whether `find` keeps its literal
 kernel, whether a start-anchored plan counts with one attempt, and whether
 short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
@@ -4970,7 +4967,7 @@ from 0x80 up as the most common ASCII byte, which would admit rare non-ASCII
 classes such as `\p{Greek}` on their lead bytes alone. A dense member can still
 be sparse in the text, as ASCII `\w` is in Russian, where the counter took 4.8
 to 6.4 times the DFA count's time, so a count of at least 4 KiB samples four
-256-byte windows, as the compact counter's count DFA does, and takes the DFA
+256-byte windows and takes the DFA
 count when they hold at most 64 members. The sample decodes at most a quarter of
 the text and stops at its 65th member, and a DFA count that bails counts on the
 counter. Each language's class carries its own reading of malformed UTF-8 and of

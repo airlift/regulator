@@ -536,12 +536,9 @@ public sealed class JavaRegexp
     static final class ClassRunJavaRegexp
             extends JavaRegexp
     {
-        private final boolean retainedClassCountDfa;
-
         private ClassRunJavaRegexp(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
-            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
         @Override
@@ -553,7 +550,7 @@ public sealed class JavaRegexp
         @Override
         long countMatches(Slice text)
         {
-            return countOnClassRun(text, retainedClassCountDfa);
+            return countOnClassRun(text);
         }
 
         @Override

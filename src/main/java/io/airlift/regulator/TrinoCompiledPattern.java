@@ -164,12 +164,9 @@ sealed class TrinoCompiledPattern
     static final class ClassRunTrinoCompiledPattern
             extends TrinoCompiledPattern
     {
-        private final boolean retainedClassCountDfa;
-
         private ClassRunTrinoCompiledPattern(Analysis analysis)
         {
             super(analysis);
-            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
         @Override
@@ -181,7 +178,7 @@ sealed class TrinoCompiledPattern
         @Override
         long countMatches(Slice text)
         {
-            return countOnClassRun(text, retainedClassCountDfa);
+            return countOnClassRun(text);
         }
 
         @Override

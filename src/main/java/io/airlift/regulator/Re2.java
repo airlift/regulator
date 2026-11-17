@@ -939,12 +939,9 @@ public sealed class Re2
     static final class ClassRunRe2
             extends Re2
     {
-        private final boolean retainedClassCountDfa;
-
         private ClassRunRe2(Analysis analysis, CompileInputs compileInputs)
         {
             super(analysis, compileInputs);
-            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
         }
 
         @Override
@@ -956,7 +953,7 @@ public sealed class Re2
         @Override
         long countMatches(Slice text)
         {
-            return countOnClassRun(text, retainedClassCountDfa);
+            return countOnClassRun(text);
         }
 
         @Override
