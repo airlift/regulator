@@ -29,6 +29,7 @@ and intermediate benchmark reports are not kept here.
 | Document | Purpose |
 |---|---|
 | [`reference/REGULATOR_API.md`](reference/REGULATOR_API.md) | Public API, ownership, matching, captures, and resources |
+| [`reference/MEMORY_USAGE.md`](reference/MEMORY_USAGE.md) | Memory budgets, retained sizes, and how threads share a pattern's caches |
 | [`integrations/TRINO.md`](integrations/TRINO.md) | Trino compatibility boundary and adoption requirements |
 | [`integrations/UNICODE.md`](integrations/UNICODE.md) | Unicode data policy for each language |
 | [Unicode database generator](../tools/unicode-database/README.md) | Pinned Unicode database and its regeneration |

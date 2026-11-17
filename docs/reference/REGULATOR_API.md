@@ -572,7 +572,7 @@ map of group names it keeps when it keeps fewer groups than its pattern, the
 workspace of each capture engine it has used, and its cursors. The pattern's
 caches are shared by every thread, so count a shared pattern once and each
 thread's matcher separately, as
-[How do threads share a pattern's memory?](../FAQ.md#how-do-threads-share-a-patterns-memory)
+[How threads share a pattern's memory](MEMORY_USAGE.md#how-threads-share-a-patterns-memory)
 describes.
 
 `MatchResult` is an immutable snapshot. Group Slices are zero-copy views and
