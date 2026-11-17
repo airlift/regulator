@@ -483,12 +483,6 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findLast bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(1004);
-        // The literal set scan runs the same loop under the same rules, capped at the size it was
-        // added at.
-        assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
-                .as("VectorPrefixScanner.findLiteralSet bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(517);
     }
 
     /// Keeps the find loop's check of whether a search tries the inner or window literal first,

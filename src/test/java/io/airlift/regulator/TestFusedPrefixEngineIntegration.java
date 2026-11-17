@@ -127,8 +127,6 @@ public class TestFusedPrefixEngineIntegration
         String lead = "fn new() fx is_ fn ais_ ".repeat(50);
         Slice text = Slices.utf8Slice(lead + "fn as_x1 fn is_y");
         int matchStart = lead.length();
-        assertThat(program.prefixAccelStrategy(text.length()))
-                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
 
         assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(matchStart + 8);
         assertThat(Dfa.search(program, text, false, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(matchStart + 8);
@@ -148,17 +146,11 @@ public class TestFusedPrefixEngineIntegration
         // Text of the literals, their prefixes and pair-sharing decoys, and filler, in windows
         // inside a larger array. Each language's matcher finds the JDK's matches and groups, and
         // the DFA's count finds as many matches. The JDK is the oracle because an unanchored NFA
-        // search over these windows calls the same literal set scan.
+        // search over these windows calls the same prefix scan.
         List<String> fragments = List.of("fn is_", "fn as_", "fn is", "fn as", "fn ", "fx is_", "fn i_s_", "f", "_", "s_", "x", "1", " ", "\n");
         Random random = new Random(11);
         for (String pattern : List.of("fn is_(\\w+)|fn as_(\\w+)", "fn (is)e|fn (as)", "fn is_|fn as_|fn os_x\\d+")) {
             Prog program = compile(pattern);
-            if (VectorSupport.isAvailable()) {
-                assertThat(program.prefixAccelStrategy(1_024)).as(pattern).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
-            }
-            else {
-                assertThat(program.prefixAccelStrategy(1_024)).as(pattern).isNotEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
-            }
             Pattern oracle = Pattern.compile(pattern);
             List<CompiledPattern> languages = List.of(
                     Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults()),

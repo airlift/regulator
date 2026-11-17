@@ -150,12 +150,12 @@ final class Compiler
     /// @throws RegexpCompileException if compilation fails for a non-memory reason
     static Prog compile(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, false, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform(), false);
+        return compile(regexp, reversed, maxMemory, false, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform(), false);
+        return compile(regexp, reversed, maxMemory, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
     /// Compiles `regexp`, which [Simplifier#simplify(Regexp,CaseFolding,Compiler.Dialect,long)] has
@@ -163,7 +163,7 @@ final class Compiler
     /// only the Java dialect compiles them.
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding)
     {
-        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, ByteFrequencies.uniform(), false);
+        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, ByteFrequencies.uniform());
     }
 
     /// Compiles `regexp`, simplified for `dialect` as
@@ -171,17 +171,7 @@ final class Compiler
     /// `byteFrequencies` choosing the probe byte of a forward program's literal prefix scan.
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies, false);
-    }
-
-    /// Compiles the forward program of `regexp` as
-    /// [#compileNormalized(Regexp,boolean,long,Dialect,CaseFolding,ByteFrequencies)] does, but
-    /// leaves a budgeted program's prefix literal set undecided and uncharged, for a caller that
-    /// decides it with [Prog#decidePrefixLiteralSet(Prog)] once its plans and routes have taken
-    /// their memory.
-    static Prog compileNormalizedDeferringPrefixLiteralSet(Regexp regexp, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
-    {
-        return compile(regexp, false, maxMemory, true, dialect, caseFolding, byteFrequencies, true);
+        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies);
     }
 
     static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
@@ -362,16 +352,11 @@ final class Compiler
         return cache.placement();
     }
 
-    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies, boolean defersPrefixLiteralSet)
+    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect, caseFolding, byteFrequencies);
         if (!reversed) {
-            // The OnePass tables come ahead of the optional prefix literal set.
-            program.deferPrefixLiteralSet();
             program.prepareOnePass();
-            if (!defersPrefixLiteralSet) {
-                program.decidePrefixLiteralSet(program);
-            }
         }
         return program;
     }
@@ -1222,7 +1207,6 @@ final class Compiler
                     // The program keeps what the flatten charge counted, so the DFA caches get
                     // only the rest of the budget.
                     dfaMemory = maxMemory - estimatedProgramMemory(program);
-                    program.setDfaMemoryBudgeted();
                 }
                 program.setDfaMemory(dfaMemory);
             }
