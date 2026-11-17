@@ -3096,9 +3096,11 @@ abstract sealed class CompiledPattern
 
     /// The full-Slice find of a scan plan. A pattern whose find keeps the literal kernel of its
     /// find plan, when `literalKernelFind` is set, runs that kernel, as [#findOnLiteralKernel]
-    /// does. Otherwise a short input of a plan that allows it runs on the ordinary engine, and
-    /// any other runs the plan's [ScanPlan#booleanPlan()], resolved at compile time, with the
-    /// executor the plan's facts pick. Calls that report positions never come here; the
+    /// does. Otherwise a short input of a plan that allows it runs on the ordinary engine, a
+    /// short input of an unanchored plan not led by a literal that
+    /// [lacks the required bytes][#shortWindowLacksRequiredBytes] holds no match, and any other
+    /// runs the plan's [ScanPlan#booleanPlan()], resolved at compile time, with the executor the
+    /// plan's facts pick. Calls that report positions never come here; the
     /// single-attempt count of [#countOnScanPlan] does.
     final boolean findOnScanPlan(Slice input, boolean ordinaryShortBooleanMatch, boolean literalKernelFind)
     {
@@ -3115,6 +3117,13 @@ abstract sealed class CompiledPattern
         ScanPlan plan = booleanPlans.scanBooleanPlan();
         if (plan.isAnchoredStart()) {
             return matchStartAnchoredScanPlan(plan, input, 0, length, false, null);
+        }
+        // A short window without the bytes every match holds is rejected before the plan, as a
+        // matcher's find rejects it: the plan checks its literal only after its first failed
+        // attempt. A literal-led plan's candidate scan is the search for its literal. A generated
+        // class checks the plan's required literal instead.
+        if (!plan.isLiteralLeading() && shortWindowLacksRequiredBytes(input, 0, length)) {
+            return false;
         }
         if (plan.allowsOrdinaryBooleanSearch()) {
             return findWithOrdinaryHandoff(input, plan);
