@@ -72,6 +72,10 @@ public class BenchmarkLanguageBulk
         @Param("0")
         public long expectedResult;
 
+        /// The budget-sweep override: a positive value replaces the workload's Regulator budget, in MiB.
+        @Param("0")
+        public long maxMemoryMiB;
+
         private RebarRunner.Benchmark input;
         private Slice patternBytes;
         private String patternText;
@@ -145,9 +149,9 @@ public class BenchmarkLanguageBulk
                 flags |= Pattern.UNICODE_CASE | Pattern.UNICODE_CHARACTER_CLASS;
             }
             // A workload's budget applies to every Regulator language; the JDK and Joni have none.
-            long maxMemory = input.maxMemory();
+            long maxMemory = maxMemoryMiB > 0 ? maxMemoryMiB << 20 : input.maxMemory();
             return switch (engine) {
-                case "re2" -> input.compile();
+                case "re2" -> maxMemoryMiB > 0 ? Re2.compile(input.pattern(), input.options().setMaxMemory(maxMemory)) : input.compile();
                 case "java" -> {
                     JavaRegexp.Options options = JavaRegexp.Options.defaults()
                             .setCaseInsensitive(input.caseInsensitive())
