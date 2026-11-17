@@ -142,6 +142,35 @@ public class TestDfaGroupZeroForwardCursor
         assertRepeatedMatchesReuseDecision(latin1Pattern, Slices.wrappedBuffer(latin1Bytes), 2);
     }
 
+    @Test
+    public void testCursorKeepsReverseDfaForVariableWidthStarts()
+    {
+        Re2 pattern = Re2.compile(Slices.utf8Slice("[^ ]+[-+][0-9]+"));
+        Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
+        Slice input = Slices.utf8Slice("aa-1 bbb+22 c-333 dddd+4");
+
+        // Pinned native RE2 returns each space-separated word; each start takes the reverse pass.
+        assertThat(findBoundary(pattern, cursor, input, 0)).isEqualTo(span(0, 4));
+        assertThat(cursor.hasReverseDfa()).isTrue();
+        assertThat(findBoundary(pattern, cursor, input, 4)).isEqualTo(span(5, 11));
+        assertThat(findBoundary(pattern, cursor, input, 11)).isEqualTo(span(12, 17));
+        assertThat(findBoundary(pattern, cursor, input, 17)).isEqualTo(span(18, 24));
+
+        // The first find resolves the reverse DFA through the general search; the rest search it directly.
+        Dfa.DfaInstance reverseDfa = pattern.reverseProgramIfComputedForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        assertThat(reverseDfa.groupZeroReverseSearchCount()).isEqualTo(3);
+    }
+
+    private static long findBoundary(Re2 pattern, Dfa.GroupZeroForwardCursor cursor, Slice input, int start)
+    {
+        return pattern.findGroupZeroBoundary(cursor, input, 0, input.length(), start);
+    }
+
+    private static long span(int start, int end)
+    {
+        return ((long) start << 32) | end;
+    }
+
     private static void assertRepeatedMatchesReuseDecision(Re2 pattern, Slice input, int matchLength)
     {
         Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();

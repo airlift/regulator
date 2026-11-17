@@ -189,7 +189,8 @@ final class Dfa
     private static final int FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE = 15;
     private static final int PREFIX_RUN_SCAN_ROUTE = 16;
     private static final int ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE = 17;
-    private static final int COUNTED_ROUTES = 18;
+    private static final int GROUP_ZERO_REVERSE_SEARCH_ROUTE = 18;
+    private static final int COUNTED_ROUTES = 19;
 
     private Dfa() {}
 
@@ -1291,6 +1292,73 @@ final class Dfa
             }
             finally {
                 cursor.dfa.endSearch(exclusiveSearch);
+            }
+        }
+    }
+
+    /// Runs the reverse half of a group-zero match on the reverse program's longest-match DFA that
+    /// `cursor` holds, anchored at `end`, as [#search] does for `(reverseProgram, context,
+    /// contextStart, contextEnd, start, end, true, LONGEST_MATCH, true)`, and returns the same
+    /// value. The cursor holds the DFA only when that call's per-call decisions are fixed for the
+    /// program (see [GroupZeroForwardCursor#resolveReverseDfa]), so this skips them. The forward
+    /// search over the same context checked the bounds.
+    @SuppressWarnings("UnusedException")
+    static long searchGroupZeroReverse(
+            GroupZeroForwardCursor cursor,
+            Slice context,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int end)
+    {
+        DfaInstance dfa = cursor.reverseDfa;
+        countRoute(dfa, GROUP_ZERO_REVERSE_SEARCH_ROUTE);
+        int contextOffset = context.byteArrayOffset();
+        int ctxBegin = contextOffset + contextStart;
+        int ctxEnd = contextOffset + contextEnd;
+        int textBegin = contextOffset + start;
+        int textEnd = contextOffset + end;
+        byte[] bytes = context.byteArray();
+        boolean requiresExclusiveSearch = false;
+        long observedCacheVersion = 0;
+        while (true) {
+            boolean exclusiveSearch = requiresExclusiveSearch;
+            if (!exclusiveSearch) {
+                observedCacheVersion = dfa.cacheVersion();
+            }
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
+            if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
+                dfa.cancelExclusiveSearch();
+                requiresExclusiveSearch = false;
+                continue;
+            }
+            try {
+                StateData startData = dfa.analyzeStart(tables, bytes, ctxBegin, ctxEnd, textBegin, textEnd, true, false);
+                tables = dfa.tablesAfterWrite(tables);
+                if (startData.offset() == T_DEAD) {
+                    return SEARCH_NO_MATCH;
+                }
+                if (startData.offset() == T_FULL_MATCH) {
+                    return 0;
+                }
+                boolean startIsMatch = (startData.flag() & FLAG_MATCH) != 0;
+                if (!startIsMatch &&
+                        (textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES || dfa.shouldUseAbsolutePointersForShortSearch(tables))) {
+                    tables = dfa.requestAbsolutePointerTransitions(tables);
+                }
+                return searchBackward(dfa, tables, bytes, textBegin, textEnd, ctxBegin, startData.offset(), startIsMatch, false, false, 0);
+            }
+            catch (StartStateAllocationException | QuitSearchException ignored) {
+                return SEARCH_FAILED;
+            }
+            catch (RetrySearchException ignored) {
+                if (exclusiveSearch) {
+                    throw new AssertionError("exclusive group-zero reverse search requested a retry");
+                }
+                requiresExclusiveSearch = true;
+            }
+            finally {
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -6377,6 +6445,8 @@ final class Dfa
         private final DfaInstance dfa;
         private final Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
 
+        private DfaInstance reverseDfa;
+
         private int fixedDistanceByteScanProductivityRejectedUntil;
         private int startByteScanProductivityRejectedUntil;
         private int fixedDistanceByteScanProductivityCheckCount;
@@ -6390,6 +6460,28 @@ final class Dfa
             this.prog = prog;
             this.dfa = dfa;
             this.fixedDistanceByteCandidates = fixedDistanceByteCandidates;
+        }
+
+        boolean hasReverseDfa()
+        {
+            return reverseDfa != null;
+        }
+
+        /// Holds the longest-match DFA of `reverseProgram` for [#searchGroupZeroReverse] when
+        /// [#search] would make the same decisions on every reverse call: an unanchored reversed
+        /// program that can match, whose DFA initialized. Otherwise holds nothing, and the caller
+        /// keeps calling [#search]. A program's DFA, once cached, is never replaced.
+        void resolveReverseDfa(Prog reverseProgram)
+        {
+            if (reverseDfa != null || !reverseProgram.reversed() || reverseProgram.start() == 0 ||
+                    reverseProgram.anchorStart() || reverseProgram.anchorEnd() ||
+                    !reverseProgram.didFlatten() || reverseProgram.bytemapRange() == 0) {
+                return;
+            }
+            DfaInstance dfa = reverseProgram.getCachedDfa(DfaInstance.Kind.LONGEST_MATCH);
+            if (dfa != null && dfa.ok()) {
+                reverseDfa = dfa;
+            }
         }
 
         int byteScanProductivityCheckCount()
@@ -8316,6 +8408,11 @@ final class Dfa
         int absolutePointerBackwardSearchCount()
         {
             return routeCount(ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE);
+        }
+
+        int groupZeroReverseSearchCount()
+        {
+            return routeCount(GROUP_ZERO_REVERSE_SEARCH_ROUTE);
         }
 
         boolean absolutePointerTransitionsAvailable()

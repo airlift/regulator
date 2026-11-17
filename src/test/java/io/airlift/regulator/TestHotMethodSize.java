@@ -527,6 +527,18 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorByteSetScanner.class, "findLiteralSet")).as("VectorByteSetScanner.findLiteralSet bytecode bytes").isPositive().isLessThanOrEqualTo(152);
     }
 
+    /// Keeps the group-zero reverse search larger than FreqInlineSize, capped at the size it was
+    /// measured at: inlined, it pushed `CompiledPattern.findGroupZeroBoundary` out of
+    /// `RegexpMatcher.findGeneral`.
+    @Test
+    public void testGroupZeroReverseSearchStaysOutOfLine()
+    {
+        assertThat(codeLength(Dfa.class, "searchGroupZeroReverse"))
+                .as("Dfa.searchGroupZeroReverse bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(340);
+    }
+
     /// Caps the exact literal alternation's root-table loop, which inlines the trie walk, at the
     /// size it was measured at, and keeps the folded matcher's stop compare, byte compare, and
     /// root-table loop within C2's inline size, so each inlines into the route loop that calls it.

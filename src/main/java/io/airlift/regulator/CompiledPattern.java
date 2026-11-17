@@ -3679,20 +3679,27 @@ abstract sealed class CompiledPattern
             }
         }
         if (matchStart < 0) {
-            Prog reverseProgram = reverseProg();
-            if (reverseProgram == null) {
-                return Dfa.SEARCH_FAILED;
+            long reverse;
+            if (cursor.hasReverseDfa()) {
+                reverse = Dfa.searchGroupZeroReverse(cursor, input, contextStart, contextEnd, start, matchEnd);
             }
-            long reverse = Dfa.search(
-                    reverseProgram,
-                    input,
-                    contextStart,
-                    contextEnd,
-                    start,
-                    matchEnd,
-                    true,
-                    Prog.MatchKind.LONGEST_MATCH,
-                    true);
+            else {
+                Prog reverseProgram = reverseProg();
+                if (reverseProgram == null) {
+                    return Dfa.SEARCH_FAILED;
+                }
+                cursor.resolveReverseDfa(reverseProgram);
+                reverse = Dfa.search(
+                        reverseProgram,
+                        input,
+                        contextStart,
+                        contextEnd,
+                        start,
+                        matchEnd,
+                        true,
+                        Prog.MatchKind.LONGEST_MATCH,
+                        true);
+            }
             if (reverse < 0) {
                 return reverse;
             }
