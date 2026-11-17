@@ -4160,169 +4160,14 @@ Under Unicode case folding, some letters fold to characters outside ASCII: `k`
 and `s` also match the Kelvin sign and the long `s`, three and two bytes in
 UTF-8, Java's Unicode case also matches `i` with the dotted and dotless i, and
 Trino's full case folding also matches characters such as `ß` for `ss` and the
-`ﬁ` ligature for `fi`, so no folded prefix reaches past them: upstream scans
-nothing for `(?i)Sherlock Holmes` in UTF-8. Regulator instead scans for a folded
-run of four to nine bytes, or of three led by a rare letter, that every match
-holds behind a lead whose width lies within a known range. A run's lead is
-every byte before it, earlier runs included.
-Besides run bytes, it is made of literal characters that match one
-byte sequence, classes that hold exactly one fold orbit, which take their
-members' widths in the program's encoding, and, in a Trino literal, stretches of
-characters whose orbits leave ASCII or that a multi-character fold covers, which
-take the widths their folds take. In a Trino literal, the first character
-outside ASCII ends the runs, read in the folded literal, where `ß` continues as
-`ss` and the Kelvin sign and the long s are `k` and `s`. A lead whose widths
-differ by more than eight bytes also ends them. A case-sensitive ASCII letter
-also ends this prefix walk's runs, though not the walk
-[behind a start literal](#folded-run-behind-a-start-literal), and a run must
-hold an ASCII letter: exact bytes are what inner literal search and the
-case-sensitive scans serve, and a run scan takes their place. Without these two
-rules, `(?i:k)ey = value` over CPython scanned for ` = ` behind the Kelvin
-sign's lead instead of searching for its inner literal, 5.7x and 10.4x main's
-time on r8i and r9g in RE2, Rust, and Java, and
-`[Éé]: \d+ ERROR` over a log scanned for `: `, 1.04x to 1.13x. Trino found no
-inner literal in `(?i:k)ey = value`, so there the run had been faster than main;
-it now searches that inner literal as the other languages do.
-Runs of two and three bytes, such as the `le` after the
-`fi` of Trino's `(?i)file`, the `elf` of `(?i)self`, and the `thi` of
-`(?i)this`, are common in real text, more common than the English pair model
-rates them, so their scan stopped far more often than the DFA's start bytes.
-Over 8 MiB of CPython source, Trino's `(?i)file` stopped at `le` 113,529 times
-against 9,438 for main's start literal filter, and took 6.93x and 9.89x main's
-time on r9g and r8i. On r9g, Trino's `(?i)user` over a log took 1.25x, RE2's
-Unicode `(?i)user` 1.51x, counting the spans of `(?i)self` 1.35x, and Trino's
-`(?i)this` 1.08x. The wins came from runs of four or more, such as ` holme`,
-`word`, `proce`, and `thin`, and from three-byte runs led by a rare letter.
-Two-byte runs are left out. Three-byte runs led by common letters lost, as with
-`thi` at 1.08x and `elf` at 1.35x, so a three-byte run is kept only when it is
-led by a rare letter, an ASCII letter rated, both cases together, under 1.5%,
-which gives up the `cla` and `pon` of Trino's `(?i)class` and `(?i)response`. It
-must be a letter because English rates code punctuation and digits rare, as with
-the `_id` of `(?i)task_id`. In English, `b`, `w`, `y` and every rarer letter
-pass; `f`, `g`, `p` and every more common letter do not. On r9g, before any
-three-byte run was left out, the runs `wat` and `wor` took Trino's counts of
-`(?i)watson` and `(?i)works` over English to 0.22x and 0.20x main's time, and
-`cla` and `pon` took `(?i)class` and `(?i)response` to 0.63x and 0.68x. With
-this rule, Trino's counts over English of `(?i)watson`, `(?i)works`, `(?i)back`,
-and `(?i)york` took 0.163x, 0.158x, 0.263x, and 0.125x main's time on r9g, and
-the refused words and the controls tied.
-The rule is accepted at a cost to `(?i)qsyou` over English, a constructed
-pattern with no published row. English text holds its `you` far more often than
-its letters predict: its scan stops 9.4 times per KiB, against 0.46 for the
-folded prefix `q` it replaces. RE2, Rust, and Java
-take 2.1x main's time on r9g and 2.7x on r8i. Trino, where the run replaces a
-start-byte cursor that scans `q` in 31 µs over 899 KB while the folded prefix
-scan takes 78 µs, takes 5.3x and 8.4x. Requiring a run to be four times rarer
-than the folded prefix it replaces, the margin a probe pair needs, returned RE2,
-Rust, and Java to main's time, but took `(?i)password` over CPython, whose run
-`word` is rarer than `pa` by a similar estimate, to 2.1x to 2.5x, and left
-Trino, with no prefix there, at 5.3x; a margin of two left `(?i)qsyou` where
-it was. No static rating separates the two words. A run-time demotion of a
-prefix scan whose stops turn out dense, or a start-byte scan of a one-byte
-folded prefix that a run is judged against, would catch the row.
-The scan starts the least lead past the
-search start and returns the first run it finds less the greatest lead, never
-before the search start; no match can start earlier, so the result is a skip
-like a prefix scan's. With no prefix, the run with the rarest
-pair under the rule above is chosen, earliest on ties. A folded prefix yields
-only to a run with a rarer pair behind a lead of varying width, which only
-Unicode folds produce, so every folded prefix of an ASCII-folding language
-stays. `(?i)Sherlock Holmes` scans for ` holme` 8 to 11 bytes in, probing `h`
-and `m`, and `(?i)password` for `word` 4 to 6 bytes in, in RE2, Rust, Java with
-Unicode case, and Trino. Like any prefix scan, the run takes the place of the
-DFA's start-byte scan. The engine returns to its start state at each byte it
-steps before it reaches the run, where a new scan would find the same run and
-return the position it was given, through the run less the least lead, so the
-DFA, NFA, and BitState searches skip those scans. A run that every match starts
-with, with no folded prefix, keeps the start bytes beside it only in a
-first-match DFA whose start bytes carry a start literal filter, and a find loop
-without captures keeps verifying their candidates there, which yields each
-match's start and end in one pass where a match found from the run needs a
-reverse pass for its start. Every other DFA keeps and charges no start-byte
-tables. On the run, counting the spans of Trino's `(?i)think` over English had
-taken 1.037x main's time on r9g, and with the filter it takes 0.996x;
-`(?i)Holmes` and `(?i)process`, whose start bytes carry no filter, keep the run
-in every search and take 0.10x and 0.67x. The
-[long-window required-literal check](#required-literal-absence-on-long-windows)
-judges a program whose run stands in for no prefix as the program without the
-run, counting the start literal filter its start bytes would carry, while a run
-that replaces a prefix counts as that prefix scan. So wherever the first-match
-DFA initializes, or fails to, alike with and without the run, the run changes no
-pattern's check; in the band of a few hundred bytes where the run's smaller
-start-byte tables decide whether it initializes, the check and its reservation
-judge the DFA the search runs.
-With JDK 25, `(?i)password` over CPython source took 0.43x to 0.46x
-the earlier search's time in RE2, Rust, and Java with Unicode case and 0.12x to
-0.16x in Trino, and `(?i)Sherlock Holmes` over English 0.80x to 0.89x. Literals
-that start with `k` or `s`, such as `(?i)k-9 unit` and `(?i)s\.append\(`, took
-0.07x to 0.44x, and 0.01x to 0.03x in Trino. Where vectors hold 64 bytes, a run
-that every match starts with, with no folded prefix, is left out, and the DFA
-keeps its start-byte route. There, as with AVX-512 on r8i, the run took 1.23x
-main's time for Trino's count of `(?i)Holmes` and 1.52x and 1.59x for `(?i)this`
-and `(?i)think` over 595 KB of English, and 3.68x and 3.81x for `(?i)class` and
-`(?i)process` over 8 MiB of CPython source. Keeping the start-byte route
-returned all of them to 0.99x to 1.01x, and gave up the run's wins for
-`(?i)works` (0.73x) and `(?i)watson` (0.95x), which return to main's time. On
-r9g's 16-byte vectors, measured on one host, the same runs took 0.10x to 0.70x
-main's time, and 1.04x for `(?i)this` and `(?i)think`, so there the run stays.
-These measurements predate the rule above that a three-byte run be led by a rare
-letter, under which `(?i)this` and `(?i)class`, whose runs `thi` and `cla` are
-led by common letters, get no run. The choice follows the vector width, and
-32-byte vectors, as with AVX2 or 256-bit SVE, were not measured.
+`ﬁ` ligature for `fi`, so no folded prefix reaches past them, and, as upstream,
+nothing past such a fold is scanned for.
 
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
 independent loads and parallel masks, which fits HotSpot code generation better
 on the supported Intel and Graviton hosts. Randomized equivalence tests compare
 the accelerated result with a scalar folded-prefix search.
-
-### Folded Run Behind A Start Literal
-
-A pattern such as `\bthe (?i)Sherlock Holmes` begins with a word boundary and a
-transparent start literal, so a find's candidate cursor scanned for `the `,
-which is common in English prose, and verified each occurrence. The far rarer
-folded run ` holme` behind it was never considered, because the folded run walk
-stopped at the word boundary and at the case-sensitive letters of the literal.
-
-Behind a transparent start literal, the walk now continues past zero-width
-assertions, which take no bytes, and past case-sensitive ASCII letters, each a
-lead of one byte. A run behind a start literal is kept by the same rule as any
-folded run, four or more bytes or three led by a rare letter, because both walks
-share it. When the rarest such run's probe pair is more than four times rarer
-than the pair of bytes the literal's long-window search probes, the cursor
-scans for the run in the literal's place and verifies, leftmost first, each
-start its lead allows that holds the literal, from the byte before that start,
-so the program judges each assertion. A start that does not hold the literal is
-ruled out unverified: verified, a start right after non-ASCII text would quit a
-DFA whose word boundary quits outside ASCII, and the quit would count toward the
-matcher's quit streak. The literal stays configured, so every other route
-decides as before. The factor is the margin a folded pair needs to
-leave a literal's first and last bytes, because the rating is an estimate from
-English frequencies, which misjudges common words: `you`, rated 3.5 times rarer
-than the `g` and `t` of `got` in `\bgot(?i)syou`, made the cursor verify about
-29 times as many starts as the literal's occurrences in English prose.
-
-The run stays out of the pattern's program. The first build stored the run in
-the program and made the program's folded SWAR scan a shared static method. On
-r8i that moved the compiled layout of the DFA's scan loop, with the loop counter
-in xmm6 and the loop head shifted by one 32-byte fetch window, so English `that`
-counts took 1.25x to 1.28x main's time on every engine, on rows that never take
-the run. The pattern now keeps the run, which scans with a second program
-configured with the run as its folded prefix. It shares the program's SWAR scan
-instead of a copy, and the pattern's program keeps main's bytecode and layout.
-Measured against a copy of the scan, it tied: rows that take the run ran at
-0.987x to 1.010x the copy's time, r8i `that` counts at 0.992x to 1.009x main's,
-with the same loop layout and the same inlining. The second program retains
-about 990 bytes per run, estimated, against about 100 for the copy, and that
-memory is reserved from the DFA's budget at compile time.
-
-With JDK 25, against main 30011944a in RE2 and Rust, counting the spans of
-`\bthe (?i)Sherlock Holmes` over English takes 0.65x to 0.67x main's time on
-r9g and 0.50x to 0.51x on r8i, and over English with curly quotes 0.34x in
-Rust, where main's literal cursor quit once and left the rest of the text to the
-NFA. RE2's `\ban(?i)swer` takes 0.90x on r9g and 0.87x on r8i, a host where
-that row varies by about 10%. The rows whose run the margin rejects, `\bgot(?i)syou`,
-`\bwent(?i)syou `, and `\bbeat(?i)syour`, tie main at 0.99x to 1.01x.
 
 ## Literal Prefix Vector Scan
 
@@ -4675,10 +4520,8 @@ long-window required-literal check, as
 [Literal Prefix Vector Scan](#literal-prefix-vector-scan) describes. This is a
 performance-only deviation.
 
-Case-folded prefixes, and the folded runs that stand in for them, instead pair
-two folded bytes ranked by the caller's distribution, or by `englishText()`
-under the default, which also ranks the runs and decides which three-byte runs
-are rare enough to scan, as
+Case-folded prefixes instead pair two folded bytes ranked by the caller's
+distribution, or by `englishText()` under the default, as
 [Folded Prefix Candidate Scan](#folded-prefix-candidate-scan) describes, so
 their choice is on by default where a case-sensitive probe is opt-in. The
 reason is that a folded prefix's first and last bytes are often among the
@@ -5576,9 +5419,7 @@ scratch fits, because the DFA instance is shared across threads.
 Eligible reusable matchers use a private candidate-start cursor for repeated
 group-zero searches. The cursor scans the forward DFA's start-byte candidates,
 its start literal filter's candidates, or the occurrences of a literal behind a
-leading assertion or of a rarer
-[folded run behind that literal](#folded-run-behind-a-start-literal), and
-verifies each candidate with an anchored first-match traversal. This avoids
+leading assertion, and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
 literal search takes skips the cursor: a window of at least the search's
@@ -5652,9 +5493,7 @@ the quit streak. The cursor's ordinary literal loop cannot report which
 occurrence quit, so the first quit after a reset repeats that search, with its
 work refunded to the budget, in a sibling loop that reports it, and the cursor
 keeps that loop until the next reset; a matcher whose text never quits never
-runs it. A cursor that scans for a folded start run keeps the quit streak, since
-the run's search is a separate candidate loop and settling there is unmeasured.
-Before the DFA decided non-ASCII neighbors, without the settling, one byte
+runs it. Before the DFA decided non-ASCII neighbors, without the settling, one byte
 outside ASCII next to an occurrence sent the rest of the find to the NFA: a
 count of `\bgot(?i)syou` over 899 KB of English with one `É` before an early
 occurrence took 364 to 628 times as long as its ASCII twin in Rust, Java, and

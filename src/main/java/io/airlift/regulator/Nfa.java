@@ -848,11 +848,6 @@ final class Nfa
             NfaThreadQueue nextQueue = q1;
             runQueue.clear();
             nextQueue.clear();
-            // A folded run behind a lead of varying width answers the skips after its result up
-            // to the lead's spread, as Prog.prefixAccel describes, so the search skips them. A
-            // plain prefix or literal, with no spread, never tests or writes the bound.
-            int leadSpread = prog.prefixAccelMaximumLead() - prog.prefixAccelMinimumLead();
-            int skipCoversThrough = -1;
 
             for (int position = textBegin; ; position++) {
                 int c = (position < textEnd) ? (bytes[position] & 0xFF) : -1;
@@ -890,16 +885,12 @@ final class Nfa
                 }
 
                 if (!matched && (!anchored || position == textBegin)) {
-                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canSkipToStartCandidate() &&
-                            (leadSpread == 0 || position > skipCoversThrough)) {
+                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canSkipToStartCandidate()) {
                         int found = prog.skipToStartCandidate(bytes, position, textEnd - position);
                         if (found < 0) {
                             position = textEnd;
                         }
                         else {
-                            if (leadSpread != 0 && found > position) {
-                                skipCoversThrough = found + leadSpread;
-                            }
                             position = found;
                         }
                         c = (position < textEnd) ? (bytes[position] & 0xFF) : -1;
@@ -1596,11 +1587,6 @@ final class Nfa
             CaptureThreadQueue nextQueue = q1;
             runQueue.clear();
             nextQueue.clear();
-            // A folded run behind a lead of varying width answers the prefix scans after its
-            // result up to the lead's spread, as Prog.prefixAccel describes, so the search skips
-            // them. A plain prefix, with no spread, never tests or writes the bound.
-            int prefixLeadSpread = prog.prefixAccelMaximumLead() - prog.prefixAccelMinimumLead();
-            int prefixScanCoversThrough = -1;
 
             // Loop over the text, stepping the machine.
             // position is an absolute index into the underlying byte[]; like upstream, we run one step past textEnd.
@@ -1653,16 +1639,12 @@ final class Nfa
 
                 // Start a new thread if there have not been any matches.
                 if (!matched && (!anchored || position == textBegin)) {
-                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canPrefixAccel() &&
-                            (prefixLeadSpread == 0 || position > prefixScanCoversThrough)) {
+                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canPrefixAccel()) {
                         int found = prog.prefixAccel(bytes, position, textEnd - position);
                         if (found < 0) {
                             position = textEnd;
                         }
                         else {
-                            if (prefixLeadSpread != 0 && found > position) {
-                                prefixScanCoversThrough = found + prefixLeadSpread;
-                            }
                             position = found;
                         }
                         c = (position < textEnd) ? (bytes[position] & 0xFF) : -1;

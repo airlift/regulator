@@ -212,18 +212,13 @@ final class PositionNfa
         long acceptMask = accept[0];
         long exceptionMask = exceptionSources[0];
         int groups = fanInGroupCount;
-        int leadSpread = program.prefixAccelMaximumLead() - program.prefixAccelMinimumLead();
-        int skipCoversThrough = -1;
         long state = 0;
         int position = from;
         while (position < to) {
-            if (state == 0 && (leadSpread == 0 || position > skipCoversThrough)) {
+            if (state == 0) {
                 int found = nextStart(program, bytes, position, to);
                 if (found < 0) {
                     return -1;
-                }
-                if (leadSpread != 0 && found > position) {
-                    skipCoversThrough = found + leadSpread;
                 }
                 position = found;
             }
@@ -258,19 +253,14 @@ final class PositionNfa
         long exceptionMask0 = exceptionSources[0];
         long exceptionMask1 = exceptionSources[1];
         int groups = fanInGroupCount;
-        int leadSpread = program.prefixAccelMaximumLead() - program.prefixAccelMinimumLead();
-        int skipCoversThrough = -1;
         long state0 = 0;
         long state1 = 0;
         int position = from;
         while (position < to) {
-            if ((state0 | state1) == 0 && (leadSpread == 0 || position > skipCoversThrough)) {
+            if ((state0 | state1) == 0) {
                 int found = nextStart(program, bytes, position, to);
                 if (found < 0) {
                     return -1;
-                }
-                if (leadSpread != 0 && found > position) {
-                    skipCoversThrough = found + leadSpread;
                 }
                 position = found;
             }
@@ -314,18 +304,13 @@ final class PositionNfa
     private int earliestEndInWords(Prog program, byte[] bytes, int from, int to, long[] states)
     {
         int words = this.words;
-        int leadSpread = program.prefixAccelMaximumLead() - program.prefixAccelMinimumLead();
-        int skipCoversThrough = -1;
         boolean live = false;
         int position = from;
         while (position < to) {
-            if (!live && (leadSpread == 0 || position > skipCoversThrough)) {
+            if (!live) {
                 int found = nextStart(program, bytes, position, to);
                 if (found < 0) {
                     return -1;
-                }
-                if (leadSpread != 0 && found > position) {
-                    skipCoversThrough = found + leadSpread;
                 }
                 position = found;
             }
@@ -376,8 +361,7 @@ final class PositionNfa
     }
 
     /// Returns an index in `[position, to)` before which no match starts, or -1 when none starts
-    /// in the range. A folded run behind a lead of varying width answers the skips after its
-    /// result up to the lead's spread, as [Prog#prefixAccel] describes, so each search skips them.
+    /// in the range.
     private int nextStart(Prog program, byte[] bytes, int position, int to)
     {
         if (program.canSkipToStartCandidate()) {

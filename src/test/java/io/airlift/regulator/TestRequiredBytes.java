@@ -815,17 +815,12 @@ public class TestRequiredBytes
             }
         }
 
-        // A folded run that stands in for no prefix is no other route: Trino's (?i)Holmes, whose
-        // s also matches the long s, scans for its run and checks its literal with the search-end
-        // bound. With 64-byte vectors (?i)Holmes has no run, and checks its literal beside the
-        // two-literal start literal filter its rare start bytes take, without the bound. A run
-        // that replaces a prefix is a route too: RE2's (?i)password scans for word in place of
-        // pa, and checks `,#` beside it.
+        // Trino's (?i)Holmes, whose s also matches the long s, has no prefix scan, and checks its
+        // literal on long windows. RE2's (?i)password scans for its prefix pa, and checks `,#`
+        // beside it.
         CompiledPattern holmes = TrinoRegexp.compile(utf8Slice("(?i)Holmes[^\\n]{0,40}\\(\\)")).re2();
-        boolean holmesRun = !VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64;
-        assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isEqualTo(holmesRun);
+        assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
         assertThat(holmes.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).isEqualTo("()");
-        assertThat(holmes.longWindowRequiredLiteral().boundsSearchEnd()).isEqualTo(holmesRun);
         RegexpMatcher holmesMatcher = holmes.matcher(utf8Slice(LONG_FILLER));
         assertThat(holmesMatcher.find()).isFalse();
         assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
@@ -1172,10 +1167,6 @@ public class TestRequiredBytes
                 new BesideRoute("\\d(\\d*)ab(\\d+)cde", "1ab2cde", "ab", "ab", CompiledPattern::usesScanPlanForDiagnostics)));
         if (VectorSupport.isAvailable()) {
             routes.add(new BesideRoute("(?:abc|def)(?:[a-q],){3}z", "abca,b,c,z", ",z", ",z", pattern -> Dfa.DfaInstance.searchesStartLiteralFilter(pattern.forwardProgramForDiagnostics(), Dfa.DfaInstance.Kind.FIRST_MATCH)));
-            // A folded run that stands in for no prefix counts as the start literal filter the
-            // program would have without it: (?i)kernel scans for ernel behind the Kelvin sign's
-            // lead where its start bytes would carry a filter.
-            routes.add(new BesideRoute("(?i)kernel.*?,#", "Kernel,#", ",#", ",#", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()));
         }
         Slice filler = utf8Slice(LONG_FILLER);
         for (BesideRoute route : routes) {
