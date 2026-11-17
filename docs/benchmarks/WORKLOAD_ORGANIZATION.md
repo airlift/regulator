@@ -77,6 +77,13 @@ failure. The `googlebotLine` workload's inputs are lines 24 to 31 of the
 `apache_logs` sample in elastic/examples at commit 6d86454e, the eight lines
 ending at the first one that holds Googlebot, used under the Apache-2.0 license.
 
+The `BenchmarkUapCore` rules and user agents are the `user_agent_parsers` and
+`os_parsers` sections of `regexes.yaml` and the user agents of `tests/test_ua.yaml`
+and `tests/test_os.yaml` in ua-parser/uap-core at commit 73e7340c, used under
+the Apache-2.0 license. It runs a whole rule collection through `FilteredRe2`
+and `Re2Set`, an operation none of the six populations covers, so it is
+diagnostic evidence, not a publication row.
+
 The additional Trino operations compare only against Joni. Native RE2 has no
 identical Slice-list, SQL-position, split, or lambda-replacement API. The shared
 everyday suite and RE2 bulk workloads provide native RE2 comparisons without

@@ -49,6 +49,17 @@ from repository resources, and the access-log entries equal those of
 generates the workload manifests; see the
 [workload guide](../trino-rows/README.md).
 
+`uap-core-corpus.tsv` pins the uap-core user-agent rules and tests that
+`BenchmarkUapCore` runs by URL, revision, size, checksum, and license, together
+with the size and checksum of each committed resource generated from them: the
+browser and OS sections of `regexes.yaml` and the browser and OS test cases, as
+gzip JSON lines. `provision-uap-core.py` regenerates the resources from a
+checkout of the pinned revision, and with `--check` verifies them:
+
+```bash
+python3 tools/re2-benchmark/manifests/provision-uap-core.py --check --uap-core-root <pinned-uap-core-checkout>
+```
+
 `tpch-like-corpus.tsv` pins the committed TPC-H column samples used by the
 Trino LIKE TPC-H benchmark by generator, scale factor, row range, size, and
 checksum, and `tpch-like-workloads.tsv` lists its workloads with their source
