@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -241,6 +242,7 @@ public class TestPrefixProbeAcceleration
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLeadingFoldedRunKeepsFilteredCandidateCursor()
     {

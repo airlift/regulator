@@ -17,6 +17,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -42,6 +43,7 @@ public class TestDfaCandidateStartCursor
     // ASCII. Java runs with Unicode case and character classes.
     private static final List<String> QUITTING_LANGUAGES = List.of("Java", "Trino", "Rust");
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorReturnsBoundariesWithoutReverseProgram()
     {
@@ -55,6 +57,7 @@ public class TestDfaCandidateStartCursor
         assertThat(pattern.isReverseProgramComputed()).isFalse();
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorPreservesFirstMatchPriority()
     {
@@ -79,6 +82,7 @@ public class TestDfaCandidateStartCursor
         assertThat(matcher.end()).isEqualTo(15);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorBulkScansSparseCapturePattern()
     {
@@ -97,6 +101,7 @@ public class TestDfaCandidateStartCursor
         assertThat(pattern.isReverseProgramComputed()).isFalse();
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorRejectsDenseStartBytes()
     {
@@ -111,6 +116,7 @@ public class TestDfaCandidateStartCursor
         assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorBoundsBulkScanToRemainingWork()
     {
@@ -121,6 +127,7 @@ public class TestDfaCandidateStartCursor
         assertThat(cursor.workBoundedScanLength(100)).isEqualTo(12);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorPreservesRegionsAndUtf8()
     {
@@ -180,6 +187,7 @@ public class TestDfaCandidateStartCursor
         assertThat(insideCodePointCandidate.end()).isEqualTo(insideCodePointControl.end());
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorFallsBackUntilReset()
     {
@@ -203,6 +211,7 @@ public class TestDfaCandidateStartCursor
         assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(2);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorScansMatchingSelfLoop()
     {
@@ -246,6 +255,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorFallsBackAtTransitionLimit()
     {
@@ -263,6 +273,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorFallsBackAfterCheckReadsToEnd()
     {
@@ -313,6 +324,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCandidateCursorReadsGrownTransitionTable()
     {
@@ -334,6 +346,7 @@ public class TestDfaCandidateStartCursor
         assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(initialTransitions);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorVerifiesAnchorsAtCandidates()
     {
@@ -367,6 +380,7 @@ public class TestDfaCandidateStartCursor
         assertLiteralCandidateAgrees("(?m)^aab", utf8(FILLER + "\naaab"));
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFoldedStartRunCursorSearchesRarestRunRarerThanLiteral()
     {
@@ -401,6 +415,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFoldedStartRunCursorVerifiesEveryStartTheRunAllows()
     {
@@ -428,6 +443,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFoldedStartRunCursorVerifiesOnlyStartsThatHoldTheLiteral()
     {
@@ -454,6 +470,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFoldedStartRunCursorFindsLeftmostMatch()
     {
@@ -482,6 +499,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorKeepsProseAndFallsBackOnDenseCandidates()
     {
@@ -510,6 +528,7 @@ public class TestDfaCandidateStartCursor
         assertThat(denseMatcher.candidateStartCursorEnabledForDiagnostics()).isFalse();
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorLeavesShortWindowsToExistingMatcher()
     {
@@ -523,6 +542,7 @@ public class TestDfaCandidateStartCursor
         assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorSettlesQuitCandidates()
     {
@@ -581,6 +601,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorSettlesQuitCandidateExactly()
     {
@@ -649,6 +670,7 @@ public class TestDfaCandidateStartCursor
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorBoundsQuitCandidateWork()
     {

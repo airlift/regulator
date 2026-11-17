@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -130,6 +131,7 @@ public class TestBenchmarkDfaCache
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testThrashingCountParameters()
     {

@@ -29,7 +29,7 @@ public class TestBenchmarkSweepCliffs
 
     // The workloads whose mechanism this branch switches off, whose setup must show that the
     // mechanism did not fire. Every other workload must show that it fired.
-    private static final Set<Workload> SWITCHED_OFF = EnumSet.noneOf(Workload.class);
+    private static final Set<Workload> SWITCHED_OFF = EnumSet.of(Workload.E6_DATE);
 
     /// Runs each workload at the smallest input and budget of the benchmark's parameters, or
     /// below them, at which its mechanism fires: setup checks the result against its reference,

@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -905,6 +906,7 @@ public class TestInnerLiteralSearch
         return states;
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFallsBackWhenLiteralIsNearStart()
     {

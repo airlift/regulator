@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -173,6 +174,7 @@ public class TestDfaCountMatches
                 .isEqualTo(Dfa.COUNT_UNSUPPORTED);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testCountDfaThrashingBailsOnlyThatCount()
     {
