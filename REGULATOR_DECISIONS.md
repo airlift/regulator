@@ -2431,20 +2431,9 @@ leftmost match; in byte mode every position is one byte.
 The matcher verifies the other positions around each candidate, the character
 of one chosen position. An ASCII singleton pattern, at most 64 bytes of ASCII
 bytes and classes with a position of one member, takes that position's byte
-whatever its rate. Any other pattern takes the position whose first bytes
-English text holds least, only when that is under once in 100 bytes, preferring
-a position whose first bytes are all ASCII and rating bytes above ASCII at the
-rarest ASCII byte's rate. It finds a candidate of one first byte as a one-byte
-literal search does, with the vector byte-set scan in a search of at least 1,024
-candidate positions where vector support is available and `Slice.indexOf`'s
-word-at-a-time scan otherwise, and one of several with the DFA's small byte-set
-vector scans, sampling their productivity as the DFA's start-byte scan does. A
-search chooses the one-byte scan once, where it begins, and a long one runs a
-loop of its own: a length test on each candidate search, or the array the vector
-scan reads held live across a short one, made short rows up to 3.6% slower on
-Graviton and 8.5% on x86-64. The accepted shape takes Trino `isoDate`
-`reusedCount` from 21.4 to 22.1 ns on x86-64, 1.035 of its earlier time, and
-ties on Graviton.
+whatever its rate, found with `Slice.indexOf`. Sweep leg a8-no-f2 removes the
+rare class candidate: any other pattern takes the block search below or keeps
+the engine.
 The following timing ratios are from B16's four-host-per-platform A/B
 against `47eaddfd9`. Ranges span language/operation cell geomeans of
 same-host ratios.
@@ -2460,7 +2449,7 @@ short date, UUID, and phone rows ran in 0.80-0.90 of it. Without the branch,
 the wide rows run in 0.96-1.05 of their earlier time on Graviton and 0.98-1.02
 on x86-64, and the short rows in 0.90-0.97 and 0.84-1.00. Only a Latin-1 or
 Rust byte pattern with a class above ASCII also holds two words a position for
-the bytes above ASCII, which only such a byte reads. One array addressed by the
+the bytes above ASCII, which only such a byte reads (removed with the rare class candidate in sweep leg a8-no-f2). One array addressed by the
 position and the byte together made each load wait for the byte and take a
 range check: C2 compiled 16 aarch64 instructions for each verified position
 of `isoDate`, where it compiles 12 without the branch and 9 with it, for
@@ -2469,7 +2458,7 @@ A search for a candidate of one byte that never bails, in a pattern whose
 every position reads one byte, as in the everyday `isoDate`, `uuid`, and
 `trinoPhone` patterns, runs a loop of its own below the vector scan's cutoff:
 `Slice.indexOf` and the check, with no scan choice, failure count, or
-resampling. In the loop the other searches share, those values stayed live
+resampling; after sweep leg a8-no-f2 it is the only candidate loop. In the loop the other searches share, those values stayed live
 across `Slice.indexOf` and each check, and C2 spilled them: the path from an
 `indexOf` hit of Trino `uuid` back to the next search loaded or stored the
 stack 48 times, against 2 in 2.0 and in the loop of its own, and its 8-byte
@@ -2480,11 +2469,8 @@ search's loop stayed live across `Slice.indexOf`, and a Trino `uuid` count
 stored 14 values to the stack each time it searched for a candidate. With the
 masks addressed by the byte as well, the shared loop made the reused rows of
 these patterns 1.16-1.18x their 2.0 time in every language, on both platforms.
-Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
-keeps that pattern as fast as the engine on Russian text; scanning the letter
-took 1.3-2.1x the time.
 
-When neither an ASCII singleton scan nor a rare candidate applies, a pattern
+When an ASCII singleton scan does not apply, a pattern
 such as `\w{5}\s\w{6}\s\w{7}`, whose positions all read one byte, tests every
 start of a 64-byte block at once instead, the Shift-And idea turned so that a
 word's bits are text positions, as Hyperscan's Teddy shifts the classified
@@ -2502,7 +2488,7 @@ one shift and AND for each position whatever the text holds. In UTF-8 it takes
 only ASCII classes, which no byte above ASCII joins, so a search needs no
 fallback on such bytes or on malformed input. Rust's Unicode `\w` and `\s`
 hold characters above ASCII, so that form of the pattern keeps the engine. It
-yields to the engine scans below, as a rare candidate does. Counts and rebar's
+yields to the engine scans below. Counts and rebar's
 count-spans (sums of matched lengths) of that pattern take 0.21-0.26 of their
 earlier time on r8i and 0.27-0.39 on r9g, and rebar's
 `hyperscan/fixed-length-words-nosom` and `hyperscan/fixed-length-words-som`
@@ -2511,35 +2497,10 @@ rows go from 0.66-0.69 of the Rust regex crate's time to 0.17-0.22.
 A pattern the matcher takes, its short-search matcher included, yields to the
 engine where the engine has its own scan: when the program skips to a literal
 prefix, when a forward DFA would search a start literal filter that groups of
-one bit also give, or, for a candidate with bytes above ASCII, when the
-class-run counter takes the pattern. Without the first two, `(?i)Шерлок Холмс`
-on Russian text took 89-234x the engine's time, since its filter's three bytes
-stop far less often than every Cyrillic lead byte; without the third, `[а-я]{5}`
-on Russian took 2.9-3.1x and `[一-龥]{3}` on Chinese 1.32-1.34x the counter's
-time. Trino compiles its program to decide the order, as every language does,
+one bit also give. Before sweep leg a8-no-f2, without these, `(?i)Шерлок Холмс`
+on Russian text took 89-234x the engine's time on the rare candidate. Trino compiles its program to decide the order, as every language does,
 and keeps none only on its fixed-width subtype, for a pattern whose search never
 bails; every operation of a pattern that keeps none runs the matcher.
-
-A candidate with bytes above ASCII can be dense in text of another script, so a
-search, one find or one whole count, that has failed on at least 64 candidates
-at more than one per 32 bytes hands the rest to the engine. A count keeps its
-matches and counts on from the last match end; a find restarts on the engine
-from its start. The bail holds for that search only, as upstream RE2's DFA
-falls back per search, so a dense stretch does not cost later searches the
-scan. Natural Russian text reaches it: without the bail, `[а-я]{3}[.,]` took
-2.5-2.8x the time, `[а-я]{2}[.,!?]` 1.9-2.1x, `[А-Я][а-я]{3}` 1.3-1.5x, and
-`[а-я]{4} [а-я]{4}` 2.9-3.1x, in every language on both platforms; with it,
-all four measure flat against the engine. English text keeps the scan: its
-candidates fail about once per KiB. ASCII candidates do not bail, since English
-frequencies rate them.
-
-Against the engine, on 2 r9g and 2 r8i Spot hosts (JMH average time, JDK
-25.0.4+7), the `[a-q][^u-z]{80}[x\xE0-\xFF]` targets count 740-1,390x
-faster on English text, `[a-q][^u-z]{80}x`, which the DFA kept, 5-34% faster,
-`[0-9]{4}` 19-34x, `[A-Z][0-9]{5}` 34-42x, `[一-龥]{2}[，。]` on Chinese
-2.7x, and `[0-9]{4}` on short rows 3.7-4.6x. Deciding Trino's order on its
-program makes its single-use contains of an ISO date 11-15% slower to compile
-and run once.
 
 ## Minimum Inner Literal Search Window
 
@@ -4845,7 +4806,7 @@ describes; the class filter replaces only the start set's own scan. A
 fixed-width pattern does not yield to it: unlike the start literal filter, it
 is not among the engine routes the
 [fixed-width matcher](#fixed-width-rare-class-candidates) yields to, since the
-matcher's rare candidate or block search already replaces the plain start scan.
+matcher's block search already replaces the plain start scan.
 
 On rebar mariomka/ip the filter counts 3.2-3.5 times faster than the start set's
 own scan on r9g and 4.3-4.6 times on r8i. Checking only a pair gives 3.0-3.4 and

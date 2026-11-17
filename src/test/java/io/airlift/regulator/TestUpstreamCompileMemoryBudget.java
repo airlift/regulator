@@ -400,11 +400,9 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
                 new RejectedPattern("65 words", Language.TRINO, words, 9_227, 9_227, 1, 2_000),
                 new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_843, 269_843, 1_000, 200_000),
-                new RejectedPattern(Language.TRINO, fixedWidth, 12_805, 12_805, 1, 2_000),
+                // Sweep leg a8-no-f2: the pattern reads characters, so Trino compiles its program.
+                new RejectedPattern(Language.TRINO, fixedWidth, 100_691, 100_691, 1, 2_000),
                 new RejectedPattern(Language.RE2, fixedWidth, 100_691, 100_691, 1, 2_000),
-                // 255 copies of a class of supplementary code points need more instructions than
-                // any program holds, but Trino's fixed-width matcher compiles them.
-                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 796_717, 796_717, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
                 new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_646, 1),
                 new RejectedPattern(Language.SET, List.of("foo"), 6_646, 6_646, 4_000),
@@ -635,20 +633,6 @@ public class TestUpstreamCompileMemoryBudget
     private static Regexp parse(String pattern)
     {
         return RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL).regexp();
-    }
-
-    // Every code point from U+10000 through U+4FFFF that a seeded coin keeps, as one class
-    // repeated 255 times and followed by a digit.
-    private static String supplementaryClassRun()
-    {
-        Random random = new Random(184_623);
-        StringBuilder pattern = new StringBuilder("[");
-        for (int codePoint = 0x10000; codePoint <= 0x4FFFF; codePoint++) {
-            if (random.nextBoolean()) {
-                pattern.appendCodePoint(codePoint);
-            }
-        }
-        return pattern.append("]{255}[0-9]").toString();
     }
 
     // Distinct lowercase words of three to ten letters, as alternatives.

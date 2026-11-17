@@ -89,8 +89,7 @@ public class TestPublicEngineAgreement
     @Test
     public void testSpanSearchRegions()
     {
-        // A group-zero matcher of a literal alternation, a literal set, or a fixed-width pattern,
-        // whose characters are bytes in Rust's byte mode and UTF-8 characters otherwise, finds on
+        // A group-zero matcher of a literal alternation, a literal set, or a fixed-width pattern finds on
         // the pattern's span search in every language, and its spans are the generic matcher's in
         // every region of a Slice view that begins inside its byte array: regions whose end cuts a
         // match, which leaves `ab` of `abc|x|ab` and `abc|ab` and no fixed-width match, and
@@ -99,8 +98,7 @@ public class TestPublicEngineAgreement
         Map<String, Class<? extends GroupZeroSpanSearch>> expressions = Map.of(
                 "abc|x|ab|ERROR|βeta", LiteralAlternationSpanMatcher.class,
                 literalSet, LiteralSetSpanMatcher.class,
-                "[0-9]{2}-[0-9]{2}", FixedWidthByteSpanMatcher.class,
-                "[a-q][^u-z]{2}[x\\xC0-\\xFF]", FixedWidthByteSpanMatcher.class);
+                "[0-9]{2}-[0-9]{2}", FixedWidthByteSpanMatcher.class);
         // Malformed UTF-8 at the #, between sentinel bytes outside the view.
         byte[] bytes = utf8Slice("!!abcab ERRORβeta w7q12-3456-78 w64qabéERRO#12-34abc?").getBytes();
         bytes[bytes.length - 10] = (byte) 0xFF;

@@ -1908,82 +1908,30 @@ ordinary engine would.
   `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
 - **Applies when:** Capture-free patterns, other than exact literals, of a
   fixed count of 2 to 256 characters, in every language, whose scanned
-  position is an ASCII singleton (below) or passes the
-  [rare class scan](#fixed-width-rare-class-scan), or that qualify for the
+  position is an ASCII singleton (below), or that qualify for the
   [block search](#fixed-width-block-search). When find also has an inner
   literal search of two or more bytes, every language keeps that search, and a
   second matcher answers only counts under 64 bytes and matcher finds with
   under 64 bytes left. A pattern that yields to the engine keeps neither. The
   `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
 - **What it does:** In its candidate form the matcher scans for one position,
-  then checks the others around each hit: a byte mask for ASCII, Latin-1, and
-  Rust byte classes, one decoded character for a UTF-8 class above ASCII.
+  then checks the others around each hit with a byte mask for each position.
   ASCII membership stores the low word and low XOR high for each position,
   addressed by the position alone. Bit 6 selects low or reconstructs high
   without a branch: on prose, which mixes letters with spaces and punctuation,
   a branch on that bit mispredicted. In the four-host-per-platform B16 A/B
   against `47eaddfd9`, the 82-position rows ran in 1.08-1.48 of main's time
   with the branch and 0.96-1.05 without it. The ranges span per-row
-  geomeans across languages and operations. Only Latin-1 and Rust
-  byte patterns that accept bytes above ASCII retain two more words a
-  position. With one-byte positions and a one-byte candidate that never bails,
-  a search below the vector scan's cutoff, or any search without the Vector
-  API, runs a separate loop of `Slice.indexOf` and the check, and a count
-  repeats that search from each match end. When
+  geomeans across languages and operations. When
   an ASCII pattern of up to 64 bytes has a position accepting exactly one byte,
-  the matcher scans for the byte accepted by the first such position, as the
-  [rare class scan](#fixed-width-rare-class-scan) scans a position of one first
-  byte. In `AB{n}x`, where `A` is a class of ASCII characters, `B` a character
+  the matcher scans for the byte accepted by the first such position with a
+  loop of `Slice.indexOf` and the check, and a count repeats that search from
+  each match end. Sweep leg a8-no-f2 removed the rare class scan. In `AB{n}x`, where `A` is a class of ASCII characters, `B` a character
   class without `x`, `x` one ASCII character, and `n` an exact count from 1 to
   1000, the matcher finds `x` with `indexOf` and validates the repeat backward,
   stopping at the previous `x`, so no run is validated twice. RE2 ISO date and
   phone number contains run in 0.42 to 0.47 of the general engine's time
   ([#87]).
-
-### Fixed-width rare class scan
-
-- **Origin:** First described by Oniguruma's map search, which Joni ports: it
-  picks a byte set at a known distance from the match start by a static
-  per-byte weight and scans for it before the matcher runs
-  ([regcomp.c][onig-map-select], [regexec.c][onig-map-search]); by .NET 7,
-  which ranks a pattern's fixed-distance character sets by character frequency
-  and searches for the rarest
-  ([RegexFindOptimizations.cs][dotnet7-fixed-distance],
-  [RegexPrefixAnalyzer.cs][dotnet7-set-quality]); and by memchr and
-  aho-corasick for the handoff on dense candidates, whose per-search prefilter
-  state turns the prefilter off once its skips are many and short
-  ([searcher.rs][memchr-prefilter-state], [prefilter.rs][ac-prefilter]).
-  Regulator: the yield to the engine's own scans and the handoff thresholds
-  ([#194], [design][d-fixed-width-rare]).
-- **Where:** `FixedWidthByteSpanMatcher.analyze`,
-  `FixedWidthByteSpanMatcher.yieldsToEngineScans`,
-  `FixedWidthByteSpanMatcher.countOrBail`,
-  `FixedWidthByteSpanMatcher.findSpanOrBail`,
-  `CompiledPattern.yieldsToEngineRoute`
-- **Applies when:** Fixed-width patterns in every language that have a
-  position whose first bytes' estimated English-text frequencies sum to under
-  1 in 100, other than ASCII singleton patterns of up to 64 bytes. The pattern
-  keeps the engine when its program skips to a literal prefix, a forward DFA
-  would search a start literal filter, or the class-run counter takes a
-  pattern whose candidate has bytes above ASCII. A candidate above ASCII hands
-  the rest of one find or whole count to the engine once it has failed on at
-  least 64 candidates at more than one per 32 bytes; the next search scans
-  again
-- **What it does:** The matcher sums the estimated English-text frequencies
-  of each position's first bytes, rating bytes above ASCII at the rarest ASCII
-  byte's rate, and scans for the first bytes of the position with the lowest
-  sum, preferring an ASCII position. A position with one first byte takes the
-  one-byte [vector byte-set scan](#start-byte-and-byte-set-scans) on searches
-  of at least 1,024 candidate positions and `Slice.indexOf` on shorter ones or
-  without the Vector API; one with several takes the vector byte-set scan with
-  the DFA's sampling of scan productivity, or a byte table without the Vector
-  API. Counts of `[0-9]{4}` run 19 to 34 times faster, and a class repeat that
-  once overran the DFA, such as `[a-q][^u-z]{80}[x\xE0-\xFF]`, 740 to 1,390
-  times faster ([#194]). The one-byte vector scan takes rebar's
-  `leipzig/certain-long-strings-ending-x`, over 16 MB of text, to 0.47 of its
-  earlier time on Graviton and 0.52 to 0.54 on Intel, its
-  `sherlock/repeated-class-negation` to 0.47 and 0.36, and dense ISO dates to
-  0.59 to 0.61 and 0.50 to 0.52.
 
 ### Fixed-width block search
 
@@ -2000,15 +1948,15 @@ ordinary engine would.
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.searchBlocks`, `VectorBlockMaskScanner.members`,
   `VectorBlockMaskScanner.membersSve`
-- **Applies when:** Fixed-width patterns in every language that take neither
-  an ASCII singleton scan nor a rare candidate, when the Vector API is
+- **Applies when:** Fixed-width patterns in every language that take no
+  ASCII singleton scan, when the Vector API is
   available, the pattern is at most 64 positions wide, every position reads
   one byte, it has two to four distinct classes of at most four byte ranges or
   the complement of at most four, and the product of its positions' English
   byte probabilities estimates a start probability of at most 1/64. In UTF-8
   its classes are ASCII only, so Rust's Unicode `\w` keeps the engine. It
-  yields to the engine as the [rare class scan](#fixed-width-rare-class-scan)
-  does
+  yields to the engine when its program skips to a literal prefix or a forward
+  DFA would search a start literal filter
 - **What it does:** The search tests every start of a 64-byte block at once:
   it builds one word per distinct class, a bit for each byte of the block the
   class holds, shifts each position's word down by the position's offset with
@@ -2592,7 +2540,6 @@ change is described.
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
 [#193]: https://github.com/airlift/regulator/pull/193
-[#194]: https://github.com/airlift/regulator/pull/194
 [#195]: https://github.com/airlift/regulator/pull/195
 [#201]: https://github.com/airlift/regulator/pull/201
 [#202]: https://github.com/airlift/regulator/pull/202
@@ -2720,7 +2667,6 @@ change is described.
 [O-BIT-015]: OPTIMIZATION_REGISTRY.md#o-bit-005-through-o-bit-015-additional-bitstate-optimizations
 [ac-automaton]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/automaton.rs
 [ac-noncontiguous]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/nfa/noncontiguous.rs
-[ac-prefilter]: https://github.com/BurntSushi/aho-corasick/blob/7e231db4b4ac192ebc674078f2b03cd37b9ed5b9/src/prefilter.rs#L150-L265
 [ac-rare-bytes]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/util/prefilter.rs#L478-L497
 [ac-teddy-readme]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/README.md
 [ac-vector]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/vector.rs#L363-L370
@@ -2820,8 +2766,6 @@ change is described.
 [nr-glushkov]: https://users.dcc.uchile.cl/~gnavarro/ps/algor04.2.pdf
 [onig-dist-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5513-L5534
 [onig-dist-try]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5873-L5887
-[onig-map-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5440-L5469
-[onig-map-select]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regcomp.c#L6333-L6349
 [pcre-changelog]: https://www.pcre.org/original/changelog.txt
 [pcre2-anchored-first]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.44/src/pcre2_match.c#L7188-L7214
 [pcre2-auto-possess]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.47/src/pcre2_auto_possess.c

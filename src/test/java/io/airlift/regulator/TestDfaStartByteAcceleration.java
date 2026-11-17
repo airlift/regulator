@@ -1199,29 +1199,6 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedWidthMatcherYieldsOnlyToOneBitStartLiteralFilter()
-    {
-        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
-        // A fixed-width pattern keeps its matcher over a filter that only wider groups admit, in
-        // every language: é and ê differ in two bits of their second byte, and the DFA searches
-        // the wider groups' filter. One whose filter groups of one bit give, such as the folded
-        // Cyrillic letters around [ ,], still yields to it.
-        assertThat(firstMatchDfa("[éê]x").startLiteralFilter()).isNotNull();
-        for (String expression : List.of("[éê]x", "(?i)шр[ ,]ст")) {
-            Prog program = compile(expression);
-            boolean oneBitFilter = expression.equals("(?i)шр[ ,]ст");
-            assertThat(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1) != null).as(expression).isEqualTo(oneBitFilter);
-            for (CompiledPattern pattern : List.of(
-                    Re2.compile(Slices.utf8Slice(expression)),
-                    JavaRegexp.compile(Slices.utf8Slice(expression)),
-                    RustRegexp.compile(Slices.utf8Slice(expression)),
-                    TrinoRegexp.compile(Slices.utf8Slice(expression)).re2())) {
-                assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(expression).isEqualTo(!oneBitFilter);
-            }
-        }
-    }
-
-    @Test
     public void testWideStartLiteralFilterGroupsKeepOneBitFilters()
     {
         assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
@@ -1381,12 +1358,6 @@ public class TestDfaStartByteAcceleration
         text = Slices.utf8Slice("the quiet reader walks along the old road ".repeat(190));
         assertThat(Dfa.search(rareFixedDistance, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
         assertThat(rareFixedDistanceDfa.startClassFilterScanCount()).isZero();
-
-        // A fixed-width pattern keeps its matcher: the matcher yields to a start literal filter but
-        // not to a class filter, since the matcher's own scan for its rarest position replaces the
-        // DFA's start scan.
-        assertThat(firstMatchDfa("[0-9]{4}").startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
-        assertThat(Re2.compile(Slices.utf8Slice("[0-9]{4}")).hasRetainedFixedWidthByteSpanMatcher()).isTrue();
     }
 
     @Test

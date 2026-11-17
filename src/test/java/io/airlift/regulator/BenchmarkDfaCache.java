@@ -71,6 +71,7 @@ public class BenchmarkDfaCache
     // In Latin-1 mode the fixed-width matcher counts this pattern. On the state-growth row with
     // every fourth byte 0xE0, its scan bails on the dense rare-class bytes, and the DFA count it
     // hands the rest of the row to resets too often and bails.
+    // Sweep leg a8-no-f2: the block search counts it instead and never bails.
     private static final String FIXED_WIDTH_THRASHING_COUNT = "[a-q][^u-z]{23}[x\\xE0-\\xFF]";
     private static final int DENSE_RARE_CLASS_STRIDE = 4;
     // In UTF-8 mode at a 1 MiB pattern budget, a count of this pattern over the 16 KiB start of

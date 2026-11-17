@@ -153,7 +153,7 @@ public class TestHotMethodSize
     @Test
     public void testFixedWidthSearchesFitInlineSize()
     {
-        for (String method : List.of("searchBytes", "searchCandidateByte", "countCandidateBytes", "searchCharacters", "searchLongBytes", "searchLongCharacters")) {
+        for (String method : List.of("searchCandidateByte", "countCandidateBytes")) {
             assertThat(codeLength(FixedWidthByteSpanMatcher.class, method))
                     .as("FixedWidthByteSpanMatcher.%s bytecode bytes", method)
                     .isPositive()

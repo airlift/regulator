@@ -151,11 +151,10 @@ public class TestBenchmarkDfaCache
         assertThat(neverThrashingCount).isPositive();
         assertThat(benchmark.countNeverThrashingRow(state)).isEqualTo(neverThrashingCount);
         assertThat(dfa.resetCount()).isEqualTo(resetCount);
-        // The DFA count that the fixed-width matcher hands the dense row to bails, and so does the
-        // candidate-cursor pattern's count of its row. With a 1 GiB budget, their DFA counts find
-        // 396 and 5 matches without bailing.
+        // The candidate-cursor pattern's DFA count of its row bails. With a 1 GiB budget, the
+        // fixed-width and candidate-cursor DFA counts find 396 and 5 matches without bailing.
+        // Sweep leg a8-no-f2: the block search counts the fixed-width row and never bails.
         assertThat(state.fixedWidthThrashingPattern().fixedWidthByteSpanMatcherForDiagnostics()).isNotNull();
-        assertThat(state.fixedWidthThrashingPattern().countMatches(state.denseRareClassRow())).isEqualTo(Dfa.COUNT_BAILED);
         assertThat(benchmark.countFixedWidthThrashingRow(state)).isEqualTo(396);
         Re2 candidateCursorPattern = state.candidateCursorThrashingPattern();
         assertThat(candidateCursorPattern.createCandidateStartCursor()).isNotNull();

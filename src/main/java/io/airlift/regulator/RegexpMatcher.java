@@ -302,12 +302,7 @@ public final class RegexpMatcher
             if (spanSearch == pattern.shortFixedWidthByteMatcher() && pattern.searchesInnerLiteralWindow(regionEnd - start)) {
                 return rustSearch ? findRust() : findGeneral();
             }
-            // A search that bails on dense candidates runs again from its start on the program's
-            // search, as a find of the pattern without the matcher would.
             span = ((FixedWidthByteSpanMatcher) spanSearch).findSpanOrBail(input, start, regionEnd);
-            if (span == FixedWidthByteSpanMatcher.BAILED) {
-                return findOnProgramFromSpanSearch();
-            }
         }
         if (span < 0) {
             return failFind();

@@ -154,11 +154,11 @@ public class TestDisjointSuffixRepeatMatcher
         Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
         DisjointSuffixRepeatMatcher plan = DisjointSuffixRepeatMatcher.analyze(parsed.regexp());
         Re2 compiled = Re2.compileParsed(utf8Slice(expression), parsed, JavaRegexp.Options.defaults().parseFlags(), maxMemory);
-        // The fixed-width matcher, which answers full-Slice find and count, shares the budget.
-        assertThat(compiled.hasRetainedFixedWidthByteSpanMatcher()).isTrue();
-        long fixedWidthSize = compiled.fixedWidthByteSpanMatcherForDiagnostics().estimatedRetainedSize();
+        // Sweep leg a8-no-f2: the pattern reads characters, so no fixed-width matcher shares the
+        // budget.
+        assertThat(compiled.hasRetainedFixedWidthByteSpanMatcher()).isFalse();
         assertThat(compiled.forwardProgramForDiagnostics().dfaMemory())
-                .isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize() - fixedWidthSize - compiled.requiredBytesRetainedSizeForDiagnostics());
+                .isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize() - compiled.requiredBytesRetainedSizeForDiagnostics());
     }
 
     private static DisjointSuffixRepeatMatcher analyze(String expression)

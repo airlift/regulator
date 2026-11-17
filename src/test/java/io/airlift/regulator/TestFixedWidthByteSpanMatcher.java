@@ -127,40 +127,13 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
-    public void testMasksAboveAscii()
-    {
-        // A position checks an ASCII byte with masks addressed by the position alone, so their
-        // load does not wait for the text byte. Only a pattern that reads a class above ASCII as
-        // bytes, in Latin-1 or Rust's byte mode, holds masks for the bytes above ASCII; any other
-        // rejects such a byte at a position that reads one byte. The everyday dates, UUIDs, and
-        // phone numbers hold none in any language.
-        for (String expression : List.of(
-                "[0-9]{4}-[0-9]{2}-[0-9]{2}",
-                "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-                "\\d{3}/\\d{3}/\\d{4}")) {
-            Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
-            patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
-            patterns.put("Trino " + expression, TrinoRegexp.compile(utf8Slice(expression)).re2());
-            for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
-                FixedWidthByteSpanMatcher matcher = entry.getValue().fixedWidthByteSpanMatcherForDiagnostics();
-                assertThat(matcher).as(entry.getKey()).isNotNull();
-                assertThat(matcher.holdsMasksAboveAsciiForDiagnostics()).as(entry.getKey()).isFalse();
-            }
-        }
-        String aboveAscii = "[a-q][^u-z]{3}[x\\xE0-\\xFF]";
-        assertThat(optionalMatcher(aboveAscii, Re2.Options.latin1()).holdsMasksAboveAsciiForDiagnostics()).isTrue();
-        assertThat(RustRegexp.compile(utf8Slice("(?-u)" + aboveAscii), RustRegexp.Options.bytes()).fixedWidthByteSpanMatcherForDiagnostics().holdsMasksAboveAsciiForDiagnostics()).isTrue();
-        assertThat(matcher(aboveAscii).holdsMasksAboveAsciiForDiagnostics()).isFalse();
-    }
-
-    @Test
     public void testCandidateByteSearch()
     {
         // A search for a candidate of one byte that never bails, in a pattern whose every
         // position reads one byte, runs a loop with no scan choice or failure count: the everyday
-        // dates, UUIDs, and phone numbers in every language, but for Rust's Unicode \d, which
-        // reads characters. Both finds search once, and both counts once from the start and once
-        // from the end of each match.
+        // dates, UUIDs, and phone numbers in every language. Rust's Unicode \d reads characters,
+        // and that pattern keeps the engine. Both finds search once, and the count once from
+        // the start and once from the end of each match.
         Map<String, String> rows = Map.of(
                 "[0-9]{4}-[0-9]{2}-[0-9]{2}", "2025-12-09 and 2024-01-31",
                 "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "id 123e4567-e89b-12d3-a456-426614174000,00112233-4455-6677-8899-AABBCCDDEEFF",
@@ -171,23 +144,21 @@ public class TestFixedWidthByteSpanMatcher
             patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
             patterns.put("Trino " + expression, TrinoRegexp.compile(utf8Slice(expression)).re2());
             for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
-                boolean readsCharacters = entry.getKey().equals("Rust \\d{3}/\\d{3}/\\d{4}");
-                assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice(row.getValue()), 2, !readsCharacters);
+                if (entry.getKey().equals("Rust \\d{3}/\\d{3}/\\d{4}")) {
+                    assertThat(entry.getValue().fixedWidthByteSpanMatcherForDiagnostics()).as(entry.getKey()).isNull();
+                    continue;
+                }
+                assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice(row.getValue()), 2, true);
             }
         }
 
-        // A candidate of several bytes, one that can bail, a pattern that reads characters, and a
-        // block search keep the shared loops, and a search of at least 1,024 candidate positions
-        // takes the vector scan where the Vector API runs.
-        assertCandidateByteSearches("[0-9]{4}", matcher("[0-9]{4}"), utf8Slice("in 2024 and 2025"), 2, false);
-        assertCandidateByteSearches("Latin-1 [a-z]{3}\\xE0", optionalMatcher("[a-z]{3}\\xE0", Re2.Options.latin1()), wrappedBuffer(bytes('a', 'b', 'c', 0xE0, ' ', 'x', 'y', 'z', 0xE0)), 2, false);
-        assertCandidateByteSearches("[a-q][^u-z]{13}x", matcher("[a-q][^u-z]{13}x"), utf8Slice("a0123456789abcx"), 1, false);
+        // A block search keeps its own loop, and a long search runs the candidate byte loop too.
         if (VectorSupport.isAvailable()) {
             for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns("\\w{5}\\s\\w{6}\\s\\w{7}").entrySet()) {
                 assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice("hello planet journey"), 1, false);
             }
         }
-        assertCandidateByteSearches("long [0-9]{4}-[0-9]{2}-[0-9]{2}", matcher("[0-9]{4}-[0-9]{2}-[0-9]{2}"), utf8Slice("b".repeat(2_048) + "2025-12-09"), 1, !VectorSupport.isAvailable());
+        assertCandidateByteSearches("long [0-9]{4}-[0-9]{2}-[0-9]{2}", matcher("[0-9]{4}-[0-9]{2}-[0-9]{2}"), utf8Slice("b".repeat(2_048) + "2025-12-09"), 1, true);
     }
 
     // Runs each entry over `input`, with a region search that ends a byte early, and checks the
@@ -195,7 +166,7 @@ public class TestFixedWidthByteSpanMatcher
     // matches for each count.
     private static void assertCandidateByteSearches(String label, FixedWidthByteSpanMatcher matcher, Slice input, long matches, boolean searchesCandidateByte)
     {
-        long[] searches = new long[4];
+        long[] searches = new long[3];
         long before = matcher.candidateByteSearchCountForDiagnostics();
         matcher.findSpan(input, 0);
         searches[0] = matcher.candidateByteSearchCountForDiagnostics() - before;
@@ -205,10 +176,7 @@ public class TestFixedWidthByteSpanMatcher
         before += searches[1];
         assertThat(matcher.count(input)).as(label).isEqualTo(matches);
         searches[2] = matcher.candidateByteSearchCountForDiagnostics() - before;
-        before += searches[2];
-        assertThat(matcher.countOrBail(input)).as(label).isEqualTo(matches);
-        searches[3] = matcher.candidateByteSearchCountForDiagnostics() - before;
-        long[] expected = searchesCandidateByte ? new long[] {1, 1, matches + 1, matches + 1} : new long[4];
+        long[] expected = searchesCandidateByte ? new long[] {1, 1, matches + 1} : new long[3];
         assertThat(searches).as(label).containsExactly(expected);
     }
 
@@ -228,23 +196,9 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(matcher.findSpanOrBail(input, 13, 22)).isEqualTo(span(17, 22));
         assertThat(matcher.findSpanOrBail(input, 13, 21)).isEqualTo(Dfa.SEARCH_NO_MATCH);
 
-        // The character search scans for a one-byte candidate, here the x, with the vector scan in
-        // a search of at least 1,024 candidate positions where the Vector API is available. A
-        // false candidate and the match lie well past the first vectors of a view that starts
-        // inside its array, and the match ends the view.
-        FixedWidthByteSpanMatcher ending = matcher("[a-q][^u-z]{13}x");
-        String filler = "b".repeat(1100);
-        Slice longBacking = utf8Slice("!" + filler + "zx" + filler + "x?");
-        Slice longInput = wrappedBuffer(longBacking.byteArray(), longBacking.byteArrayOffset() + 1, longBacking.length() - 2);
-        int matchEnd = longInput.length();
-        assertSpan(ending, longInput, 0, matchEnd - 15, matchEnd);
-        assertThat(ending.count(longInput)).isEqualTo(1);
-        assertThat(ending.findSpanOrBail(longInput, 0, matchEnd - 1)).isEqualTo(Dfa.SEARCH_NO_MATCH);
-        assertThat(ending.findSpanOrBail(longInput, 0, matchEnd)).isEqualTo(span(matchEnd - 15, matchEnd));
-
-        // The byte search does the same, and a long count keeps the vector scan for the short rest
-        // of the input after a match: a match at the start, then a false `-` candidate and
+        // A long search does the same: a match at the start, then a false `-` candidate and
         // adjacent matches at the end.
+        String filler = "b".repeat(1100);
         Slice longDatesBacking = utf8Slice("!12-34" + filler + "12-x4 12-3412-34?");
         Slice longDates = wrappedBuffer(longDatesBacking.byteArray(), longDatesBacking.byteArrayOffset() + 1, longDatesBacking.length() - 2);
         int lateMatch = longDates.length() - 10;
@@ -255,24 +209,6 @@ public class TestFixedWidthByteSpanMatcher
         // A start past the end finds nothing, even one so far past it that its distance to the
         // end would wrap into a long search.
         assertThat(matcher.findSpan(Slices.EMPTY_SLICE, Integer.MAX_VALUE)).isEqualTo(Dfa.SEARCH_NO_MATCH);
-    }
-
-    @Test
-    public void testSingleByteVectorScanCutoff()
-    {
-        // A search with a one-byte candidate takes the vector scan once it has 1,024 candidate
-        // positions, one for each match start, where the Vector API is available, whatever its
-        // start.
-        FixedWidthByteSpanMatcher ending = matcher("[a-q][^u-z]{13}x");
-        int width = 15;
-        for (int start : new int[] {0, 7}) {
-            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_023 + width - 1)), start)).isFalse();
-            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_024 + width - 1)), start)).isEqualTo(VectorSupport.isAvailable());
-            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_025 + width - 1)), start)).isEqualTo(VectorSupport.isAvailable());
-        }
-
-        // A candidate of several bytes, here the ten digits, keeps its byte-set scan.
-        assertThat(matcher("[0-9]{4}").usesSingleByteVectorScan(utf8Slice("b".repeat(4_096)), 0)).isFalse();
     }
 
     @Test
@@ -295,14 +231,13 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(optionalMatcher("[0-9]{4}-[0-9]{2}-[0-9]{2}")).isNotNull();
         assertThat(optionalMatcher("\\d{3}/\\d{3}/\\d{4}")).isNotNull();
         assertThat(optionalMatcher("[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}")).isNotNull();
-        // Digits are rare enough in English text to scan for without a literal.
-        assertThat(optionalMatcher("[0-9]{4}")).isNotNull();
-        assertThat(optionalMatcher("[é]{2}-[0-9]{2}")).isNotNull();
-        // At most 256 positions, by repeat or by concatenation.
-        assertThat(optionalMatcher("[0-9]{256}")).isNotNull();
-        assertThat(optionalMatcher("[0-9]{255}-")).isNotNull();
-        assertThat(optionalMatcher("[0-9]{257}")).isNull();
-        assertThat(optionalMatcher("[0-9]{256}-")).isNull();
+        // Sweep leg a8-no-f2: a pattern without an ASCII singleton, or one that reads characters,
+        // scans no candidate.
+        assertThat(optionalMatcher("[0-9]{4}")).isNull();
+        assertThat(optionalMatcher("[é]{2}-[0-9]{2}")).isNull();
+        // At most 64 positions for an ASCII singleton scan, by repeat or by concatenation.
+        assertThat(optionalMatcher("[0-9]{63}-")).isNotNull();
+        assertThat(optionalMatcher("[0-9]{64}-")).isNull();
         assertThat(optionalMatcher("literal")).isNull();
         assertThat(optionalMatcher("[,;]")).isNull();
         assertThat(optionalMatcher("[0-9]+-[0-9]+")).isNull();
@@ -322,39 +257,8 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
-    public void testWideClassPatternsTakeTheMatcher()
+    public void testRefusalsAndSingletonCandidates()
     {
-        // Every position of [a-q][^u-z]{80}[x\xE0-\xFF] is a class. The forward DFA's subset
-        // states grow with the repeat until it bails, so without the matcher every count runs
-        // the NFA. The matcher scans for the rare last class, in Latin-1 its bytes and in UTF-8
-        // the first bytes of its members, and checks the other positions around each hit.
-        for (int repeat : List.of(16, 80, 160)) {
-            String expression = "[a-q][^u-z]{%s}[x\\xE0-\\xFF]".formatted(repeat);
-            Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
-            patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
-            // Trino rejects \xE0, so its form names the characters. The candidate holds a byte
-            // above ASCII, so a search can bail, and the pattern keeps its program and answers
-            // through the compiled pattern's routes.
-            String trinoExpression = "[a-q][^u-z]{%s}[xà-ÿ]".formatted(repeat);
-            TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(trinoExpression));
-            assertThat(trino).as(trinoExpression).isExactlyInstanceOf(TrinoRegexp.class);
-            patterns.put("Trino " + trinoExpression, trino.re2());
-            for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
-                assertThat(entry.getValue().hasRetainedFixedWidthByteSpanMatcher()).as(entry.getKey()).isTrue();
-                assertThat(shape(entry.getValue())).as(entry.getKey()).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            }
-        }
-
-        // ASCII patterns wider than 64 positions take it too. Trino compiles the program to decide
-        // the order, finds that no route of it precedes the matcher, and keeps none.
-        String wideAscii = "[a-q][a-z ]{80}x";
-        for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns(wideAscii).entrySet()) {
-            assertThat(entry.getValue().hasRetainedFixedWidthByteSpanMatcher()).as(entry.getKey()).isTrue();
-        }
-        TrinoRegexp wideAsciiTrino = TrinoRegexp.compile(utf8Slice(wideAscii));
-        assertThat(wideAsciiTrino).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
-        assertThat(wideAsciiTrino.re2().forwardProgramForDiagnostics().start()).isZero();
-
         // Where every position's first bytes are common in English text, analysis refuses the
         // pattern unless the block search takes it, and the engine keeps it. The search refuses a
         // pattern whose estimated starts are denser than once a block, \w\s\w; one of a single
@@ -386,67 +290,6 @@ public class TestFixedWidthByteSpanMatcher
                 assertThat(entry.getValue().fixedWidthByteSpanMatcherForDiagnostics().candidateOffsetForDiagnostics()).as(entry.getKey()).isEqualTo(1);
             }
         }
-        // Any other pattern scans a rare position: here not the space, the commonest byte of
-        // English text, but the first byte of е, which both its cases share. The forward DFA
-        // searches for its start literal filter, three bytes of Шер, wherever the Vector API
-        // runs, and there the engine keeps the pattern.
-        CompiledPattern cyrillic = RustRegexp.compile(utf8Slice("(?i)Шерлок Холмс"));
-        RustRegexp.Options rust = RustRegexp.Options.defaults();
-        Regexp cyrillicTree = RustRegexpParser.parse(utf8Slice("(?i)Шерлок Холмс"), rust.syntaxFlags(), rust.nestLimit()).regexp();
-        assertThat(cyrillic.createFixedWidthByteSpanMatcher(cyrillicTree).candidateOffsetForDiagnostics()).isEqualTo(1);
-        assertThat(cyrillic.hasRetainedFixedWidthByteSpanMatcher()).isEqualTo(!VectorSupport.isAvailable());
-        // [а-я]{3}[.,] keeps the engine the same way in every language. Its filter tests the lead
-        // byte of the first letter and the [.,] six bytes later, which stop far less often than
-        // the lead byte of every Cyrillic letter.
-        String shortCyrillic = "[а-я]{3}[.,]";
-        for (Map.Entry<String, CompiledPattern> entry : Map.of(
-                "RE2 " + shortCyrillic, Re2.compile(utf8Slice(shortCyrillic)),
-                "Java " + shortCyrillic, JavaRegexp.compile(utf8Slice(shortCyrillic)),
-                "Rust " + shortCyrillic, RustRegexp.compile(utf8Slice(shortCyrillic)),
-                "Trino " + shortCyrillic, TrinoRegexp.compile(utf8Slice(shortCyrillic)).re2()).entrySet()) {
-            Prog program = entry.getValue().forwardProgramForDiagnostics();
-            assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
-            assertThat(shape(entry.getValue())).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable() ? CompiledPattern.Shape.ENGINE : CompiledPattern.Shape.FIXED_WIDTH);
-        }
-        // So it does where the forward program skips to a literal prefix, or the class-run
-        // counter counts the pattern, in every language.
-        for (String expression : List.of("abc[^u-z]{80}x", "[а-я]{5}")) {
-            TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(expression));
-            Map<String, Regexp> trees = Map.of(
-                    "RE2 " + expression, RegexpParser.parse(utf8Slice(expression), Re2.Options.defaults().parseFlags()).regexp(),
-                    "Java " + expression, JavaRegexpParser.parse(utf8Slice(expression), JavaRegexp.Options.defaults().parseFlags()).regexp(),
-                    "Rust " + expression, RustRegexpParser.parse(utf8Slice(expression), rust.syntaxFlags(), rust.nestLimit()).regexp(),
-                    "Trino " + expression, TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL).regexp());
-            for (Map.Entry<String, CompiledPattern> entry : Map.of(
-                    "RE2 " + expression, Re2.compile(utf8Slice(expression)),
-                    "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
-                    "Rust " + expression, RustRegexp.compile(utf8Slice(expression)),
-                    "Trino " + expression, trino.re2()).entrySet()) {
-                assertThat(entry.getValue().createFixedWidthByteSpanMatcher(trees.get(entry.getKey()))).as(entry.getKey()).isNotNull();
-                assertThat(entry.getValue().hasRetainedFixedWidthByteSpanMatcher()).as(entry.getKey()).isFalse();
-            }
-            assertThat(trino).as(expression).isNotInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
-        }
-        // Trino decides the order on its program, as every language does, so where a forward DFA
-        // searches for the start literal filter of these three-class prefixes, Trino keeps the
-        // engine with RE2.
-        for (String expression : List.of("[de][hi][no][a-z]{20}[0-9]", "[ac][eg][ln][0-9][a-z]{80}")) {
-            assertThat(Re2.compile(utf8Slice(expression)).hasRetainedFixedWidthByteSpanMatcher()).as(expression).isEqualTo(!VectorSupport.isAvailable());
-            TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(expression));
-            assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).as(expression).isEqualTo(!VectorSupport.isAvailable());
-        }
-        // The class-run counter keeps only a pattern whose candidate holds bytes above ASCII,
-        // whose density English text does not show. The counter counts [0-9]{4} too, but the
-        // matcher scans its digits, whose density it does show.
-        String digits = "[0-9]{4}";
-        for (Map.Entry<String, CompiledPattern> entry : Map.of(
-                "RE2 " + digits, Re2.compile(utf8Slice(digits)),
-                "Java " + digits, JavaRegexp.compile(utf8Slice(digits)),
-                "Rust " + digits, RustRegexp.compile(utf8Slice(digits))).entrySet()) {
-            assertThat(entry.getValue().classMatchCounter()).as(entry.getKey()).isNotNull();
-            assertThat(entry.getValue().hasRetainedFixedWidthByteSpanMatcher()).as(entry.getKey()).isTrue();
-        }
-        assertThat(TrinoRegexp.compile(utf8Slice(digits))).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
     }
 
     @Test
@@ -504,63 +347,11 @@ public class TestFixedWidthByteSpanMatcher
                 "[^0-9][0-9]{2}")) {
             Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
             patterns.put("RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()));
+            // Sweep leg a8-no-f2: a pattern without an ASCII singleton keeps the engine unless the
+            // block search takes it, as it does these in Latin-1.
+            patterns.values().removeIf(pattern -> shape(pattern) != CompiledPattern.Shape.FIXED_WIDTH);
+            assertThat(patterns).as(expression).isNotEmpty();
             assertGeneralEngineAgreement(patterns, inputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
-        }
-        // Members of every UTF-8 length, beside ASCII positions, holding the surrogates, and as
-        // the scanned position, which Rust's byte mode cannot write.
-        for (String expression : List.of(
-                "[\\x{3B1}-\\x{3C9}\\x{4E00}-\\x{9FFF}\\x{1F4B0}-\\x{1F4B2}][0-9]{2}[^0-9]",
-                "[a-z][\\x{4E00}-\\x{4E0F}][a-z]",
-                "[a-z]{2}[\\x{3B1}\\x{4E00}\\x{1F4B0}][a-z]",
-                "[a-z][\\x{800}-\\x{FFFF}][0-9]")) {
-            assertGeneralEngineAgreement(Map.of(
-                    "RE2 " + expression, Re2.compile(utf8Slice(expression)),
-                    "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
-                    "Rust " + expression, RustRegexp.compile(utf8Slice(expression))), inputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
-        }
-
-        // Trino's fixed-width subtype answers every operation from the matcher's spans, whose
-        // characters here differ in byte width, and agrees with Joni on UTF-8 text. A pattern
-        // whose candidate holds bytes above ASCII keeps its program, so a search can bail, and
-        // answers through the compiled pattern's routes. Each pattern maps to whether it bails.
-        List<Slice> trinoSources = new ArrayList<>();
-        for (Slice input : inputs) {
-            if (Utf8.firstInvalidOffset(input) < 0) {
-                // Bytes on either side of the view must not reach results.
-                trinoSources.add(utf8Slice("àb" + input.toStringUtf8() + "àb").slice(3, input.length()));
-            }
-        }
-        Map<String, Boolean> trinoPatterns = Map.of(
-                "[a-q][^u-z]{3}[xà-ÿ]", true,
-                "[α-ω一-鿿💰-💲][0-9]{2}[^0-9]", false,
-                "[a-z]{2}[α一💰][a-z]", true,
-                "[^0-9][0-9]{2}", false);
-        for (Map.Entry<String, Boolean> entry : trinoPatterns.entrySet()) {
-            String expression = entry.getKey();
-            boolean bails = entry.getValue();
-            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-            assertThat(shape(regexp.re2())).as(expression).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            assertThat(regexp.re2().fixedWidthByteSpanMatcherForDiagnostics().bailsOnDenseCandidates()).as(expression).isEqualTo(bails);
-            // Only a matcher that never bails allows compiling no program, and each pattern here
-            // whose matcher never bails compiled none, so its forward program is the placeholder
-            // that starts at zero.
-            assertThat(regexp.re2().forwardProgramForDiagnostics().start() == 0).as(expression).isEqualTo(!bails);
-            if (bails) {
-                assertThat(regexp).as(expression).isExactlyInstanceOf(TrinoRegexp.class);
-            }
-            else {
-                assertThat(regexp).as(expression).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
-            }
-            Regex oracle = joniPattern(expression);
-            verifyOperations(expression, regexp, source -> joniMatches(oracle, source), trinoSources);
-            // The compiled pattern's region and anchored matches agree with the program of the
-            // same pattern in a group, on malformed rows too. The subtype's public operations
-            // never reach these, and the patterns that bail keep their program.
-            CompiledPattern reference = TrinoRegexp.compile(utf8Slice("(" + expression + ")")).re2();
-            assertThat(shape(reference)).as(expression).isNotEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            for (Slice source : inputs) {
-                assertRegionMatchAgreement("Trino " + expression, regexp.re2(), reference, source);
-            }
         }
     }
 
@@ -586,9 +377,9 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(trino.re2().fixedWidthByteSpanMatcherForDiagnostics().searchesBlocksForDiagnostics()).isTrue();
         assertThat(trino.re2().forwardProgramForDiagnostics().start()).isZero();
 
-        // A pattern with a rare candidate keeps scanning it. testWideClassPatternsTakeTheMatcher
-        // covers a singleton position and the patterns the search refuses.
-        for (String expression : List.of("[0-9]{4}-[0-9]{2}-[0-9]{2}", "[a-q][^u-z]{16}[x\\xE0-\\xFF]")) {
+        // A pattern with an ASCII singleton keeps scanning it. testRefusalsAndSingletonCandidates
+        // covers the patterns the search refuses.
+        for (String expression : List.of("[0-9]{4}-[0-9]{2}-[0-9]{2}")) {
             for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns(expression).entrySet()) {
                 assertThat(entry.getValue().fixedWidthByteSpanMatcherForDiagnostics().searchesBlocksForDiagnostics()).as(entry.getKey()).isFalse();
             }
@@ -788,128 +579,6 @@ public class TestFixedWidthByteSpanMatcher
         return inputs;
     }
 
-    @Test
-    public void testDenseCandidatesBail()
-    {
-        // [а-я]{6}[.,] scans the lead bytes of Cyrillic letters, rare in English text, and a
-        // Russian text of short words fails at nearly every letter. Once at least 64 candidates
-        // have failed at more than one per 32 bytes, the search hands the rest to the program,
-        // and every route agrees with the general engine. The count keeps the match before the
-        // bail and counts the rest from its end. Its [.,] lies past the twelve bytes a start
-        // literal filter reads, so no filter takes the pattern from the matcher.
-        String expression = "[а-я]{6}[.,]";
-        String filler = "и я да он мы ".repeat(20);
-        Slice dense = utf8Slice("работа, " + filler + "машина. страна, письмо.");
-        Slice denseFromStart = utf8Slice(filler + "машина.");
-        // A region that starts after the first match and ends inside the last one.
-        int regionStart = "работа, ".getBytes(UTF_8).length;
-        int regionEnd = dense.length() - 1;
-        // English text keeps the scan: its only Cyrillic letters are those of one word at its end,
-        // which matches.
-        Slice english = utf8Slice("The next morning a café near the old railway station served a quiet breakfast to the travelers who had arrived late. ".repeat(40) +
-                "Словарь, then more text.");
-        Map<String, CompiledPattern> patterns = Map.of(
-                "RE2 " + expression, Re2.compile(utf8Slice(expression)),
-                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
-                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)));
-        for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
-            String label = entry.getKey();
-            CompiledPattern pattern = entry.getValue();
-            assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
-            assertThat(matcher.bailsOnDenseCandidates()).as(label).isTrue();
-
-            long bailed = matcher.countOrBail(dense);
-            assertThat(bailed).as(label).isNegative();
-            assertThat(FixedWidthByteSpanMatcher.countBeforeBail(bailed)).as(label).isEqualTo(1);
-            assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).as(label).isEqualTo("работа,".getBytes(UTF_8).length);
-            assertThat(matcher.findSpanOrBail(denseFromStart, 0, denseFromStart.length())).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
-            assertThat(matcher.findSpanOrBail(dense, regionStart, regionEnd)).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
-            for (Slice input : List.of(dense, denseFromStart, english)) {
-                assertThat(pattern.count(input)).as(label).isEqualTo(generalEngineCount(pattern, input));
-                assertThat(pattern.find(input)).as(label).isTrue();
-                assertMatcherSpans(pattern, input, 0, input.length(), label);
-            }
-            assertMatcherSpans(pattern, dense, regionStart, regionEnd, label);
-            // A bail ends with its search: the next count of the same matcher runs on it.
-            assertThat(matcher.countOrBail(english)).as(label).isEqualTo(1);
-        }
-
-        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(expression));
-        assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
-        assertThat(shape(trino.re2())).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-        Regex oracle = joniPattern(expression);
-        verifyOperations(expression, trino, source -> joniMatches(oracle, source), List.of(dense, denseFromStart, english));
-
-        // A search of at least 1,024 candidate positions that scans for a one-byte candidate with
-        // the vector scan, where the Vector API is available, bails the same way. The letters а
-        // to п share one lead byte.
-        FixedWidthByteSpanMatcher longMatcher = matcher("[а-п]{6}[.,]");
-        Slice longDense = utf8Slice("голова, " + "да он и ни ".repeat(100));
-        long longBailed = longMatcher.countOrBail(longDense);
-        assertThat(longBailed).isNegative();
-        assertThat(FixedWidthByteSpanMatcher.countBeforeBail(longBailed)).isEqualTo(1);
-        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longBailed)).isEqualTo("голова,".getBytes(UTF_8).length);
-        assertThat(longMatcher.findSpanOrBail(longDense, "голова,".getBytes(UTF_8).length, longDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
-
-        // The byte search bails the same way. In Latin-1 and Rust's byte mode, [\xE0-\xFF]{3}[.,]
-        // scans for the bytes à to ÿ, which this Latin-1 text of short words holds at nearly
-        // every letter.
-        String byteExpression = "[\\xE0-\\xFF]{3}[.,]";
-        String byteFiller = "à é îô ùû ".repeat(20);
-        Slice byteDense = wrappedBuffer(("àéîôù, " + byteFiller + "ôùû.").getBytes(ISO_8859_1));
-        for (Map.Entry<String, CompiledPattern> entry : Map.of(
-                "RE2 Latin-1 " + byteExpression, Re2.compile(utf8Slice(byteExpression), Re2.Options.latin1()),
-                "Rust bytes (?-u)" + byteExpression, RustRegexp.compile(utf8Slice("(?-u)" + byteExpression), RustRegexp.Options.bytes())).entrySet()) {
-            String label = entry.getKey();
-            CompiledPattern pattern = entry.getValue();
-            assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-            FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
-            long bailed = matcher.countOrBail(byteDense);
-            assertThat(bailed).as(label).isNegative();
-            assertThat(FixedWidthByteSpanMatcher.countBeforeBail(bailed)).as(label).isEqualTo(1);
-            assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).as(label).isEqualTo(6);
-            assertThat(matcher.findSpanOrBail(byteDense, 6, byteDense.length())).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
-            assertThat(pattern.count(byteDense)).as(label).isEqualTo(generalEngineCount(pattern, byteDense));
-            assertThat(pattern.find(byteDense)).as(label).isTrue();
-            assertMatcherSpans(pattern, byteDense, 0, byteDense.length(), label);
-        }
-
-        // So does a byte search of at least 1,024 candidate positions that scans for a one-byte
-        // candidate, here à, with the vector scan where the Vector API is available.
-        Re2 longBytePattern = Re2.compile(utf8Slice("[a-z]{3}\\xE0"), Re2.Options.latin1());
-        assertThat(shape(longBytePattern)).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
-        FixedWidthByteSpanMatcher longByteMatcher = longBytePattern.fixedWidthByteSpanMatcherForDiagnostics();
-        Slice longByteDense = wrappedBuffer(("abcà" + "à ".repeat(600)).getBytes(ISO_8859_1));
-        long longByteBailed = longByteMatcher.countOrBail(longByteDense);
-        assertThat(longByteBailed).isNegative();
-        assertThat(FixedWidthByteSpanMatcher.countBeforeBail(longByteBailed)).isEqualTo(1);
-        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longByteBailed)).isEqualTo(4);
-        assertThat(longByteMatcher.findSpanOrBail(longByteDense, 4, longByteDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
-
-        // The target's candidate, x and the first byte of à to ÿ, fails at most twice in each
-        // sentence of that text, under once per 32 bytes, and the count never bails.
-        String target = "[a-q][^u-z]{80}[x\\xE0-\\xFF]";
-        for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns(target).entrySet()) {
-            FixedWidthByteSpanMatcher matcher = entry.getValue().fixedWidthByteSpanMatcherForDiagnostics();
-            assertThat(matcher.bailsOnDenseCandidates()).as(entry.getKey()).isTrue();
-            assertThat(matcher.countOrBail(english)).as(entry.getKey()).isEqualTo(generalEngineCount(entry.getValue(), english));
-        }
-
-        // A count that bails hands the rest of the text to the ordinary count, which declines
-        // under this budget; the pattern then counts the whole text by its matches, rather than
-        // adding the matches before the bail to the declined count.
-        String narrow = "[a-q][^u-z]{12}[x\\xE0-\\xFF]";
-        Re2 constrained = Re2.compile(utf8Slice(narrow), Re2.Options.defaults().setMaxMemory(40_000));
-        String match = "a" + "é".repeat(12) + "x";
-        Slice text = utf8Slice(match.repeat(3) + "x я xy ".repeat(50) + match.repeat(23));
-        long bailed = constrained.fixedWidthByteSpanMatcherForDiagnostics().countOrBail(text);
-        assertThat(FixedWidthByteSpanMatcher.countBeforeBail(bailed)).isEqualTo(3);
-        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).isEqualTo(3 * match.getBytes(UTF_8).length);
-        assertThat(constrained.countOnFixedWidth(text)).isEqualTo(-1);
-        assertThat(constrained.count(text)).isEqualTo(26);
-    }
-
     // Each find of a group-zero matcher in the region reports the general engine's next span.
     private static void assertMatcherSpans(CompiledPattern pattern, Slice input, int regionStart, int regionEnd, String label)
     {
@@ -977,38 +646,6 @@ public class TestFixedWidthByteSpanMatcher
     {
         return IntStream.of(start + 63, start + 64, start + 65, start + 127, start + 128, input.length() - 1)
                 .filter(end -> end >= start && end <= input.length());
-    }
-
-    // Requires, for every region of `input`, `pattern`'s boolean find and its find, lookingAt,
-    // and matches group zero, and a matcher's lookingAt and find spans and matches boolean, to
-    // match `reference`'s.
-    private static void assertRegionMatchAgreement(String label, CompiledPattern pattern, CompiledPattern reference, Slice input)
-    {
-        RegexpMatcher matcher = pattern.matcher(input, 0);
-        RegexpMatcher referenceMatcher = reference.matcher(input, 0);
-        String inputLabel = "%s input %s".formatted(label, HexFormat.of().formatHex(input.getBytes()));
-        for (int start = 0; start <= input.length(); start++) {
-            for (int end = start; end <= input.length(); end++) {
-                String regionLabel = "%s region %s-%s".formatted(inputLabel, start, end);
-                assertThat(pattern.find(input, start, end)).as(regionLabel).isEqualTo(reference.find(input, start, end));
-                assertThat(resultSpan(pattern.findResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.findResult(input, start, end)));
-                assertThat(resultSpan(pattern.lookingAtResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.lookingAtResult(input, start, end)));
-                assertThat(resultSpan(pattern.matchesResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.matchesResult(input, start, end)));
-                assertThat(matcherSpan(matcher.reset(input, start, end).lookingAt(), matcher)).as(regionLabel).isEqualTo(matcherSpan(referenceMatcher.reset(input, start, end).lookingAt(), referenceMatcher));
-                assertThat(matcher.reset(input, start, end).matches()).as(regionLabel).isEqualTo(referenceMatcher.reset(input, start, end).matches());
-                assertThat(matcherSpan(matcher.reset(input, start, end).find(), matcher)).as(regionLabel).isEqualTo(matcherSpan(referenceMatcher.reset(input, start, end).find(), referenceMatcher));
-            }
-        }
-    }
-
-    private static long resultSpan(MatchResult result)
-    {
-        return result == null ? Dfa.SEARCH_NO_MATCH : span(result.start(), result.end());
-    }
-
-    private static long matcherSpan(boolean matched, RegexpMatcher matcher)
-    {
-        return matched ? span(matcher.start(), matcher.end()) : Dfa.SEARCH_NO_MATCH;
     }
 
     // Short rows joined from ASCII, Latin-1 and UTF-8 characters, and malformed UTF-8: truncated
@@ -1179,12 +816,12 @@ public class TestFixedWidthByteSpanMatcher
         // Each pattern compiles from the least maxMemory at which the route without a program
         // fits; below it neither the matcher nor a program fits. Up to 8 KiB the inner literal
         // search of a shing pattern does not fit, so the matcher is the route. The last pattern
-        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4933 it
+        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4897 it
         // compiles only on the route without one.
         Map<String, Long> minimumMaxMemory = Map.of(
-                "[a-z]shing", 4477L,
-                "\\d{4}-\\d{2}-\\d{2}", 4573L,
-                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4933L);
+                "[a-z]shing", 4463L,
+                "\\d{4}-\\d{2}-\\d{2}", 4537L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4897L);
         for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
             Slice expression = utf8Slice(entry.getKey());
             for (long maxMemory = 256; maxMemory <= 8192; maxMemory++) {
@@ -1198,19 +835,14 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
-        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4933));
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4897));
         assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
-
-        // The repetitions of a repeated group share its positions' ranges, so the matcher charges
-        // them once, not once for each repetition.
-        TrinoRegexp repeatedGroup = TrinoRegexp.compile(utf8Slice("(?:[é中][a-z]){127}[0-9]{2}"), TrinoRegexp.Options.defaults().setMaxMemory(13_000));
-        assertThat(repeatedGroup.re2().hasRetainedFixedWidthByteSpanMatcher()).isTrue();
 
         // Where the program fits but neither the inner literal search nor the matcher fits beside
         // it, the pattern takes the route without a program, which reserves the matcher.
         Map<String, List<Long>> matcherOnlyMaxMemory = Map.of(
-                "[a-z]shing", List.of(5123L, 5137L),
-                "[a-z]{2}ing", List.of(5015L, 5040L));
+                "[a-z]shing", List.of(5096L, 5110L),
+                "[a-z]{2}ing", List.of(4979L, 5004L));
         for (Map.Entry<String, List<Long>> entry : matcherOnlyMaxMemory.entrySet()) {
             for (long maxMemory = entry.getValue().get(0); maxMemory <= entry.getValue().get(1); maxMemory++) {
                 String label = "%s at %s".formatted(entry.getKey(), maxMemory);

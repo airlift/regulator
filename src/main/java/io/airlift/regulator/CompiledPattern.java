@@ -518,9 +518,7 @@ abstract sealed class CompiledPattern
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
                 : null;
-        // A matcher that bails on dense candidates hands its search to the program, so its
-        // pattern compiles one, and the full analysis decides it as in every language.
-        Regexp normalizedRegexp = fixedWidthMatcher != null && !fixedWidthMatcher.bailsOnDenseCandidates()
+        Regexp normalizedRegexp = fixedWidthMatcher != null
                 ? Simplifier.simplify(entireRegexp, caseFolding, Compiler.Dialect.TRINO, 0)
                 : null;
         if (normalizedRegexp != null) {
@@ -543,7 +541,7 @@ abstract sealed class CompiledPattern
                     // program.
                     BooleanPlans booleanPlans = analysis.booleanPlans();
                     boolean withoutProgram = fixedWidthMatcher.yieldsToEngineScans()
-                            ? !yieldsToEngineRoute(fixedWidthMatcher, entireRegexp, false, analysis.partialProg()) && !searchesMultiByteInnerLiteral(booleanPlans)
+                            ? !yieldsToEngineRoute(fixedWidthMatcher, analysis.partialProg()) && !searchesMultiByteInnerLiteral(booleanPlans)
                             : booleanPlans.innerLiteralSearch() == null && booleanPlans.fixedWidthByteMatcher() == null;
                     if (withoutProgram) {
                         Analysis matcherOnly = analyzeFixedWidthWithoutProgram(pattern, entireRegexp, normalizedRegexp, caseFolding, fixedWidthMatcher, flags, maxMemory);
@@ -700,7 +698,7 @@ abstract sealed class CompiledPattern
             requiredBudget = leastRequiredBudget(requiredBudget, literalSetSize == Compiler.NO_BUDGET ? Compiler.NO_BUDGET : budgetForForwardMemory(literalSetSize));
         }
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed) ? FixedWidthByteSpanMatcher.analyze(parsed.regexp()) : null;
-        if (fixedWidthMatcher != null && !fixedWidthMatcher.bailsOnDenseCandidates()) {
+        if (fixedWidthMatcher != null) {
             // The matcher takes what the placeholder program leaves of the forward budget.
             requiredBudget = leastRequiredBudget(requiredBudget, budgetForForwardMemory(placeholderProgramMemory(flags, Compiler.Dialect.TRINO, parsed.caseFolding(), fixedWidthMatcher.estimatedRetainedSize())));
         }
@@ -1248,7 +1246,7 @@ abstract sealed class CompiledPattern
         FixedWidthByteSpanMatcher fixedWidthByteMatcher = fixedWidth && !searchesMultiByteInnerLiteral(booleanPlans)
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp, expressionAnalysis)
                 : null;
-        if (fixedWidthByteMatcher != null && yieldsToEngineRoute(fixedWidthByteMatcher, suffixRegexp, longestMatch, semanticProgram)) {
+        if (fixedWidthByteMatcher != null && yieldsToEngineRoute(fixedWidthByteMatcher, semanticProgram)) {
             fixedWidthByteMatcher = null;
         }
         if (fixedWidthByteMatcher != null && fixedWidthByteMatcher.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
@@ -1268,7 +1266,7 @@ abstract sealed class CompiledPattern
         FixedWidthByteSpanMatcher shortFixedWidthByteMatcher = fixedWidth && searchesMultiByteInnerLiteral(booleanPlans)
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp, expressionAnalysis)
                 : null;
-        if (shortFixedWidthByteMatcher != null && yieldsToEngineRoute(shortFixedWidthByteMatcher, suffixRegexp, longestMatch, semanticProgram)) {
+        if (shortFixedWidthByteMatcher != null && yieldsToEngineRoute(shortFixedWidthByteMatcher, semanticProgram)) {
             shortFixedWidthByteMatcher = null;
         }
         if (shortFixedWidthByteMatcher != null && shortFixedWidthByteMatcher.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
@@ -2409,20 +2407,12 @@ abstract sealed class CompiledPattern
     }
 
     // The order between the fixed-width matcher and the routes the ordinary engine has for a
-    // pattern. An ASCII singleton pattern keeps the matcher. A pattern that scans a rare
-    // candidate or searches blocks keeps the engine wherever the forward program skips to a literal
-    // prefix or a forward DFA searches for a start literal filter that groups of one bit also give.
-    // For (?i)Шерлок Холмс, the filter's three bytes of Шер stop far less often than the lead byte
-    // of every Cyrillic letter, which the matcher scans for; a count on the matcher measured 89x
-    // the engine's time on r9g and 234x on r8i. Such a pattern also keeps the engine where the
-    // class-run counter counts it and the matcher's candidate holds a byte above ASCII, whose
-    // density English text does not show. [а-я]{5} and [一-龥]{3}, whose lead bytes are dense in
-    // Russian and Chinese text, took 2.9-3.1x and 1.32-1.34x the counter's time on the matcher.
-    // [0-9]{4}, whose digits English text rates as it holds them, ran 9.4-10.9x faster on the
-    // matcher than on the counter, and 3.8-4.6x on short rows. Neither a plain start-byte scan nor
-    // a start class filter counts: every pattern the matcher takes has the scan, and the matcher's
-    // rare candidate or block search replaces either.
-    private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Regexp suffixRegexp, boolean longestMatch, Prog program)
+    // pattern. An ASCII singleton pattern keeps the matcher. A pattern that searches blocks keeps
+    // the engine wherever the forward program skips to a literal prefix or a forward DFA searches
+    // for a start literal filter that groups of one bit also give. Neither a plain start-byte scan
+    // nor a start class filter counts: every pattern the matcher takes has the scan, and the
+    // matcher's block search replaces either.
+    private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Prog program)
     {
         // The DFA kind decides the start bytes only for a program that can match empty, and a
         // fixed-width pattern never matches empty, so one kind answers for every search, except
@@ -2431,7 +2421,6 @@ abstract sealed class CompiledPattern
         // one bit, so the matcher keeps a pattern, such as [éê]x, whose filter needs wider groups.
         return matcher.yieldsToEngineScans() &&
                 (program.canSkipToStartCandidate() ||
-                        (matcher.bailsOnDenseCandidates() && BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch) != null) ||
                         Dfa.DfaInstance.givesOneBitStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
     }
 
@@ -3044,17 +3033,11 @@ abstract sealed class CompiledPattern
         return span >= 0;
     }
 
-    /// The full-Slice find of the fixed-width byte span matcher. A search that bails on dense
-    /// candidates runs again from the input start on the ordinary engine, the find of the pattern
-    /// without the matcher.
+    /// The full-Slice find of the fixed-width byte span matcher.
     final boolean findOnFixedWidth(Slice input)
     {
         requireNonNull(input, "input is null");
-        long span = booleanPlans.fixedWidthByteMatcher().findSpanOrBail(input, 0, input.length());
-        if (span == FixedWidthByteSpanMatcher.BAILED) {
-            return findOnEngine(input);
-        }
-        return span >= 0;
+        return booleanPlans.fixedWidthByteMatcher().findSpan(input, 0) >= 0;
     }
 
     /// The full-Slice find of the compact class counter, which stops at the first run reaching
@@ -3930,21 +3913,11 @@ abstract sealed class CompiledPattern
         return count != LiteralAlternationSpanMatcher.DECLINED ? count : countDfaMatches(text);
     }
 
-    /// The count of the fixed-width byte span matcher. A count that bails on dense candidates
-    /// keeps its matches and counts the rest of the text from the end of the last one, or from
-    /// the text start, on the ordinary count, the count of the pattern without the matcher, and
-    /// where that count bails, this count bails. The pattern reads no context, so the matches
-    /// after a match end are those of the text that follows it.
+    /// The count of the fixed-width byte span matcher.
     final long countOnFixedWidth(Slice text)
     {
         requireNonNull(text, "text is null");
-        long count = booleanPlans.fixedWidthByteMatcher().countOrBail(text);
-        if (count >= 0) {
-            return count;
-        }
-        int resume = FixedWidthByteSpanMatcher.resumeAfterBail(count);
-        long rest = countOnEngine(text.slice(resume, text.length() - resume));
-        return rest < 0 ? rest : FixedWidthByteSpanMatcher.countBeforeBail(count) + rest;
+        return booleanPlans.fixedWidthByteMatcher().count(text);
     }
 
     /// The count of the compact class counter, on the retained count DFA when it has one.

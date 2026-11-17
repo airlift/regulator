@@ -178,17 +178,6 @@ public class TestDfaCountMatches
     {
         byte[] bytes = stateExplosionInput(16 * 1024);
         var input = Slices.wrappedBuffer(bytes);
-        // Dense rare-class bytes ahead of the same text, and of a short text, where the fixed-width
-        // matcher bails and hands the rest of the text to the DFA count. They begin no match.
-        byte[] denseRareClassBytes = new byte[2048 + bytes.length];
-        for (int index = 0; index < 2048; index += 2) {
-            denseRareClassBytes[index] = (byte) 0xE0;
-            denseRareClassBytes[index + 1] = '!';
-        }
-        System.arraycopy(bytes, 0, denseRareClassBytes, 2048, bytes.length);
-        byte[] denseRareClassShortBytes = Arrays.copyOf(denseRareClassBytes, 2048 + 82);
-        Arrays.fill(denseRareClassShortBytes, 2048, 2048 + 81, (byte) 'a');
-        denseRareClassShortBytes[2048 + 81] = 'x';
         // A literal every 16 bytes of a longer text, where the inner-literal search hands the
         // dense run to the DFA count. In the short text, a literal at the start that begins no
         // match sends the count to the DFA count too.
@@ -199,8 +188,6 @@ public class TestDfaCountMatches
         Slice denseLiteralText = Slices.wrappedBuffer(denseLiteralBytes);
         Slice denseLiteralShortText = utf8Slice("!0123" + "a".repeat(81) + "0123");
 
-        Re2 fixedWidth = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{80}[x\\xE0-\\xFF]"), Re2.Options.latin1().setMaxMemory(3L << 20));
-        assertThat(fixedWidth.fixedWidthByteSpanMatcherForDiagnostics()).isNotNull();
         // In UTF-8 mode, the finds of this pattern's fallback reach the candidate start cursor.
         Re2 candidateCursor = Re2.compile(utf8Slice("(?i)([a-q][^u-z]{80}x)"), Re2.Options.defaults().setMaxMemory(1L << 20));
         assertThat(candidateCursor.createCandidateStartCursor()).isNotNull();
@@ -211,13 +198,11 @@ public class TestDfaCountMatches
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("(?i)([a-q][^u-z]{80}x)"), TrinoRegexp.Options.defaults().setMaxMemory(1L << 20));
 
         // Pinned native RE2 finds five non-overlapping matches of the first pattern in the growth
-        // text. The fixed-width, candidate-cursor and Trino patterns find the same five: the
-        // growth text has no uppercase letters or bytes above 0x7F, and no match begins in the
-        // dense rare-class bytes. The inner-literal count is checked against a count at the
-        // default budget.
+        // text. The candidate-cursor and Trino patterns find the same five: the growth text has no
+        // uppercase letters or bytes above 0x7F. The inner-literal count is checked against a
+        // count at the default budget.
         for (CountBailCase countBailCase : List.of(
                 CountBailCase.of(Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20)), input, SHORT_STATE_GROWTH_TEXT, 5),
-                CountBailCase.of(fixedWidth, Slices.wrappedBuffer(denseRareClassBytes), Slices.wrappedBuffer(denseRareClassShortBytes), 5),
                 CountBailCase.of(candidateCursor, input, SHORT_STATE_GROWTH_TEXT, 5),
                 CountBailCase.of(innerLiteral, denseLiteralText, denseLiteralShortText, Re2.compile(innerLiteralPattern, Re2.Options.latin1()).count(denseLiteralText)),
                 new CountBailCase("Trino " + trino.pattern().toStringUtf8(), trino.re2(), trino::count, input, SHORT_STATE_GROWTH_TEXT, 5))) {
