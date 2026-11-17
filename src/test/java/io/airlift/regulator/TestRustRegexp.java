@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -466,6 +467,7 @@ public class TestRustRegexp
         assertThat(forward.cacheSnapshot().stateCount()).isGreaterThan(stateCount);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testLiteralCandidateCursorFollowsDfaQuitStreak()
     {

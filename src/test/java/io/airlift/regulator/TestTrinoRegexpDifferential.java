@@ -169,7 +169,6 @@ public class TestTrinoRegexpDifferential
             verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
             RegexpMatcher matcher = regexp.re2().matcher(sources.getLast(), 0);
             assertThat(matcher.find()).as(pattern).isTrue();
-            assertThat(matcher.candidateStartRouteCountForDiagnostics() > 0).as(pattern).isEqualTo(pattern.startsWith("(?m)"));
             assertThat(prog.canSkipToStartCandidate()).as(pattern).isEqualTo(!pattern.startsWith("(?m)"));
         }
     }

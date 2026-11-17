@@ -18,6 +18,7 @@ import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -1382,6 +1383,7 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(List.of(matcher.start(), matcher.end())).containsExactly(2, 6);
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testMatchersOwnTheirCandidateCursors()
     {

@@ -3551,8 +3551,14 @@ abstract sealed class CompiledPattern
         return length >= booleanPlans.innerLiteralCountMinimum() && booleanPlans.hasLiteralSearch();
     }
 
+    // Sweep leg: no matcher has a candidate start cursor.
+    private static final boolean CREATES_CANDIDATE_START_CURSOR = false;
+
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
+        if (!CREATES_CANDIDATE_START_CURSOR) {
+            return null;
+        }
         if (excludesCandidateStartCursor(booleanPlans, usesCompactBoundedCharacterClassForDiagnostics(), longestMatch, requiredPrefix, partialProg)) {
             return null;
         }

@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -144,6 +145,7 @@ public class TestWindowLiteralSearch
         }
     }
 
+    @Disabled("Sweep leg b5-no-e6: pins the switched-off mechanism")
     @Test
     public void testFallsBackWhenWindowIsNearStart()
     {
