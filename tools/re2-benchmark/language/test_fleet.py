@@ -64,9 +64,12 @@ class TestFleet(unittest.TestCase):
         atoms = {}
         for row, unit_id in owner.items():
             atoms.setdefault(fleet.row_atom(row), set()).add(unit_id)
-        # Every operation of every comparison is one atom: its three observations share one unit.
+        # Every operation of every comparison is one atom: its three observations share one unit, with the null
+        # engine observations its partition measures for that operation.
         self.assertEqual(len(atoms), partitions * len(collection.OPERATIONS))
-        self.assertEqual(len(owner), 3 * len(atoms))
+        nulls = [row for row in owner if row.rsplit("/", 3)[1] in collection.NULL_ENGINES]
+        self.assertEqual(len(nulls), len(collection.NULL_ENGINES) * len(collection.NULL_OPERATIONS))
+        self.assertEqual(len(owner) - len(nulls), 3 * len(atoms))
         self.assertTrue(all(len(unit_ids) == 1 for unit_ids in atoms.values()))
         return units
 
@@ -195,11 +198,12 @@ class TestFleet(unittest.TestCase):
         self.assertEqual({"schema_version": 2, "source_sha256": collection.digest(evidence.read_bytes()),
                           "operation_seconds": {row: 17.1}}, plan["duration_policy"])
         units = self.assert_units_keep_comparisons_whole(56)
-        # Each JMH iteration of the slow comparator lasts one operation, its processes verifying the case and each
-        # operation first; the candidate's observations keep their one-second iterations.
+        # Each JMH iteration of the slow comparator lasts one invocation, a pass over the case's eight inputs, its
+        # processes verifying the case and each operation first; the candidate's observations keep their one-second
+        # iterations.
         verification = (1 + len(collection.OPERATIONS)) * fleet.unit_cost.JMH_STARTUP_SECONDS
         jmh = (1 + 5) * fleet.unit_cost.JMH_STARTUP_SECONDS
-        slow, ordinary = verification + jmh + 5 * 20 * 17.1, verification + jmh + 5 * 20
+        slow, ordinary = verification + jmh + 5 * 20 * 17.1 * 8, verification + jmh + 5 * 20
         [alone] = [unit for unit in units.values() if row in unit["owned"]]
         self.assertEqual(3, len(alone["owned"]))
         self.assertAlmostEqual(2 * ordinary + slow, float(alone["estimated_seconds"]))
@@ -213,7 +217,7 @@ class TestFleet(unittest.TestCase):
         self.assertEqual({"case-0000-java": {row: 17.1}}, self.operation_seconds)
         self.assertEqual(fleet.validate(self.directory), plan)
         # Beside its units, prepare prints how many of each language's observations the evidence covers.
-        self.assertEqual("duration evidence covers java 1 of 252 rows, re2 0 of 252 rows, rust 0 of 252 rows, "
+        self.assertEqual("duration evidence covers java 1 of 252 rows, re2 0 of 258 rows, rust 0 of 255 rows, "
                          "trino 0 of 252 rows", fleet.duration_coverage(plan, units.values()))
         with self.assertRaisesRegex(ValueError, "invalid operation duration"):
             fleet.prepare(self.source, self.root / "nan", duration_evidence=report(float("nan")))
@@ -250,6 +254,20 @@ class TestFleet(unittest.TestCase):
         return results
 
     @staticmethod
+    def raw_result(engine, operation):
+        """A runner's raw result for one operation, 100 ns each, as a contract without passes records it."""
+        if engine in collection.NATIVE_RUNNERS:
+            return {"benchmarks": [{"run_type": "iteration", "run_name": operation,
+                                    "time_unit": "ns", "real_time": 100} for _ in range(5)]}
+        return [{"benchmark": collection.CLASS + "." + operation,
+                 "params": {"engine": engine, "workloadFile": "workload.tsv"},
+                 "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
+                 "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
+                 "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[100] * 10 for _ in range(5)]},
+                 "secondaryMetrics": {"gc.alloc.rate.norm": {
+                     "scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
+
+    @staticmethod
     def write_partition_results(partition, result, inputs, platform, instance_type, instance_id, jdk="JDK25",
                                 source_commit="commit", traced="61", classes_archive_sha256="c" * 64, first_match="0"):
         """Write one partition's synthetic verification and measurements, and export them with the inputs of the
@@ -260,6 +278,19 @@ class TestFleet(unittest.TestCase):
         runners_hash = collection.digest(collection.encode(runners))
         manifest_hash = collection.digest((partition / "manifest.json").read_bytes())
         receipts, observations = {}, {}
+        for identity, case, language, engine, mode in collection.harness_observations(manifest):
+            trace = collection.null_trace(case)
+            receipts[identity] = {"outcome": "completed", "operations": {operation: {
+                "outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
+                "command": ["verify-null", "workload.tsv", operation]} for operation in collection.NULL_OPERATIONS}}
+            runner = collection.runner_engine(engine)
+            for operation in collection.observation_operations(manifest, case, engine):
+                row_id = identity + "/" + operation
+                raw_path = result / row_id / "raw.json"
+                raw_path.parent.mkdir(parents=True)
+                collection.save(raw_path, TestFleet.raw_result(runner, operation))
+                observations[row_id] = {"outcome": "compared", **collection.raw_samples(raw_path, runner, operation),
+                                        "raw_file": str(raw_path.relative_to(result))}
         for identity, case, language, engine, mode in collection.observations(manifest):
             trace = "".join(str(source["expected_count"]) + ":" +
                             ",".join([""] + [traced] * (source["expected_count"] - 1)) + "\n"
@@ -277,18 +308,7 @@ class TestFleet(unittest.TestCase):
                 row_id = identity + "/" + operation
                 raw_path = result / row_id / "raw.json"
                 raw_path.parent.mkdir(parents=True)
-                if engine in collection.NATIVE_RUNNERS:
-                    raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation,
-                                           "time_unit": "ns", "real_time": 100} for _ in range(5)]}
-                else:
-                    raw = [{"benchmark": collection.CLASS + "." + operation,
-                            "params": {"engine": engine, "workloadFile": "workload.tsv"},
-                            "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
-                            "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
-                            "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[100] * 10 for _ in range(5)]},
-                            "secondaryMetrics": {"gc.alloc.rate.norm": {
-                                "scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
-                collection.save(raw_path, raw)
+                collection.save(raw_path, TestFleet.raw_result(engine, operation))
                 observations[row_id] = {"outcome": "compared", **collection.raw_samples(raw_path, engine, operation),
                                         "raw_file": str(raw_path.relative_to(result))}
             receipts[identity] = receipt
@@ -678,6 +698,22 @@ class TestFleet(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "semantic failure"):
             fleet.aggregate(self.directory, result_root, self.root / "rejected.json")
 
+    def test_aggregate_exports_harness_overhead_apart_from_comparisons(self):
+        manifest = collection.load(self.source / "manifest.json")
+        fleet.prepare(self.source, self.directory, selection=[(manifest["cases"][0]["id"], "re2")])
+        result_root, receipts = self.run_campaign(directories=[self.directory])
+        fleet.aggregate(self.directory, result_root, self.root / "export.json")
+        data = collection.load(self.root / "export.json")
+        # The RE2 partition measures the JVM's and native RE2's null engines on every host; they join no comparison
+        # and no agreement of traces, and their own section names each one's harness and accepted group.
+        self.assertEqual(len(data["harness_overhead"]), 2 * 3 * 6)
+        self.assertEqual({(row["harness"], row["operation"]) for row in data["harness_overhead"]},
+                         set(itertools.product(("jvm", "native-re2"), collection.NULL_OPERATIONS)))
+        self.assertEqual({row["unit_attempt_id"] for row in data["harness_overhead"]},
+                         {receipt["unit_attempt_id"] for receipt in receipts})
+        compared = {row[side] for row in data["comparisons"] for side in ("candidate", "comparator")}
+        self.assertFalse({row["observation"] for row in data["harness_overhead"]} & compared)
+
     def test_aggregate_requires_agreeing_languages(self):
         result_root, _ = self.run_campaign(
             lambda platform, partition: {"traced": "62"} if partition.endswith("java") else {})
@@ -724,7 +760,8 @@ class TestFleet(unittest.TestCase):
             self.assertEqual(verify.call_count, 4)
             measure.assert_not_called()
         combined = collection.load(output / "verification.json")
-        self.assertEqual(len(combined["receipts"]), 12)
+        # Four comparisons of three observations, and the three null engines.
+        self.assertEqual(len(combined["receipts"]), 4 * 3 + 3)
         collection.validate_receipts(collection.load(self.source / "manifest.json"), combined["receipts"])
 
         evidence[next(iter(evidence))]["runners_sha256"] = "changed"

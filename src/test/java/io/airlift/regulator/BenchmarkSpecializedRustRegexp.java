@@ -15,20 +15,24 @@ package io.airlift.regulator;
 
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
-import io.airlift.regulator.TestingSpecializedPatternBenchmarks.Rotation;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarks.NullData;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarks.Variant;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarks.WorkloadInputs;
 import io.airlift.slice.Slice;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.CompilerControl;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
@@ -41,9 +45,12 @@ import static io.airlift.regulator.BenchmarkSpecializedJavaRegexp.matcherExtract
 import static io.airlift.regulator.BenchmarkSpecializedRe2.matcherExtractAll;
 import static io.airlift.regulator.BenchmarkSpecializedRe2.matcherExtractAllHandle;
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
+import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.INPUTS;
 import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.constantCaller;
+import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.nullOperation;
 import static io.airlift.regulator.TestingSpecializedPatternBenchmarks.requireCaptureOperation;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
+import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 
 /// Applies each specialized-pattern workload's operation through the public [RustRegexp] API in the
 /// three variants of [BenchmarkSpecializedTrinoRegexp]: the specialized engine, which interprets
@@ -55,7 +62,9 @@ import static io.airlift.slice.Slices.EMPTY_SLICE;
 /// compiled variant is const-bound as the Trino one is: a per-pattern hidden class invokes the
 /// matcher operation's handle, bound to the generated-bytecode compile's matcher and the group, as
 /// a class-data constant. Only the `*Generated` methods take the states that compile generated
-/// bytecode, so the forks of the other variants load no generated class.
+/// bytecode, so the forks of the other variants load no generated class. Each method is one pass
+/// over the workload's inputs, as [TestingSpecializedPatternBenchmarks] describes; `nullEngine`
+/// is that pass with no engine.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -134,7 +143,7 @@ public class BenchmarkSpecializedRustRegexp
                 throws ReflectiveOperationException
         {
             load(data);
-            generated = constantCaller(ExtractCaller.class, MethodHandles.insertArguments(matcherExtractHandle().bindTo(matcher), 1, group));
+            generated = constantCaller(ExtractCaller.class, MethodHandles.insertArguments(matcherExtractHandle().bindTo(matcher), 0, group));
         }
     }
 
@@ -149,13 +158,13 @@ public class BenchmarkSpecializedRustRegexp
                 throws ReflectiveOperationException
         {
             load(data);
-            generated = constantCaller(ExtractAllCaller.class, MethodHandles.insertArguments(matcherExtractAllHandle().bindTo(matcher), 1, group));
+            generated = constantCaller(ExtractAllCaller.class, MethodHandles.insertArguments(matcherExtractAllHandle().bindTo(matcher), 0, group));
         }
     }
 
     /// A workload's compile, with a reusable matcher and the group the operation returns.
     abstract static class PatternData
-            extends Rotation
+            extends WorkloadInputs
     {
         RustRegexp regexp;
         RegexpMatcher matcher;
@@ -163,7 +172,7 @@ public class BenchmarkSpecializedRustRegexp
 
         void load(Workload workload, RustRegexp regexp)
         {
-            rotate(workload);
+            readInputs(workload);
             this.regexp = regexp;
             matcher = regexp.matcher(EMPTY_SLICE);
             group = workload.capturedGroup();
@@ -222,39 +231,102 @@ public class BenchmarkSpecializedRustRegexp
     }
 
     @Benchmark
-    public Slice extract(ExtractData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extract(ExtractData data, Blackhole blackhole)
     {
-        return matcherExtract(data.matcher, data.nextSource(), data.group);
+        RegexpMatcher matcher = data.matcher;
+        int group = data.group;
+        for (Slice input : data.inputs) {
+            blackhole.consume(rustExtract(matcher, group, input));
+        }
     }
 
     @Benchmark
-    public Slice extractRegularEngine(RegularEngineExtractData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractRegularEngine(RegularEngineExtractData data, Blackhole blackhole)
     {
-        return matcherExtract(data.matcher, data.nextSource(), data.group);
+        RegexpMatcher matcher = data.matcher;
+        int group = data.group;
+        for (Slice input : data.inputs) {
+            blackhole.consume(rustExtract(matcher, group, input));
+        }
     }
 
     @Benchmark
-    public Slice extractGenerated(GeneratedExtractData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractGenerated(GeneratedExtractData data, Blackhole blackhole)
     {
-        return data.generated.extract(data.nextSource());
+        ExtractCaller generated = data.generated;
+        for (Slice input : data.inputs) {
+            blackhole.consume(callerExtract(generated, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> extractAll(ExtractAllData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractAll(ExtractAllData data, Blackhole blackhole)
     {
-        return matcherExtractAll(data.matcher, data.nextSource(), data.group);
+        RegexpMatcher matcher = data.matcher;
+        int group = data.group;
+        for (Slice input : data.inputs) {
+            blackhole.consume(rustExtractAll(matcher, group, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> extractAllRegularEngine(RegularEngineExtractAllData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractAllRegularEngine(RegularEngineExtractAllData data, Blackhole blackhole)
     {
-        return matcherExtractAll(data.matcher, data.nextSource(), data.group);
+        RegexpMatcher matcher = data.matcher;
+        int group = data.group;
+        for (Slice input : data.inputs) {
+            blackhole.consume(rustExtractAll(matcher, group, input));
+        }
     }
 
     @Benchmark
-    public List<Slice> extractAllGenerated(GeneratedExtractAllData data)
+    @OperationsPerInvocation(INPUTS)
+    public void extractAllGenerated(GeneratedExtractAllData data, Blackhole blackhole)
     {
-        return data.generated.extractAll(data.nextSource());
+        ExtractAllCaller generated = data.generated;
+        for (Slice input : data.inputs) {
+            blackhole.consume(callerExtractAll(generated, input));
+        }
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(INPUTS)
+    public void nullEngine(NullData data, Blackhole blackhole)
+    {
+        for (Slice input : data.inputs) {
+            blackhole.consume(nullOperation(input));
+        }
+    }
+
+    // Each variant's operation on one input, as its benchmark method applies it to each input of a pass.
+
+    @CompilerControl(DONT_INLINE)
+    private static Slice rustExtract(RegexpMatcher matcher, int group, Slice input)
+    {
+        return matcherExtract(matcher, group, input);
+    }
+
+    @CompilerControl(DONT_INLINE)
+    private static List<Slice> rustExtractAll(RegexpMatcher matcher, int group, Slice input)
+    {
+        return matcherExtractAll(matcher, group, input);
+    }
+
+    @CompilerControl(DONT_INLINE)
+    private static Slice callerExtract(ExtractCaller generated, Slice input)
+    {
+        return generated.extract(input);
+    }
+
+    @CompilerControl(DONT_INLINE)
+    private static List<Slice> callerExtractAll(ExtractAllCaller generated, Slice input)
+    {
+        return generated.extractAll(input);
     }
 
     /// Sets up the states of `workloadId` as JMH does and returns its variants in the order
@@ -262,7 +334,6 @@ public class BenchmarkSpecializedRustRegexp
     public static List<Variant> variantsForTesting(String workloadId)
             throws ReflectiveOperationException
     {
-        BenchmarkSpecializedRustRegexp benchmark = new BenchmarkSpecializedRustRegexp();
         return switch (TestingSpecializedPatternBenchmarkInputs.create(workloadId).operation()) {
             case REPLACE, EXTRACT -> {
                 ExtractData data = new ExtractData();
@@ -273,9 +344,9 @@ public class BenchmarkSpecializedRustRegexp
                 GeneratedExtractData generated = new GeneratedExtractData();
                 generated.setup(data);
                 yield List.of(
-                        new Variant("specialized engine", data, () -> benchmark.extract(data)),
-                        new Variant("regular engine", regularEngine, () -> benchmark.extractRegularEngine(regularEngine)),
-                        new Variant("compiled", generated, () -> benchmark.extractGenerated(generated)));
+                        new Variant("specialized engine", data, index -> rustExtract(data.matcher, data.group, data.inputs[index])),
+                        new Variant("regular engine", regularEngine, index -> rustExtract(regularEngine.matcher, regularEngine.group, regularEngine.inputs[index])),
+                        new Variant("compiled", generated, index -> callerExtract(generated.generated, generated.inputs[index])));
             }
             case EXTRACT_ALL -> {
                 ExtractAllData data = new ExtractAllData();
@@ -286,9 +357,9 @@ public class BenchmarkSpecializedRustRegexp
                 GeneratedExtractAllData generated = new GeneratedExtractAllData();
                 generated.setup(data);
                 yield List.of(
-                        new Variant("specialized engine", data, () -> benchmark.extractAll(data)),
-                        new Variant("regular engine", regularEngine, () -> benchmark.extractAllRegularEngine(regularEngine)),
-                        new Variant("compiled", generated, () -> benchmark.extractAllGenerated(generated)));
+                        new Variant("specialized engine", data, index -> rustExtractAll(data.matcher, data.group, data.inputs[index])),
+                        new Variant("regular engine", regularEngine, index -> rustExtractAll(regularEngine.matcher, regularEngine.group, regularEngine.inputs[index])),
+                        new Variant("compiled", generated, index -> callerExtractAll(generated.generated, generated.inputs[index])));
             }
         };
     }

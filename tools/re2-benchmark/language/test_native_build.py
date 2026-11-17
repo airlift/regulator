@@ -25,6 +25,19 @@ class TestNativeBuild(unittest.TestCase):
             pin = next(row for row in csv.DictReader(file, delimiter="\t") if row["component"] == "rust-regex")
         self.assertEqual(comparator["regex"], {"version": pin["version_or_revision"], "checksum": pin["artifact_sha256"]})
 
+    def test_record_picks_each_runners_command_for_a_shared_unit(self):
+        # Both lifecycle runners compile language_null.cc. CMake 3.22's Makefiles generator writes no "output"
+        # member, so the object after -o names the runner.
+        def entry(target, unit):
+            return {"directory": "/build", "file": f"/checkout/tools/re2-benchmark/language/{unit}",
+                    "command": f"/usr/bin/c++ -O3 -DNDEBUG -o CMakeFiles/{target}.dir/language/{unit}.o"
+                               f" -c /checkout/tools/re2-benchmark/language/{unit}"}
+        commands = [entry(target, "language_null.cc") for target in ("language_benchmark", "language_rust_benchmark")]
+        for target in ("language_benchmark", "language_rust_benchmark"):
+            self.assertEqual(native_build.runner_command(commands, target, "language_null.cc"), entry(target, "language_null.cc"))
+        with self.assertRaisesRegex(ValueError, "missing or ambiguous"):
+            native_build.runner_command(commands, "language_bulk_benchmark", "language_null.cc")
+
     def test_rust_build_rejects_unpinned_toolchain(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -213,7 +213,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>--add-modules jdk.incubator.vector -Dio.airlift.regulator.dfa.route-counts=true ${regulator.nativeAccessJvmArgument} ${regulator.vectorJvmArgument}</argLine>
+                    <!-- The benchmark pass checks read the frame that threw a NullPointerException, which a hot JDK site would otherwise throw without a stack trace. -->
+                    <argLine>--add-modules jdk.incubator.vector -XX:-OmitStackTraceInFastThrow -Dio.airlift.regulator.dfa.route-counts=true ${regulator.nativeAccessJvmArgument} ${regulator.vectorJvmArgument}</argLine>
                     <systemPropertyVariables>
                         <!-- TestRetainedSize: JOL finds record field offsets itself and does not attach the serviceability agent. -->
                         <jol.magicFieldOffset>true</jol.magicFieldOffset>

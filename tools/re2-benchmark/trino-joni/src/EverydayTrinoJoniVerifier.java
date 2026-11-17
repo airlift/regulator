@@ -14,6 +14,7 @@
 package io.trino.operator.scalar;
 
 import io.airlift.regulator.BenchmarkEverydayTrinoRegexp;
+import io.airlift.regulator.TestingBenchmarkPasses;
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs;
 import io.airlift.slice.Slice;
 import org.openjdk.jmh.annotations.Param;
@@ -21,6 +22,7 @@ import org.openjdk.jmh.annotations.Param;
 import java.lang.reflect.Field;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
@@ -35,12 +37,11 @@ public final class EverydayTrinoJoniVerifier
     private EverydayTrinoJoniVerifier() {}
 
     public static void main(String[] args)
-            throws ReflectiveOperationException
+            throws Exception
     {
         verifyWorkloadParameters(BenchmarkEverydayTrinoRegexp.BenchmarkData.class);
         verifyWorkloadParameters(BenchmarkEverydayTrinoJoni.BenchmarkData.class);
-        BenchmarkEverydayTrinoRegexp regulator = new BenchmarkEverydayTrinoRegexp();
-        BenchmarkEverydayTrinoJoni joni = new BenchmarkEverydayTrinoJoni();
+        verifyPasses();
         MessageDigest digest = sha256();
         int comparisonCount = 0;
 
@@ -68,52 +69,36 @@ public final class EverydayTrinoJoniVerifier
                 update(digest, source.expectedMatchCount());
                 JoniSliceOperationsVerifier.verify(source.value(), JoniRegexpCasts.joniRegexp(input.pattern()));
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                boolean contains = regulator.contains(regulatorData);
-                assertEqual(contains, joni.contains(joniData), workloadId, source.sourceId(), "contains");
+                boolean contains = regulatorData.contains(sourceIndex);
+                assertEqual(contains, joniData.contains(sourceIndex), workloadId, source.sourceId(), "contains");
                 update(digest, contains);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                long count = regulator.count(regulatorData);
-                assertEqual(count, joni.count(joniData), workloadId, source.sourceId(), "count");
+                long count = regulatorData.count(sourceIndex);
+                assertEqual(count, joniData.count(sourceIndex), workloadId, source.sourceId(), "count");
                 update(digest, count);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                long position = regulator.positionThird(regulatorData);
-                assertEqual(position, joni.positionThird(joniData), workloadId, source.sourceId(), "positionThird");
+                long position = regulatorData.positionThird(sourceIndex);
+                assertEqual(position, joniData.positionThird(sourceIndex), workloadId, source.sourceId(), "positionThird");
                 update(digest, position);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                Slice extract = regulator.extract(regulatorData);
-                assertEqual(extract, joni.extract(joniData), workloadId, source.sourceId(), "extract");
+                Slice extract = regulatorData.extract(sourceIndex);
+                assertEqual(extract, joniData.extract(sourceIndex), workloadId, source.sourceId(), "extract");
                 update(digest, extract);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                List<Slice> extractAll = regulator.extractAll(regulatorData);
-                assertEqual(extractAll, joni.extractAll(joniData), workloadId, source.sourceId(), "extractAll");
+                List<Slice> extractAll = regulatorData.extractAll(sourceIndex);
+                assertEqual(extractAll, joniData.extractAll(sourceIndex), workloadId, source.sourceId(), "extractAll");
                 update(digest, extractAll);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                List<Slice> split = regulator.split(regulatorData);
-                assertEqual(split, joni.split(joniData), workloadId, source.sourceId(), "split");
+                List<Slice> split = regulatorData.split(sourceIndex);
+                assertEqual(split, joniData.split(sourceIndex), workloadId, source.sourceId(), "split");
                 update(digest, split);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                Slice replace = regulator.replace(regulatorData);
-                assertEqual(replace, joni.replace(joniData), workloadId, source.sourceId(), "replace");
+                Slice replace = regulatorData.replace(sourceIndex);
+                assertEqual(replace, joniData.replace(sourceIndex), workloadId, source.sourceId(), "replace");
                 update(digest, replace);
 
-                regulatorData.setSourceIndex(sourceIndex);
-                joniData.setSourceIndex(sourceIndex);
-                Slice replaceLambda = regulator.replaceLambda(regulatorData);
-                assertEqual(replaceLambda, joni.replaceLambda(joniData), workloadId, source.sourceId(), "replaceLambda");
+                Slice replaceLambda = regulatorData.replaceLambda(sourceIndex);
+                assertEqual(replaceLambda, joniData.replaceLambda(sourceIndex), workloadId, source.sourceId(), "replaceLambda");
                 update(digest, replaceLambda);
 
                 comparisonCount += 8;
@@ -127,6 +112,21 @@ public final class EverydayTrinoJoniVerifier
         }
         System.out.println("Verified %s everyday Regulator/Joni operation results (SHA-256 %s)"
                 .formatted(comparisonCount, resultSha256));
+    }
+
+    /// Checks that every Joni pass hands each input of every workload to its operation, as the
+    /// Regulator passes' tests check theirs.
+    private static void verifyPasses()
+            throws Exception
+    {
+        List<BenchmarkEverydayTrinoJoni.BenchmarkData> states = new ArrayList<>();
+        for (String workloadId : TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()) {
+            BenchmarkEverydayTrinoJoni.BenchmarkData data = new BenchmarkEverydayTrinoJoni.BenchmarkData();
+            data.setWorkload(workloadId);
+            data.setup();
+            states.add(data);
+        }
+        TestingBenchmarkPasses.verifyPasses(new BenchmarkEverydayTrinoJoni(), ignored -> states, state -> ((BenchmarkEverydayTrinoJoni.BenchmarkData) state).inputs);
     }
 
     private static void verifyWorkloadParameters(Class<?> benchmarkDataClass)

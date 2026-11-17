@@ -8,7 +8,7 @@ const pick = (value, fields) => Object.fromEntries(fields.filter(key => value[ke
 
 export function compactReport(data, report, sourceLinks = {}) {
   return {
-    ...pick(data, ["schemaVersion", "sources", "platforms", "memoryModes", "languages", "publication", "presentation"]),
+    ...pick(data, ["schemaVersion", "sources", "platforms", "memoryModes", "languages", "publication", "presentation", "harnessOverhead"]),
     methodology: [], provenance: {},
     rows: data.rows.filter(row => report.workloadSection(row) !== "diagnostic-only").map(row => {
       const compact = { ...pick(row, rowFields),

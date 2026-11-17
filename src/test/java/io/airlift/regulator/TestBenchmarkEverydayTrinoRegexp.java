@@ -22,6 +22,7 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -93,7 +94,6 @@ public class TestBenchmarkEverydayTrinoRegexp
     @Test
     public void testEveryOperationAndSource()
     {
-        BenchmarkEverydayTrinoRegexp benchmark = new BenchmarkEverydayTrinoRegexp();
         for (String workloadId : TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()) {
             TestingEverydayTrinoRegexpBenchmarkInputs.Input input =
                     TestingEverydayTrinoRegexpBenchmarkInputs.create(workloadId);
@@ -103,29 +103,35 @@ public class TestBenchmarkEverydayTrinoRegexp
 
             for (int sourceIndex = 0; sourceIndex < input.sources().size(); sourceIndex++) {
                 long expectedCount = input.sources().get(sourceIndex).expectedMatchCount();
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.contains(data)).isEqualTo(expectedCount > 0);
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.count(data)).isEqualTo(expectedCount);
-                data.setSourceIndex(sourceIndex);
+                assertThat(data.contains(sourceIndex)).isEqualTo(expectedCount > 0);
+                assertThat(data.count(sourceIndex)).isEqualTo(expectedCount);
                 if (expectedCount >= 3) {
-                    assertThat(benchmark.positionThird(data)).isPositive();
+                    assertThat(data.positionThird(sourceIndex)).isPositive();
                 }
                 else {
-                    assertThat(benchmark.positionThird(data)).isEqualTo(-1);
+                    assertThat(data.positionThird(sourceIndex)).isEqualTo(-1);
                 }
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.extract(data) == null).isEqualTo(expectedCount == 0);
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.extractAll(data)).hasSize((int) expectedCount);
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.split(data)).isNotEmpty();
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.replace(data)).isNotNull();
-                data.setSourceIndex(sourceIndex);
-                assertThat(benchmark.replaceLambda(data)).isNotNull();
+                assertThat(data.extract(sourceIndex) == null).isEqualTo(expectedCount == 0);
+                assertThat(data.extractAll(sourceIndex)).hasSize((int) expectedCount);
+                assertThat(data.split(sourceIndex)).isNotEmpty();
+                assertThat(data.replace(sourceIndex)).isNotNull();
+                assertThat(data.replaceLambda(sourceIndex)).isNotNull();
             }
         }
+    }
+
+    @Test
+    public void testEveryPassHandsEachInputToItsOperation()
+            throws Exception
+    {
+        List<BenchmarkEverydayTrinoRegexp.BenchmarkData> states = new ArrayList<>();
+        for (String workloadId : TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()) {
+            BenchmarkEverydayTrinoRegexp.BenchmarkData data = new BenchmarkEverydayTrinoRegexp.BenchmarkData();
+            data.setWorkload(workloadId);
+            data.setup();
+            states.add(data);
+        }
+        TestingBenchmarkPasses.verifyPasses(new BenchmarkEverydayTrinoRegexp(), _ -> states, state -> ((BenchmarkEverydayTrinoRegexp.BenchmarkData) state).inputs);
     }
 
     @Test

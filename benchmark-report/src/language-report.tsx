@@ -61,6 +61,9 @@ export type Row = {
   variantGainWarnings?: Record<string, string[]>;
   patternSummary?: { bytes: number; sourceUrl?: string; fullPatternAvailable: boolean };
 };
+// A harness's null engine, which returns each input's byte length through the boundary that harness's engines are
+// reached by: its median time per input on one case, the harness's own overhead. Never a comparison.
+export type HarnessOverhead = { harness: string; operation: string; caseId: string; medianNs: number; hostMedianNs: number[] };
 export type ReportData = {
   schemaVersion: 2;
   sources: { currentLabel: string; currentCandidate: string; engineTree: string; jdk: string; releaseVersion?: string };
@@ -71,6 +74,8 @@ export type ReportData = {
   methodology: string[];
   provenance: Record<string, unknown>;
   publication?: { status: "preliminary"; note: string; sourcePolicy: "mixed-development-revisions" | "candidate-build" };
+  // Each platform's harness overhead, from captures that measured null engines.
+  harnessOverhead?: Record<string, HarnessOverhead[]>;
   fullResultsUrl?: string;
   selection?: Selection;
 };
@@ -440,7 +445,7 @@ export function qualityDistribution(rows: Row[], side: TimingSide) {
   return { count: values.length, median: quantile(.5), p90: quantile(.9), aboveFive: values.filter(value => value > .05).length };
 }
 
-function MeasurementQuality({ rows, comparator, platform, memory, cpu, releaseVersion }: { rows: Row[]; comparator: string; platform: string; memory: string; cpu: string; releaseVersion?: string }) {
+function MeasurementQuality({ rows, comparator, platform, memory, cpu, releaseVersion, overhead }: { rows: Row[]; comparator: string; platform: string; memory: string; cpu: string; releaseVersion?: string; overhead?: HarnessOverhead[] }) {
   const candidate = qualityDistribution(rows, "candidate");
   const control = qualityDistribution(rows, "comparator");
   if (!candidate || !control) return null;
@@ -463,7 +468,23 @@ function MeasurementQuality({ rows, comparator, platform, memory, cpu, releaseVe
       {releaseVersion === "1.0" && <p><a href="./measurement-quality.txt" target="_blank" rel="noreferrer">Full measurement-quality assessment</a></p>}
     </details>
     {releaseVersion === "1.0" && <PlatformMeasurements cpu={cpu} />}
+    {overhead && overhead.length > 0 && <HarnessOverheadTable overhead={overhead} platform={platform} />}
     </div>
+  </details>;
+}
+
+const harnessLabels: Record<string, string> = { jvm: "JMH (Java engines)", "native-re2": "Google Benchmark (native RE2)", "native-rust": "Google Benchmark (Rust regex crate)" };
+const harnessOperations: Array<[string, string]> = [["reusedContains", "Contains"], ["reusedCount", "Count"], ["reusedFind", "Find"]];
+
+function HarnessOverheadTable({ overhead, platform }: { overhead: HarnessOverhead[]; platform: string }) {
+  const harnesses = Object.keys(harnessLabels).filter(harness => overhead.some(entry => entry.harness === harness));
+  const cases = [...new Set(overhead.map(entry => entry.caseId))];
+  const time = (harness: string, operation: string) => overhead.find(entry => entry.harness === harness && entry.operation === operation)?.medianNs;
+  return <details className="quality-methodology"><summary>Harness overhead</summary>
+    <p>Each harness also times a null engine that returns the input’s byte length through the same call boundary as that harness’s engines, over the inputs of {cases.join(", ")}. Its time per input on {platform} is the harness’s own cost. These are baseline costs measured on the named case, reported as the median of the three host medians. They are not comparisons.</p>
+    <div className="table-scroll"><table className="quality-summary"><thead><tr><th>ns per input</th>{harnessOperations.map(([operation, label]) => <th key={operation}>{label}</th>)}</tr></thead>
+      <tbody>{harnesses.map(harness => <tr key={harness}><th>{harnessLabels[harness]}</th>
+        {harnessOperations.map(([operation]) => { const ns = time(harness, operation); return <td key={operation}>{ns === undefined ? "–" : numberFormat.format(ns)}</td>; })}</tr>)}</tbody></table></div>
   </details>;
 }
 
@@ -932,13 +953,13 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       {language === "rust" && <><p>Regulator receives the input bytes in Slice.</p><p>When the source turns Unicode off or the input is not valid UTF-8, the crate uses its bytes API and Regulator uses byte mode. Otherwise the crate receives the same bytes as str. UTF-8 validation is outside the timings.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
-    <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />
+    <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} overhead={data.harnessOverhead?.[cpu]} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
-    {ordinary.length > 0 && section("Everyday regex operations", "Reused patterns over rotating inputs. Contains, count, and find are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
+    {ordinary.length > 0 && section("Everyday regex operations", "Reused patterns over each case's inputs in order. Contains, count, and find are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
     {specialized.length > 0 && section("Compiled patterns", <>By default, a pattern with a scan plan runs uncompiled and Regulator interprets the plan. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Compiled times are a best case: each compiled pattern is const-bound the way Trino binds it, one pattern per call site. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
     {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation on a warmed, reused pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}
-    {operations.length > 0 && section("Trino regex operations", "Complete public operations using reused patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
+    {operations.length > 0 && section("Trino regex operations", "Complete public operations using reused patterns over each workload's Slice values in order, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
     {bulk.length > 0 && section("Text processing workloads", "Document searches, tokenization, log parsing and capture workloads using reused patterns. Expand a row for its pattern, operation and input details.", <ResultsTable rows={bulk} comparator={comparator} />)}
     {literalProbes.length > 0 && section("Literal probe distributions", <>Count every match of one literal across a whole corpus. Regulator runs once with its default uniform byte-frequency distribution and once with a distribution matched to the corpus; {comparator} has no such option. Tuned vs default divides the two {comparator}-relative ratios, so differences between hosts cancel.</>, <LiteralProbeTable rows={literalProbes} comparator={comparator} />)}
     {(diagnostic.length > 0 || stress.length > 0) && section("Adversarial and stress workloads", "Pathological inputs and synthetic stress tests. These are not representative of typical application performance; interpret them individually.", <div className="adversarial-groups">

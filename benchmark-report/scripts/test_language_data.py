@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from language_data import MEMORY_MODES, PLATFORMS, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS, language_rows, outcome, reduce_hosts, timing, validate_language_report
+from language_data import CURRENT_PLATFORMS, LANGUAGES, MEMORY_MODES, PLATFORMS, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS, harness_overhead, language_rows, outcome, reduce_hosts, timing, validate_language_report
 
 
 def host(replica, candidate, comparator):
@@ -214,6 +214,44 @@ class TestLanguageData(unittest.TestCase):
             row['workContract'] = invalid
             with self.assertRaisesRegex(ValueError, 'benchmark work contract'):
                 validate_language_report(data)
+
+    def test_pass_contract_belongs_to_lifecycle_rows(self):
+        # Bulk compilation keeps its contract; only the lifecycle suite's rows record the pass protocol.
+        for suite in ('language-lifecycle', 'language-bulk'):
+            data = report_fixture()
+            for row in data['rows']:
+                if row['source'] == 'language':
+                    row['id'] = f"{suite}/{row['id']}"
+            row = next(row for row in data['rows'] if row['language'] == 're2' and row['operation'] == 'compile')
+            row['workContract'] = 'public-pattern-lifecycle-pass-v1'
+            if suite == 'language-lifecycle':
+                validate_language_report(data)
+            else:
+                with self.assertRaisesRegex(ValueError, 'benchmark work contract'):
+                    validate_language_report(data)
+
+    def test_harness_overhead_is_a_section_of_host_medians_not_a_row(self):
+        def entry(replica, nanoseconds, harness='jvm', platform='r9g'):
+            # Two forks, the second slow, so the median of the host medians, 2, differs from the pooled median, 3.
+            return {'harness': harness, 'operation': 'reusedFind', 'case': 'everyday/logLevel',
+                    'samples_ns': [[nanoseconds] * 2, [100.0]],
+                    'logical_identity': ['language-lifecycle', 'everyday/logLevel', 're2', platform, replica, 'unit']}
+
+        data = {'harness_overhead': [entry(1, 3.0), entry(2, 1.0), entry(3, 2.0)]}
+        overhead = harness_overhead(data)
+        self.assertEqual({'r9g': [{'harness': 'jvm', 'operation': 'reusedFind', 'caseId': 'everyday/logLevel',
+                                   'medianNs': 2.0, 'hostMedianNs': [3.0, 1.0, 2.0]}]}, overhead)
+        self.assertIsNone(harness_overhead({'harness_overhead': []}))
+        with self.assertRaisesRegex(ValueError, 'incomplete harness overhead host coverage'):
+            harness_overhead({'harness_overhead': data['harness_overhead'][:2]})
+        report = report_fixture(CURRENT_PLATFORMS, LANGUAGES)
+        rows = deepcopy(report['rows'])
+        validate_language_report({**report, 'harnessOverhead': overhead})
+        self.assertEqual(rows, report['rows'])
+        for invalid in ({'c9g': overhead['r9g']}, {'r9g': [{**overhead['r9g'][0], 'harness': 'unknown'}]},
+                        {'r9g': overhead['r9g'] * 2}, {'r9g': [{**overhead['r9g'][0], 'medianNs': 0}]}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'harness overhead'):
+                validate_language_report({**report, 'harnessOverhead': invalid})
 
     def test_rejects_missing_lifecycle_coverage(self):
         data = report_fixture()

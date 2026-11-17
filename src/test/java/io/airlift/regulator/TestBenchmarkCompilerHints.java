@@ -37,6 +37,7 @@ public class TestBenchmarkCompilerHints
                 .contains(
                         "blackhole,org/openjdk/jmh/infra/Blackhole.consumeCompiler",
                         "dontinline,*.*_avgt_jmhStub",
+                        "dontinline,io/airlift/regulator/BenchmarkLanguageComparison$RustCompiled.contains",
                         "inline,io/airlift/regulator/BenchmarkTrinoRegexpSearchEdges.contains");
         assertThat(readAllLines(jvmArguments, UTF_8))
                 .contains(
