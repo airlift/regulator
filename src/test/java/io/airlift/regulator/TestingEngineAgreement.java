@@ -16,6 +16,9 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -43,14 +46,14 @@ final class TestingEngineAgreement
 
     /// Searches every text, as a view between bytes outside ASCII, over every range with the view
     /// as context: the forward DFA finds what the NFA finds and the reverse DFA the leftmost start
-    /// of a match that ends at the range end, or either quits, which it may do only on text outside
-    /// ASCII in a program whose DFA quits on it.
+    /// of a match that ends at the range end, or either quits, which it may do only on text that
+    /// is not valid UTF-8 in a program with a word assertion that decodes the text.
     static void assertDfaAgreesWithNfa(String pattern, Prog forward, Prog reverse, List<byte[]> texts, String label)
     {
         for (byte[] text : texts) {
             Slice context = paddedView(text);
             String description = "%s on %s, %s".formatted(pattern, HexFormat.of().formatHex(text), label);
-            boolean mayQuit = forward.dfaQuitsOnNonAscii() && !isAscii(text);
+            boolean mayQuit = forward.dfaQuitsOnNonAscii() && !isUtf8(text);
             for (int start = 0; start <= text.length; start++) {
                 for (int end = start; end <= text.length; end++) {
                     assertDfaAgreesWithNfa(description, forward, reverse, context, start, end, mayQuit);
@@ -137,13 +140,14 @@ final class TestingEngineAgreement
         return Slices.wrappedBuffer(padded, 1, text.length);
     }
 
-    private static boolean isAscii(byte[] text)
+    static boolean isUtf8(byte[] text)
     {
-        for (byte value : text) {
-            if (value < 0) {
-                return false;
-            }
+        try {
+            StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(text));
+            return true;
         }
-        return true;
+        catch (CharacterCodingException ignored) {
+            return false;
+        }
     }
 }

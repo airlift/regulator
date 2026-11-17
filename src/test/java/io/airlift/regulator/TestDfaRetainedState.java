@@ -398,12 +398,15 @@ public class TestDfaRetainedState
                 .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
 
         // Each range has CR or é on both sides, so a forward and a reverse search start from the
-        // same cache. The search after é quits on its first byte, after caching its start state.
+        // same cache. The forward search after é, a word character, starts from a cache the search
+        // creates and charges, and a reset frees it.
         assertThat(Dfa.search(rustProgram, Slices.utf8Slice("\rabc\r"), 1, 4, true, Prog.MatchKind.LONGEST_MATCH, true))
                 .isNotEqualTo(Dfa.SEARCH_FAILED);
         assertThat(Dfa.search(rustProgram, Slices.utf8Slice("éabcé"), 2, 5, true, Prog.MatchKind.LONGEST_MATCH, true))
-                .isEqualTo(Dfa.SEARCH_FAILED);
+                .isNotEqualTo(Dfa.SEARCH_FAILED);
         assertThat(rustDfa.cacheSnapshot().populatedStartStates()).isEqualTo(2);
+        assertThat(rustDfa.cacheSnapshot().stateBudget() - rustDfa.cacheSnapshot().availableStateMemory())
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
         rustDfa.resetCacheExternal();
 
         assertThat(rustDfa.cacheSnapshot().populatedStartStates()).isZero();
