@@ -2304,12 +2304,12 @@ abstract sealed class CompiledPattern
         return booleanPlans.dotStarLiteralMatcher();
     }
 
-    /// Returns the ordered-literal matcher of Trino's contains, which reads any bytes between its
-    /// literals under Trino's garbage-in, garbage-out rule, or `null`. The caller reserves its
-    /// memory with [#tryReserveForwardDfaMemory]. Trino calls this once, as it compiles. A Trino
-    /// pattern reads only UTF-8 and has no dot that matches any byte, so it never takes the
-    /// [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan, whose gaps must match every
-    /// byte sequence. This matcher's reservation is therefore its only ordered-literal
+    /// Returns the ordered-literal matcher of Trino's contains, which reads the gaps between its
+    /// literals as the engine's dot does and leaves a gap it rejects to the engine, or `null`. The
+    /// caller reserves its memory with [#tryReserveForwardDfaMemory]. Trino calls this once, as it
+    /// compiles. A Trino pattern reads only UTF-8 and has no dot that matches any byte, so it never
+    /// takes the [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan, whose gaps must
+    /// match every byte sequence. This matcher's reservation is therefore its only ordered-literal
     /// reservation.
     OrderedLiteralMatcher createOrderedLiteralMatcher()
     {

@@ -559,10 +559,22 @@ original pattern, including when quoting rewrites it before parsing.
   there is concrete user demand for exact Joni behavior in this case.
 - `contains` may select the shared ordered-literal matcher when expression
   analysis proves two or more case-sensitive literals separated by unrestricted
-  dot-star gaps. The compiled `TrinoCompiledPattern` remains authoritative for
-  every other operation, including captures and boundaries. The matcher retained
-  size is deducted from the forward-DFA budget; compilation keeps the ordinary
-  RE2 route when that optional allocation does not fit.
+  dot-star gaps. It finds each literal in turn and checks each gap between two
+  found literals against the characters the engine's `.` accepts: ASCII, and a
+  lead byte `C2`-`F4` with its continuation bytes, so overlong three- and
+  four-byte forms, encoded surrogates, and values above U+10FFFF pass, while
+  bare continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated sequences do
+  not. A gap that fails leaves the answer to the engine on the whole input,
+  since a later placement of the literals may still match. So every operation
+  gives the same answer on malformed input: on `first`, `FF`, `second`
+  `contains` is false and `extract` is null, where Joni matches; Trino's
+  garbage-in, garbage-out contract leaves either answer open. Release 2.1's
+  `contains` did not read the gaps, and so answered true there while the other
+  operations found no match. The compiled `TrinoCompiledPattern` remains
+  authoritative for every other operation, including captures and boundaries.
+  The matcher retained size is deducted from the forward-DFA budget;
+  compilation keeps the ordinary RE2 route when that optional allocation does
+  not fit.
 - A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
   first invalid byte, as `JavaRegexp`, `RustRegexp`, and UTF-8 `Re2` patterns
   do. This deliberately differs from Trino, whose non-strict Joni path accepts
@@ -655,7 +667,10 @@ against 8% to 10% for the pair scan, landing in a fast mode or one about 1.5x
 slower, so their per-cell noise is wide; the cause is not established. The r8i
 `english/ordered-none` (`Yeah`, `there`) loss in a confirmation measurement,
 1.17x, came from that fast mode: in the initial comparison the pair scan matched
-the previous route's slower mode, 22.7 against 22.9 ns per row.
+the previous route's slower mode, 22.7 against 22.9 ns per row. The ordered
+contains results predate the gap check that the [Trino Compatibility
+Adapter](#trino-compatibility-adapter) describes, which also reads the bytes
+between found literals.
 
 Candidates are verified in 8-byte words for literals of 8 or more bytes, in two
 4-byte reads for literals of 4 to 7 bytes, and a byte at a time below 4 bytes.
@@ -2199,9 +2214,11 @@ forward DFA budget, as Trino's ordered-literal subtype's does, so a pattern with
 a lowered boolean or tagged alternation program, or without room for the
 matcher, keeps the engine. Release 2.0 had no such plan outside Trino, and the
 matcher [yields to the forward DFAs](#memory-budgets-and-dfa-caching). Trino's
-contains keeps its own ordered-literal subtype, which reads any bytes in its
-`(?s:.)` gaps under its garbage-in, garbage-out rule; no Trino pattern takes the
-plan, since Trino reads only UTF-8 and has no dot that matches any byte.
+contains keeps its own ordered-literal subtype, which checks each `(?s:.)` gap
+against the characters the engine's dot accepts and asks the engine when one
+fails, as the [Trino Compatibility Adapter](#trino-compatibility-adapter)
+describes; no Trino pattern takes the plan, since Trino reads only UTF-8 and has
+no dot that matches any byte.
 
 Full-Slice boolean `find` of a class run, a literal, and a class run, such as
 lh3lh3's email `([^ @]+)@([^ @]+)`, decides from the byte on each side of each
@@ -3677,10 +3694,13 @@ emits the same split search for contained and ordered literals and accepts
 kernels](#generated-trino-like-kernels).
 
 The LIKE and Trino-regexp parsers remain separate language frontends, but they
-share the ordered-literal matcher when analysis proves equivalent semantics.
-Trino regexp uses that matcher only for boolean `contains`; count,
-position, extraction, replacement, split, and unsupported shapes retain the
-complete RE2 execution route.
+share the ordered-literal matcher's literal search. LIKE's `%` reads nothing
+between the literals; Trino regexp uses the matcher only for boolean
+`contains`, and checks each gap between two found literals against the
+characters the engine's `.` accepts, leaving a gap that fails to the engine, as
+the [Trino Compatibility Adapter](#trino-compatibility-adapter) describes.
+Count, position, extraction, replacement, split, and unsupported shapes retain
+the complete RE2 execution route.
 
 There is deliberately no literal-count cutoff between ordered scanning and the
 DFA. The evidence comes from the earlier cutoff study, measured before ordered
