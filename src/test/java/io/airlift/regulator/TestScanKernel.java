@@ -19,6 +19,7 @@ import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.regulator.TestScanPlan.QuadraticSearch;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -167,6 +168,7 @@ public class TestScanKernel
     /// entry for each operation that reaches the plan, while the same pattern compiled without
     /// the option keeps no generated code. Patterns that have no case-sensitive scan plan or
     /// compile to another subclass keep the class they have without the option.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRouteSelection()
     {
@@ -221,6 +223,7 @@ public class TestScanKernel
 
     /// A generated pattern rejects bad arguments with the interpreter's exceptions, checked in
     /// the interpreter's order: extraction checks the group before the source.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testArgumentChecks()
     {
@@ -273,6 +276,7 @@ public class TestScanKernel
     /// byte-set, and nibble-table candidate scans of a leading run, on views and exact-length
     /// copies. In this package, the Trino, RE2, Java and Rust generated classes and the helpers
     /// they call invoke only [#GENERATED_CODE_CALLS].
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testEveryOperationShape()
             throws Throwable
@@ -384,6 +388,7 @@ public class TestScanKernel
     /// A caller-supplied distribution and a preset move the probe of a leading literal off its
     /// first byte. The generated candidate scan probes the byte the interpreter probes, so it
     /// finds the same candidates and hands off where the interpreter does.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLiteralProbeAgainstInterpreter()
             throws Throwable
@@ -419,6 +424,7 @@ public class TestScanKernel
     /// Compares generated and interpreted patterns over the seeded patterns of
     /// [TestScanPlan]: end-anchored, partial, compacted, and unanchored shapes, on their
     /// witnesses, mutations, random text, and malformed UTF-8.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testGeneratedPatternsAgainstInterpreter()
             throws Throwable
@@ -459,6 +465,7 @@ public class TestScanKernel
     /// A generated search that hands off to the ordinary engine gives the interpreter's results,
     /// including for a leading literal whose probe the supplied distribution moves off its first
     /// byte.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testForcedHandoffWithGeneratedCode()
             throws Throwable
@@ -477,6 +484,7 @@ public class TestScanKernel
     /// Repeated failed attempts long enough to cross the density and work-budget limits of the
     /// candidate search, with malformed UTF-8 before the failure, hand off where the interpreter
     /// does.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLongSourcesHandOffWithInterpreter()
             throws Throwable
@@ -512,6 +520,7 @@ public class TestScanKernel
     /// captured. One more run, capture, or literal leaves the pattern without a plan. Java is
     /// measured because its `$` adds a final-terminator check to the end-anchored attempt; Rust
     /// patterns share RE2's emission logic and end checks.
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testLargestPlansStayUnderHugeMethodLimit()
     {

@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.regulator.TestRe2ScanPlan.NamedDistribution;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -114,6 +115,7 @@ public class TestRustScanPlan
 
     private record NamedRegexp(String name, RustRegexp regexp) {}
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRouteSelection()
     {
@@ -168,6 +170,7 @@ public class TestRustScanPlan
                 .hasMessage("a pattern that can match empty has no generated class");
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPublicCallsRunThePlan()
             throws ReflectiveOperationException
@@ -223,6 +226,7 @@ public class TestRustScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlansMatchTheOrdinaryEngine()
     {
@@ -250,6 +254,7 @@ public class TestRustScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlanCountsSharedMemberTableOnce()
     {
@@ -277,6 +282,7 @@ public class TestRustScanPlan
         return size;
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPlansMatchTheOrdinaryEngineOnMalformedInput()
     {
@@ -296,6 +302,7 @@ public class TestRustScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRandomPlansMatchTheOrdinaryEngine()
     {

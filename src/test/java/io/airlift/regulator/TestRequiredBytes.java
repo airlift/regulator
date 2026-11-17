@@ -771,7 +771,6 @@ public class TestRequiredBytes
         List<OtherRoute> otherRoutes = List.of(
                 new OtherRoute("xyz.*?q", "xyzq", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()),
                 new OtherRoute("\\bxyz\\b.*?q", "xyz q", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
-                new OtherRoute("[0-9]([0-9]*)zz", "1zz", CompiledPattern::usesScanPlanForDiagnostics),
                 new OtherRoute("(.*?,){3}# [Nn]oqa", ",,,# Noqa", pattern -> !pattern.requiredBytesForDiagnostics().isExactLiteral()),
                 new OtherRoute("\\w+,\\bz", "ab,z", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
                 // Neither does one whose class pair only the class-run proof admits, `[?!.]["']`
@@ -1145,8 +1144,7 @@ public class TestRequiredBytes
                 // `FOO`, and the folded `bar` of `foo[Bb][Aa][Rr]` may be `BAR`.
                 new BesideRoute("\\Bfoobar.*?FOO", "x", "foobarFOO", "foobar", "FOO", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() == null),
                 new BesideRoute("\\Bfoo[Bb][Aa][Rr].*?BAR", "x", "fooBarBAR", "foobar", "BAR", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() != null),
-                new BesideRoute("\\Bfoo[Bb][Aa][Rr].*?bar", "x", "fooBARbar", "foobar", "bar", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() != null),
-                new BesideRoute("\\d(\\d*)ab(\\d+)cde", "1ab2cde", "ab", "ab", CompiledPattern::usesScanPlanForDiagnostics)));
+                new BesideRoute("\\Bfoo[Bb][Aa][Rr].*?bar", "x", "fooBARbar", "foobar", "bar", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() != null)));
         if (VectorSupport.isAvailable()) {
             routes.add(new BesideRoute("(?:abc|def)(?:[a-q],){3}z", "abca,b,c,z", ",z", ",z", pattern -> Dfa.DfaInstance.searchesStartLiteralFilter(pattern.forwardProgramForDiagnostics(), Dfa.DfaInstance.Kind.FIRST_MATCH)));
             // A folded run that stands in for no prefix counts as the start literal filter the

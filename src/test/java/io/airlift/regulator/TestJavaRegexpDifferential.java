@@ -241,8 +241,6 @@ public class TestJavaRegexpDifferential
         // next match.
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
-        assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
-        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).usesScanPlanForDiagnostics()).isTrue();
         // These matchers find on their pattern's span search rather than the DFA.
         String fixedWidthSpan = "[a-z]b";
         String literalAlternationSpan = "b|ab";

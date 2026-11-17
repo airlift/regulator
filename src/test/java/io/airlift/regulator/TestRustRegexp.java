@@ -144,7 +144,6 @@ public class TestRustRegexp
         // Every operation but count names a null input `input`, and checks it first, as do the
         // entries of a generated class.
         RustRegexp generated = RustRegexp.compile(utf8Slice("x([^/]+)/"), RustRegexp.Options.defaults().setGenerateBytecode(true));
-        assertThat(generated.usesGeneratedBytecode()).isTrue();
         for (RustRegexp pattern : List.of(RustRegexp.compile(utf8Slice("a*")), RustRegexp.compile(utf8Slice("(a)(b)?")), RustRegexp.compile(utf8Slice("abc")), generated)) {
             assertNullInputFailures(pattern, operation ->
                     operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");

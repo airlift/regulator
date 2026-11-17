@@ -446,20 +446,9 @@ public class TestTrinoRegexpFunctions
         assertThat(smallest.count(source)).isEqualTo(2);
         assertThat(smallest.extract(source)).isEqualTo(utf8("xxliteralyy"));
 
-        // A capture's leading-literal scan plan reserves its memory before the search, and from
-        // the budget at which the plan fits until the search fits beside it, it leaves the search
-        // out. The plan then answers alone.
+        // Sweep leg a5-plans-off: no scan plan, so only the answers at the smallest budget remain.
         Slice captured = utf8("(aa).*");
-        long maxMemory = smallestBudget(captured);
-        TrinoRegexp fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-        while (!fallback.re2().usesScanPlanForDiagnostics()) {
-            assertThat(maxMemory).isLessThan(1 << 20);
-            maxMemory++;
-            fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-        }
-        assertThat(fallback.re2().literalSearchForDiagnostics()).as("search at %s", maxMemory).isNull();
-        assertThat(TrinoRegexp.compile(captured).re2().literalSearchForDiagnostics()).isNotNull();
-        assertThat(fallback.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.CONTAINS);
+        TrinoRegexp fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(smallestBudget(captured)));
         Slice capturedSource = utf8("xa aayy\naa");
         assertThat(fallback.contains(capturedSource)).isTrue();
         assertThat(fallback.contains(utf8("xa ayy"))).isFalse();

@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -375,6 +376,7 @@ public class TestRe2Allocations
         assertReplaceAllocatesLessThan("a|b+", source, "", resultLength * 4 + 64 * 1024);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testTrinoScanPlansDoNotAllocate()
     {
@@ -402,6 +404,7 @@ public class TestRe2Allocations
         assertThat(groups).containsExactly(4, 23, 11, 22);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testScanPlanCountDoesNotAllocate()
     {
@@ -446,6 +449,7 @@ public class TestRe2Allocations
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testScanPlanCountHandoffAllocatesOncePerCall()
     {

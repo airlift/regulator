@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -48,6 +49,7 @@ public class TestBenchmarkRe2ScanPlan
     // its Unicode K fold, which Trino rejects.
     private static final String PARTLY_PLANNED = "DEEP_REJECTIONS";
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testBenchmarkResults()
             throws ReflectiveOperationException

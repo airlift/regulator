@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.regulator.TestRe2ScanPlan.NamedDistribution;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -157,6 +158,7 @@ public class TestJavaScanPlan
 
     private record NamedRegexp(String name, JavaRegexp regexp) {}
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRouteSelection()
     {
@@ -189,6 +191,7 @@ public class TestJavaScanPlan
         assertThat(JavaRegexp.compileWithoutScanPlanForTesting(utf8Slice(PLAN_CASES.getFirst().expression()), JavaRegexp.Options.defaults()).usesScanPlanForDiagnostics()).isFalse();
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testPublicCallsRunThePlan()
             throws ReflectiveOperationException
@@ -296,6 +299,7 @@ public class TestJavaScanPlan
         }
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testRandomPlansMatchTheOrdinaryEngine()
     {

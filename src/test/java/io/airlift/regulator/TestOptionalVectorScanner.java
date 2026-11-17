@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import jdk.incubator.vector.ByteVector;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestOptionalVectorScanner
 {
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testWithAndWithoutVectorModule()
             throws Exception
@@ -55,6 +57,7 @@ public class TestOptionalVectorScanner
         assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorBlockMaskScanner source:")).isEqualTo(vectorScans);
     }
 
+    @Disabled("Sweep leg a5-plans-off: scan plans are off")
     @Test
     public void testEightByteVectorsUseScalarScanners()
             throws Exception
