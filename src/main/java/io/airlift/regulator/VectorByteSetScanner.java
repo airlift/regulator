@@ -68,12 +68,6 @@ final class VectorByteSetScanner
         return skippedBytes < SHORT_SCAN_BYTES ? shortScanCount + 1 : 0;
     }
 
-    /// Returns the largest multiple of the vector length at most `length`.
-    static int vectorLoopBound(int length)
-    {
-        return SPECIES.loopBound(length);
-    }
-
     static boolean shouldSampleCandidateDensity()
     {
         return SPECIES.length() > 16;

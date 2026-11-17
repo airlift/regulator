@@ -266,7 +266,7 @@ public class TestBoundedCharacterClassCounter
             Re2 re2 = Re2.compileParsed(pattern, parsed, flags, maxMemory);
             assertThat(re2.forwardProgramForDiagnostics().dfaMemory()).as(source).isEqualTo(control.dfaMemory() - re2.classMatchCounter().estimatedRetainedSize());
         }
-        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_016);
+        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_000);
     }
 
     @Test
@@ -432,11 +432,11 @@ public class TestBoundedCharacterClassCounter
                 RustRegexp::compile);
         for (Function<Slice, CompiledPattern> compiler : compilers) {
             CompiledPattern belowLimit = compiler.apply(utf8Slice("[\\p{L}\\x{3FFFF}]"));
-            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_136);
+            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_120);
             CompiledPattern atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
             assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
             CompiledPattern allNonAscii = compiler.apply(utf8Slice("[^,]+"));
-            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(624);
+            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(608);
             CompiledPattern beforeTailBelowLimit = compiler.apply(utf8Slice("[\\x{3FFFF}\\x{50000}-\\x{10FFFF}]+"));
             assertThat(beforeTailBelowLimit.classMatchCounter()).as(beforeTailBelowLimit.pattern().toStringUtf8()).isNotNull();
             CompiledPattern beforeTailAtLimit = compiler.apply(utf8Slice("[\\x{40000}\\x{50000}-\\x{10FFFF}]+"));
@@ -444,7 +444,7 @@ public class TestBoundedCharacterClassCounter
         }
         // A Rust bytes-mode class of every scalar value retains a bitset that ends at U+D7FF, below
         // the surrogates.
-        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_280);
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_264);
         List<CompiledPattern> lastPlaneClasses = List.of(
                 Re2.compile(utf8Slice("\\p{Mn}")),
                 JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)),
@@ -530,21 +530,6 @@ public class TestBoundedCharacterClassCounter
         }
         assertCounterMatcherAgrees("Rust bytes", source -> RustRegexp.compile(source, RustRegexp.Options.bytes()), "(?-u:[^\\r\\n])+", false, highRuns);
         assertCounterMatcherAgrees("Rust bytes", source -> RustRegexp.compile(source, RustRegexp.Options.bytes()), "(?s-u:.)+", false, highRuns);
-
-        for (CompiledPattern pattern : List.of(
-                Re2.compile(utf8Slice("[0-9A-Za-z_]{256}")),
-                Re2.compile(utf8Slice("[0-9A-Za-z_]{256}"), Re2.Options.latin1()),
-                Re2.compile(utf8Slice("[\\t\\x0B\\r -~]+")),
-                JavaRegexp.compile(utf8Slice("\\w+")),
-                TrinoRegexp.compile(utf8Slice("\\w+")).re2(),
-                RustRegexp.compile(utf8Slice("[0-9A-Za-z_]{256}"), RustRegexp.Options.bytes().setUnicode(false)))) {
-            assertThat(pattern.classMatchCounter().scansRunEndsWithVectorsForDiagnostics()).as(pattern.pattern().toStringUtf8()).isEqualTo(VectorSupport.isAvailable());
-        }
-        // Five ranges, members past ASCII in UTF-8, or a maximum within the stepped prefix keep the
-        // table loop.
-        assertThat(Re2.compile(utf8Slice("[\\-0-9A-Za-z_]+")).classMatchCounter().scansRunEndsWithVectorsForDiagnostics()).isFalse();
-        assertThat(Re2.compile(utf8Slice("\\pL+")).classMatchCounter().scansRunEndsWithVectorsForDiagnostics()).isFalse();
-        assertThat(Re2.compile(utf8Slice("[A-Za-z]{8,13}")).classMatchCounter().scansRunEndsWithVectorsForDiagnostics()).isFalse();
     }
 
     // Runs of the members, repeated in order, at every length up to 72 and at selected lengths

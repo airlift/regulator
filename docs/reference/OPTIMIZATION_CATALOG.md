@@ -1582,15 +1582,13 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   compiled greedy set loops find their end with a vectorized `IndexOfAnyExcept`
   ([.NET 7][dotnet7-blog]); Inspired by gaps against the Rust regex
   crate on class counts for the byte reads and branch-free updates ([#87],
-  [#144]), on Unicode class extraction ([#91]), and against Hyperscan on long
-  word runs ([#216]), and by rebar's `unicode/codepoints` any-one row, whose
+  [#144]), on Unicode class extraction ([#91]), and by rebar's `unicode/codepoints` any-one row, whose
   count of one character made one DFA search per match ([#231]). Regulator:
   splitting each run by the repeat's bounds ([#1], [design][d-class-count]),
   counting single members as repeats of one ([#231]), a branch-free run
   update ([#144]), the
-  member-start table, which also reads byte and ASCII runs ([#91], [#112]),
-  and the handoff of a long byte run to the
-  [self-loop exit-byte scan](#self-loop-exit-byte-scan) ([#216]).
+  and the member-start table, which also reads byte and ASCII runs ([#91],
+  [#112]).
 - **Where:** `BoundedCharacterClassCounter.analyzeRepeat`,
   `BoundedCharacterClassCounter.analyzeSingleMember`,
   `BoundedCharacterClassCounter.hasSparseSingleMembers`,
@@ -1601,7 +1599,6 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `BoundedCharacterClassCounter.findSpan`,
   `BoundedCharacterClassCounter.findMemberStart`,
   `BoundedCharacterClassCounter.byteRunEnd`,
-  `BoundedCharacterClassCounter.vectorRunEnd`,
   `BoundedCharacterClassCounter.packMemberRanges`,
   `VectorByteSetScanner.findOutsideRanges`,
   `RetainedCharacterClassCountDfa.supports`,
@@ -1615,10 +1612,7 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   128 KiB, a count of a small case-sensitive
   greedy class with a positive minimum runs on a DFA instead when class
   members are sparse; input of 1 MiB or more is sampled first, and shorter
-  input, or input whose sample holds many members, uses the counter. The
-  run-end vector scan needs the Vector API, a byte or ASCII class whose
-  members fit in at most four ranges of at most 128 bytes each, and a repeat
-  whose maximum, if any, passes the handoff length
+  input, or input whose sample holds many members, uses the counter
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text
@@ -1627,11 +1621,7 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   run length from byte to byte. UTF-8 text of ASCII and two-byte characters is
   checked 32 bytes at a time with SWAR masks. Span searches skip bytes that
   cannot begin a member, with a table or, for a sparse class, a vector nibble
-  scan; for byte and ASCII classes, the table also reads the run. A byte run
-  still going after 128 bytes, or 64 with 64-byte vectors, is finished by
-  the self-loop exit-byte scan's range compares over whole vectors, with the
-  table reading the rest; a run that meets a nonmember before then returns
-  from the table loop. A count of one member of a dense class, any
+  scan; for byte and ASCII classes, the table also reads the run. A count of one member of a dense class, any
   character, or any byte runs on the counter as a repeat of one, and on text
   of 4 KiB or more whose sample of four 256-byte windows finds the members
   sparse, it falls back to the DFA count, which skips to their start bytes.
@@ -1641,9 +1631,7 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   1.1 million DFA searches for each count ([#231]).
   Letter-run counts take 0.55 to 0.62 of their earlier time on Graviton and
   0.47 to 0.49 on Intel ([#144]), and finding every `\pL` or `\p{Ll}` letter
-  0.16 to 0.29 ([#91]). rebar's `i1095-word-repetition` ASCII search for
-  `[0-9A-Za-z_]{256}` takes 0.81 of its earlier time on Graviton and 0.55 on
-  Intel, and lines past 64 bytes cost Intel line-heavy text 5 to 10% ([#216]).
+  0.16 to 0.29 ([#91]).
 
 ## Scan plans
 
@@ -2598,7 +2586,6 @@ change is described.
 [#202]: https://github.com/airlift/regulator/pull/202
 [#203]: https://github.com/airlift/regulator/pull/203
 [#208]: https://github.com/airlift/regulator/pull/208
-[#216]: https://github.com/airlift/regulator/pull/216
 [#224]: https://github.com/airlift/regulator/pull/224
 [#226]: https://github.com/airlift/regulator/pull/226
 [#229]: https://github.com/airlift/regulator/pull/229

@@ -4992,21 +4992,6 @@ decoding method, the decoding method being the search as it was before the byte
 runs, cleared Intel position but made Intel Trino replace 12% slower; do not
 repeat it without an Intel profile of replace.
 
-The vector handoff of a long byte run is chosen per vector width at class
-initialization. Handing off costs more than the table steps it saves on a run
-that ends soon after: on Graviton's 16-byte vectors a 64-byte handoff made
-subtitle lines 3% slower, and at 128 bytes the line rows are 1-1.3% slower,
-where long runs such as rebar's `i1095-word-repetition` take 0.81x the time. On
-Intel's 64-byte vectors the 64-byte handoff keeps long runs fastest (0.55x for
-`i1095-word-repetition`, 0.40x for 256-byte word runs), but 13.5% of Rust source
-lines and 7.2% of subtitle lines pass it, so those rows are 5-10% slower: the
-handoff adds 2-4% instructions, and on subtitles the run loop, which returns at
-a nonmember from inside the loop, takes about 2.5x main's branch misses. Testing
-each run's end against the limit after the loop instead won the Intel line rows
-but made Graviton word rows 3-4% slower, and Intel's 4-6%. Graviton is weighted
-over Intel, so the Intel line rows are accepted. 32-byte vectors keep the
-128-byte handoff unmeasured.
-
 `countUtf8`'s two-byte chunk check reads the SWAR constant `0x0101010101010101`
 from a field on aarch64, where C2 cannot encode its subtraction as an immediate
 and rebuilt it on every word; the specialized Russian and ASCII class-run counts
