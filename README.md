@@ -189,9 +189,9 @@ the pattern, input, and matching engine; LIKE-only routes do not use the DFA.
 Enable both flags. The
 [benchmark report](https://airlift.github.io/regulator/benchmarks/) runs every
 row with the Vector API and includes separate native-access and pure-Java
-results. The published report predates the Java-array table; the
+results; its pure-Java results use the Java-array table. The
 [FAQ](docs/FAQ.md#should-i-enable-the-vector-api-or-native-access) explains the
-current benefit of each flag.
+benefit of each flag.
 
 ## Documentation
 

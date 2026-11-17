@@ -17,10 +17,10 @@ and intermediate benchmark reports are not kept here.
 
 | Document | Purpose |
 |---|---|
-| [`reference/languages/RE2.md`](reference/languages/RE2.md) | RE2 syntax, modes, and options |
-| [`reference/languages/TRINO_REGEXP.md`](reference/languages/TRINO_REGEXP.md) | Trino's Joni-derived regular-expression language |
-| [`reference/languages/JAVA_REGEXP.md`](reference/languages/JAVA_REGEXP.md) | Supported regular subset of the current JDK's Pattern syntax |
 | [`reference/languages/RUST_REGEXP.md`](reference/languages/RUST_REGEXP.md) | Rust regex crate syntax and matching, with the crate's Unicode property names |
+| [`reference/languages/RE2.md`](reference/languages/RE2.md) | RE2 syntax, modes, and options |
+| [`reference/languages/JAVA_REGEXP.md`](reference/languages/JAVA_REGEXP.md) | Supported regular subset of the current JDK's Pattern syntax |
+| [`reference/languages/TRINO_REGEXP.md`](reference/languages/TRINO_REGEXP.md) | Trino's Joni-derived regular-expression language |
 | [`reference/languages/TRINO_LIKE.md`](reference/languages/TRINO_LIKE.md) | Trino SQL LIKE syntax and semantics |
 | [`reference/languages/UNSUPPORTED_FEATURES.md`](reference/languages/UNSUPPORTED_FEATURES.md) | Unsupported constructs and future-support policy |
 
@@ -55,7 +55,7 @@ and intermediate benchmark reports are not kept here.
 | [AWS collection guide](../tools/re2-benchmark/aws/README.md) | Freeze, plan, run, recover, and budget machine-hours and cost |
 | [Interactive benchmark report](https://airlift.github.io/regulator/benchmarks/) | Sortable results by language, platform, and native-memory or pure-Java route |
 | [Measurement quality](benchmarks/MEASUREMENT_QUALITY.md) | Timing uncertainty, native controls, repaired protocols and reproduction |
-| [`benchmarks/SCAN_PLAN.md`](benchmarks/SCAN_PLAN.md) | Specialized scan-plan design for Trino, RE2, Java, and Rust patterns, eligibility, and benchmarks |
+| [`benchmarks/SCAN_PLAN.md`](benchmarks/SCAN_PLAN.md) | Specialized scan-plan design for Rust, RE2, Java, and Trino patterns, eligibility, and benchmarks |
 | [`reference/OPTIMIZATION_CATALOG.md`](reference/OPTIMIZATION_CATALOG.md) | Regulator's main optimizations, where each applies, and where it came from |
 | [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | C++ RE2 optimizations and their exact triggers, for upstream fidelity audits |
 | [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
