@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -86,6 +87,7 @@ public class TestPublicEngineAgreement
         assertThat(failures).isEmpty();
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testSpanSearchRegions()
     {

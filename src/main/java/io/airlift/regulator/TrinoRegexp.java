@@ -217,7 +217,9 @@ public sealed class TrinoRegexp
             return new LiteralAlternationTrinoRegexp(inputs, literalAlternationMatcher);
         }
         LiteralSetSpanMatcher literalSetMatcher = LiteralSetSpanMatcher.analyze(parsed.regexp(), parsed.capturingGroupCount(), forwardMemory);
-        if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
+        // Sweep leg: a set takes the place of the program only where the program does not fit.
+        boolean literalSetFits = literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory;
+        if (CompiledPattern.BUILDS_LITERAL_SET_BESIDE_PROGRAM && literalSetFits) {
             return new LiteralSetTrinoRegexp(inputs, literalSetMatcher);
         }
         CompiledPattern.Analysis analysis;
@@ -225,6 +227,9 @@ public sealed class TrinoRegexp
             analysis = CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, inputs.maxMemory(), inputs.byteFrequencies(), scanPlanMode);
         }
         catch (RegexpCompileMemoryLimitException e) {
+            if (literalSetFits) {
+                return new LiteralSetTrinoRegexp(inputs, literalSetMatcher);
+            }
             // What each route needs is computed only after every route failed.
             throw CompiledPattern.withRequiredTrinoBudget(e, parsed, PARSE_FLAGS, inputs.maxMemory(), literalAlternationMatcher);
         }

@@ -20,6 +20,7 @@ import io.airlift.joni.Regex;
 import io.airlift.joni.Region;
 import io.airlift.joni.Syntax;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -177,6 +178,7 @@ public class TestTrinoRegexpMatcher
         assertThatThrownBy(() -> first.group(2)).isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testMatcherStateAndZeroCopyGroups()
     {

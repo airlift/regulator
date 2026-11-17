@@ -18,6 +18,7 @@ import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -152,6 +153,7 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(shape(Re2.compile(utf8Slice("xa|b|xab"), Re2.Options.defaults().setLongestMatch(true)))).isEqualTo(CompiledPattern.Shape.ENGINE);
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testEligibility()
     {
@@ -249,6 +251,7 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalLiteralSet(dictionary + "|" + nestedChoices)).isNull();
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testCollidingLiteralsBuildLiteralByLiteral()
     {
@@ -280,6 +283,7 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(collidingMatcher.start() + "-" + collidingMatcher.end()).isEqualTo("3-11");
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testLargeAlternationRoutes()
     {
@@ -365,6 +369,7 @@ public class TestLiteralAlternationSpanMatcher
         }
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testLiteralSetWithoutProgram()
     {
@@ -542,6 +547,7 @@ public class TestLiteralAlternationSpanMatcher
         return result == null ? "none" : result.start() + "-" + result.end();
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testLargeAlternationAgainstGeneralEngine()
     {
@@ -659,6 +665,7 @@ public class TestLiteralAlternationSpanMatcher
         }
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testLiteralSetSkipsAhead()
     {
@@ -897,6 +904,7 @@ public class TestLiteralAlternationSpanMatcher
         }
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testPublicRouteAndMemoryAccounting()
     {

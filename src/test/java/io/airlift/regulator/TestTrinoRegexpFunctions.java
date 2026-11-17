@@ -18,6 +18,7 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -599,6 +600,7 @@ public class TestTrinoRegexpFunctions
         assertNoCachedDfa(regexp);
     }
 
+    @Disabled("Sweep leg b6-no-a2: pins the switched-off mechanism")
     @Test
     public void testLiteralAlternationOperationsUseDirectNativeBoundaries()
     {

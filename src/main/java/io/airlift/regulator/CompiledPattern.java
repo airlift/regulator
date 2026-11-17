@@ -1168,7 +1168,7 @@ abstract sealed class CompiledPattern
         // budget before it compiles a program, and this analysis is bounded by the program's DFA
         // budget, which is that forward budget less the program, so a set Trino declined is
         // declined here too.
-        LiteralSetSpanMatcher literalSet = !longestMatch ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory()) : null;
+        LiteralSetSpanMatcher literalSet = BUILDS_LITERAL_SET_BESIDE_PROGRAM && !longestMatch ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory()) : null;
         // The root skip only speeds up the set's search, so it yields to the forward DFAs: a set
         // whose root skip would leave the first-match or longest-match DFA too little to
         // initialize drops it and is admitted as it was before it, whether or not the DFA would
@@ -1564,7 +1564,7 @@ abstract sealed class CompiledPattern
             }
             else if (booleanPlans.literalSet() != null) {
                 literalSetFind = !partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.LONGEST_MATCH);
-                literalSetCount = booleanPlans.literalSet().skipsAhead() || !partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH);
+                literalSetCount = !partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH);
                 if (literalSetFind || literalSetCount) {
                     shape = Shape.LITERAL_ALTERNATION;
                 }
@@ -3520,6 +3520,10 @@ abstract sealed class CompiledPattern
     {
         return length >= booleanPlans.innerLiteralCountMinimum() && booleanPlans.hasLiteralSearch();
     }
+
+    // Sweep leg: a pattern whose program compiles builds no literal set beside it. A set whose
+    // program does not fit the budget, which has no other route, keeps its set.
+    static final boolean BUILDS_LITERAL_SET_BESIDE_PROGRAM = false;
 
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
