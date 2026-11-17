@@ -199,6 +199,7 @@ current benefit of each flag.
 - [FAQ](docs/FAQ.md)
 - [Why Regulator is fast](docs/WHY_FAST.md)
 - [API guide](docs/reference/REGULATOR_API.md)
+- [Memory usage](docs/reference/MEMORY_USAGE.md)
 - [Pattern languages](docs/integrations/REGEXP_LANGUAGES.md)
 - [Rust regular-expression language](docs/reference/languages/RUST_REGEXP.md)
 - [RE2 language](docs/reference/languages/RE2.md)
