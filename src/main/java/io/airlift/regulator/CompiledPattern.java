@@ -2607,8 +2607,9 @@ abstract sealed class CompiledPattern
     /// A matcher's find over its whole input, from the input start with nothing matched since
     /// reset, on a pattern with [#hasAnchoredSubmatchRoute()] and groups beyond group zero. It
     /// makes the checks [#matchOnOrdinaryEngine] makes for this case and calls the OnePass or
-    /// BitState search that [#matchOnOrdinaryEngine] would reach, skipping its prologue; an input
-    /// too long for those engines goes to [#matchOnOrdinaryEngine].
+    /// BitState search that [#matchOnOrdinaryEngine] would reach, skipping its prologue, though
+    /// OnePass may run a full match where that search would run a first match; an input too long
+    /// for those engines goes to [#matchOnOrdinaryEngine].
     final boolean matchAnchoredSubmatch(Slice text, int[] groups, RegexpMatcher matcher)
     {
         Prog prog = partialProg;
@@ -2623,6 +2624,13 @@ abstract sealed class CompiledPattern
         Prog.MatchKind matchKind = prog.anchorEnd() ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH;
         boolean canOnePass = prog.isOnePass() && prog.supportsOnePassCaptureSlots(groups.length);
         if (canOnePass && length <= ONE_PASS_SUBMATCH_MAXIMUM_LENGTH) {
+            // An end assertion that also matches before a final line terminator holds only at the
+            // input end when the input ends in none, so every match ends there, and a full match,
+            // which keeps no bookkeeping for earlier matches, finds the same span and captures.
+            int finalTerminatorEndAssertion = prog.finalTerminatorEndAssertion();
+            if (finalTerminatorEndAssertion != 0 && !EmptyOp.endsWithFinalTerminator(finalTerminatorEndAssertion, text)) {
+                matchKind = Prog.MatchKind.FULL_MATCH;
+            }
             return OnePass.search(prog, text, 0, length, true, matchKind, groups, matcher.onePassWorkspace());
         }
         if (!canOnePass && prog.canBitState() && length <= prog.anchoredBitStateTextMaxSize()) {

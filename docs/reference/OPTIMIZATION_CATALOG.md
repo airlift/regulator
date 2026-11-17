@@ -1477,9 +1477,11 @@ capture work skipped for boolean and group-zero calls is in
   leaves for assertions ([#138], [#150], [design][d-onepass-offsets]); base
   RE2 [O-1PASS-001].
 - **Where:** `Prog.computeOnePass`, `OnePass.searchBoolean`,
-  `OnePass.searchExtendedCaptures`
+  `OnePass.searchExtendedCaptures`, `CompiledPattern.matchAnchoredSubmatch`
 - **Applies when:** Every one-pass program; the call-free loop on full matches
-  with extended captures
+  with extended captures. Full matches include a matcher's start-anchored find
+  of a pattern ending in Java's or Trino's `$` on an input that ends in no line
+  terminator
 - **What it does:** Each action is stored as a `long`: the low half is RE2's
   action and the high half the next state's row offset. One load per byte
   gives both, so a step needs no multiply. Eligibility still uses RE2's memory
