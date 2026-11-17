@@ -1951,14 +1951,6 @@ final class Prog
         return added;
     }
 
-    /// True when prefix acceleration is a single-byte, case-sensitive search.
-    /// This is the highest-frequency false-positive regime and can use a
-    /// dedicated DFA path without affecting other prefix strategies.
-    boolean canUseSingleBytePrefixAccelFastPath()
-    {
-        return prefixSize == 1 && !prefixFoldCase;
-    }
-
     boolean usesVectorForSingleBytePrefix(int length)
     {
         return VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
@@ -2106,22 +2098,6 @@ final class Prog
     private boolean prefixAccelReplacesStartBytes()
     {
         return canPrefixAccel() && !prefixRunStartsEveryMatch;
-    }
-
-    /// Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
-    /// Keeps the scan path branch-free with respect to foldCase/prefix mode.
-    int prefixAccelSingleByteNoFoldCase(byte[] data, int offset, int length)
-    {
-        if (length <= 0) {
-            return -1;
-        }
-        if (!canUseSingleBytePrefixAccelFastPath()) {
-            throw new IllegalStateException("single-byte prefix accel fast path not configured");
-        }
-        if (usesVectorForSingleBytePrefix(length)) {
-            return VectorByteSetScanner.find(data, offset, length, prefix[0], (byte) 0, (byte) 0, 1);
-        }
-        return indexOfSWAR(data, offset, length, prefixFrontBroadcastMask);
     }
 
     public void configurePrefixAccel(Slice prefix, boolean foldCase)
@@ -2865,8 +2841,7 @@ final class Prog
     }
 
     /// Finds `b`, or either case of it when it is an ASCII letter: the vector byte-set search where
-    /// [#usesVectorForSingleBytePrefix] holds, as [#prefixAccelSingleByteNoFoldCase] does, and SWAR
-    /// elsewhere.
+    /// [#usesVectorForSingleBytePrefix] holds, and SWAR elsewhere.
     private int indexOfFoldCase(byte[] data, int offset, int length, byte b)
     {
         int lowerCaseByte = asciiLower(b & 0xFF);

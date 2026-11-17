@@ -779,20 +779,6 @@ final class Dfa
                     return 0;
                 }
                 boolean canPrefixAccel = runForward && prog.canPrefixAccel() && !anchoredEffective && isContextFreeStart(startData.flag());
-                boolean canSingleBytePrefixAccel = canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath();
-                byte[] requiredPrefix = prog.getRequiredPrefix();
-                boolean canAnchoredLongPrefixIntPath = runForward &&
-                        anchoredEffective &&
-                        requiredPrefix != null &&
-                        requiredPrefix.length >= 16 &&
-                        !prog.isRequiredPrefixFoldCase();
-
-                // Prefix accel is intentionally split:
-                // - single-byte, case-sensitive prefix ("indexOf-style") has very high false-positive
-                //   frequency on random text and tends to bounce start <-> prefix scan many times.
-                //   That path is tuned around a fused int[] DFA loop.
-                // - all other prefix accel modes (multi-byte FrontAndBack, folded-prefix candidate scanning) stay on
-                //   the Object[] loop optimized for general DFA throughput.
                 if (!runForward) {
                     if (!startIsMatch &&
                             maximumReverseBytes == 0 &&
@@ -814,9 +800,6 @@ final class Dfa
                             wantEarliestMatch,
                             maximumReverseBytes);
                 }
-                if (canSingleBytePrefixAccel) {
-                    return searchForwardPrefixAccelSingleByte(dfa, tables, prog, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
-                }
                 if (canPrefixAccel) {
                     return searchForwardScanAcceleration(
                             dfa,
@@ -833,9 +816,6 @@ final class Dfa
                             null,
                             0,
                             PREFIX_SCAN);
-                }
-                if (canAnchoredLongPrefixIntPath) {
-                    return searchForwardAnchoredLongPrefixInt(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
                 }
                 boolean fixedDistanceScanRejected = false;
                 if (fixedDistanceCandidates != null &&
@@ -1822,10 +1802,6 @@ final class Dfa
         }
 
         boolean canPrefixAccel = prog.canPrefixAccel() && isContextFreeStart(startData.flag());
-        if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
-            return searchForwardPrefixAccelSingleByte(
-                    dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
-        }
         if (canPrefixAccel) {
             return searchForwardScanAcceleration(
                     dfa,
@@ -2293,10 +2269,6 @@ final class Dfa
         }
 
         boolean canPrefixAccel = prog.canPrefixAccel() && isContextFreeStart(startData.flag());
-        if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
-            return searchForwardPrefixAccelSingleByte(
-                    dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
-        }
         if (canPrefixAccel) {
             return searchForwardScanAcceleration(
                     dfa,
@@ -4089,184 +4061,6 @@ final class Dfa
         return ((long) stateOffset << 32) | outcome;
     }
 
-    private static long searchForwardPrefixAccelSingleByte(
-            DfaInstance dfa,
-            CacheTables tables,
-            Prog prog,
-            byte[] bytes,
-            int textBegin,
-            int textEnd,
-            int ctxEnd,
-            int startOffset,
-            boolean startIsMatch,
-            boolean endMatch,
-            boolean wantEarliestMatch)
-    {
-        int position = textBegin;
-        int lastMatchBoundary = -1;
-        boolean matched = false;
-        int resetPosition = -1;
-
-        int stateOffset = startOffset;
-        int[] transitions = tables.transitions;
-        byte[] byteMap = dfa.bytemap;
-        boolean deadState = false;
-
-        // Single-byte prefix path uses fused int[] transitions.
-        // Rationale: this mode has high false-positive rate, so it frequently flips between
-        // prefix scanning and a few DFA steps. Keeping start-state self-loops on the int[]
-        // hot path avoids per-cycle Object[] null-break + sidecard handoff overhead.
-        if (startIsMatch) {
-            matched = true;
-            lastMatchBoundary = position;
-            if (wantEarliestMatch && !endMatch) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-            }
-        }
-
-        scan:
-        while (position < textEnd) {
-            if (stateOffset == startOffset) {
-                int next = prog.prefixAccelSingleByteNoFoldCase(bytes, position, textEnd - position);
-                if (next < 0) {
-                    position = textEnd;
-                    break;
-                }
-                position = next;
-            }
-
-            int nextState = 0;
-            for (; position < textEnd; position++) {
-                nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
-                // Cold-path gate: sentinels are negative.
-                if (nextState < 0) {
-                    break;
-                }
-                stateOffset = nextState;
-                if ((stateOffset & T_MATCH_BIT) != 0) {
-                    matched = true;
-                    lastMatchBoundary = position;
-                    stateOffset &= ~T_MATCH_BIT;
-                    if (wantEarliestMatch && !endMatch) {
-                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                }
-                if (stateOffset == startOffset) {
-                    position++;
-                    continue scan;
-                }
-            }
-            if (position >= textEnd) {
-                break;
-            }
-
-            if (nextState == T_DEAD) {
-                position++;
-                deadState = true;
-                break scan;
-            }
-            if (nextState == T_FULL_MATCH) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-            }
-
-            int inputByte = bytes[position] & 0xFF;
-            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-
-            if (nextState != Integer.MIN_VALUE) {
-                if (nextState == T_DEAD) {
-                    position++;
-                    deadState = true;
-                    break scan;
-                }
-                if (nextState == T_FULL_MATCH) {
-                    return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-                }
-                stateOffset = nextState;
-                if ((stateOffset & T_MATCH_BIT) != 0) {
-                    matched = true;
-                    lastMatchBoundary = position;
-                    stateOffset &= ~T_MATCH_BIT;
-                    if (wantEarliestMatch && !endMatch) {
-                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                }
-                position++;
-                continue;
-            }
-
-            position++;
-            if (dfaShouldBailWhenSlow &&
-                    resetPosition >= 0 &&
-                    (position - resetPosition) < 10 * dfa.stateCount &&
-                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
-                return SEARCH_FAILED;
-            }
-            resetPosition = position;
-            StateSaver saveStart = new StateSaver(dfa, startOffset);
-            StateSaver saveState = new StateSaver(dfa, stateOffset);
-            RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-            startOffset = restoredStates.startOffset();
-            stateOffset = restoredStates.stateOffset();
-            if (startOffset < 0 || stateOffset < 0) {
-                return SEARCH_FAILED;
-            }
-            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-            if (nextState == Integer.MIN_VALUE) {
-                return SEARCH_FAILED;
-            }
-            if (nextState == T_DEAD) {
-                deadState = true;
-                break;
-            }
-            if (nextState == T_FULL_MATCH) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-            }
-            stateOffset = nextState;
-            if ((stateOffset & T_MATCH_BIT) != 0) {
-                matched = true;
-                lastMatchBoundary = position - 1;
-                stateOffset &= ~T_MATCH_BIT;
-                if (wantEarliestMatch && !endMatch) {
-                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                }
-            }
-        }
-
-        if (!deadState) {
-            int lastClass;
-            int lastByte;
-            if (textEnd == ctxEnd) {
-                lastClass = dfa.bytemapRange;
-                lastByte = BYTE_END_TEXT;
-            }
-            else {
-                lastByte = bytes[textEnd] & 0xFF;
-                lastClass = byteMap[lastByte] & 0xFF;
-            }
-            int finalState = getTransition(transitions, stateOffset + lastClass);
-            if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
-                if (finalState == Integer.MIN_VALUE) {
-                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
-                    if (finalState == Integer.MIN_VALUE) {
-                        return SEARCH_FAILED;
-                    }
-                }
-            }
-            if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
-                matched = true;
-                lastMatchBoundary = position;
-            }
-        }
-        return finalizeResult(textBegin, textEnd, endMatch, matched, lastMatchBoundary, true);
-    }
-
     private static long searchForwardScanAcceleration(
             DfaInstance dfa,
             CacheTables tables,
@@ -4785,167 +4579,6 @@ final class Dfa
             return null;
         }
         return StartClassFilter.build(byteSets, ByteFrequencies.englishText(), startByteProbability);
-    }
-
-    private static long searchForwardAnchoredLongPrefixInt(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int textBegin,
-            int textEnd,
-            int ctxEnd,
-            int startOffset,
-            boolean startIsMatch,
-            boolean endMatch,
-            boolean wantEarliestMatch)
-    {
-        int position = textBegin;
-        int lastMatchBoundary = -1;
-        boolean matched = false;
-        int resetPosition = -1;
-
-        int stateOffset = startOffset;
-        int[] transitions = tables.transitions;
-        byte[] byteMap = dfa.bytemap;
-        boolean deadState = false;
-
-        // Anchored long-literal-prefix patterns are dominated by straight-line DFA traversal.
-        // Use the fused int[] loop to avoid Object[] indirection in this regime.
-        if (startIsMatch) {
-            matched = true;
-            lastMatchBoundary = position;
-            if (wantEarliestMatch && !endMatch) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-            }
-        }
-
-        scan:
-        while (position < textEnd) {
-            int nextState = 0;
-            for (; position < textEnd; position++) {
-                nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
-                if (nextState < 0) {
-                    break;
-                }
-                stateOffset = nextState;
-                if ((stateOffset & T_MATCH_BIT) != 0) {
-                    matched = true;
-                    lastMatchBoundary = position;
-                    stateOffset &= ~T_MATCH_BIT;
-                    if (wantEarliestMatch && !endMatch) {
-                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                }
-            }
-            if (position >= textEnd) {
-                break;
-            }
-
-            if (nextState == T_DEAD) {
-                position++;
-                deadState = true;
-                break scan;
-            }
-            if (nextState == T_FULL_MATCH) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-            }
-
-            int inputByte = bytes[position] & 0xFF;
-            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-
-            if (nextState != Integer.MIN_VALUE) {
-                if (nextState == T_DEAD) {
-                    position++;
-                    deadState = true;
-                    break scan;
-                }
-                if (nextState == T_FULL_MATCH) {
-                    return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-                }
-                stateOffset = nextState;
-                if ((stateOffset & T_MATCH_BIT) != 0) {
-                    matched = true;
-                    lastMatchBoundary = position;
-                    stateOffset &= ~T_MATCH_BIT;
-                    if (wantEarliestMatch && !endMatch) {
-                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                }
-                position++;
-                continue;
-            }
-
-            position++;
-            if (dfaShouldBailWhenSlow &&
-                    resetPosition >= 0 &&
-                    (position - resetPosition) < 10 * dfa.stateCount &&
-                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
-                return SEARCH_FAILED;
-            }
-            resetPosition = position;
-            StateSaver saveStart = new StateSaver(dfa, startOffset);
-            StateSaver saveState = new StateSaver(dfa, stateOffset);
-            RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-            startOffset = restoredStates.startOffset();
-            stateOffset = restoredStates.stateOffset();
-            if (startOffset < 0 || stateOffset < 0) {
-                return SEARCH_FAILED;
-            }
-            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
-            tables = dfa.tablesAfterWrite(tables);
-            transitions = tables.transitions;
-            if (nextState == Integer.MIN_VALUE) {
-                return SEARCH_FAILED;
-            }
-            if (nextState == T_DEAD) {
-                deadState = true;
-                break;
-            }
-            if (nextState == T_FULL_MATCH) {
-                return finalizeResult(textBegin, textEnd, endMatch, true, textEnd, true);
-            }
-            stateOffset = nextState;
-            if ((stateOffset & T_MATCH_BIT) != 0) {
-                matched = true;
-                lastMatchBoundary = position - 1;
-                stateOffset &= ~T_MATCH_BIT;
-                if (wantEarliestMatch && !endMatch) {
-                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                }
-            }
-        }
-
-        if (!deadState) {
-            int lastClass;
-            int lastByte;
-            if (textEnd == ctxEnd) {
-                lastClass = dfa.bytemapRange;
-                lastByte = BYTE_END_TEXT;
-            }
-            else {
-                lastByte = bytes[textEnd] & 0xFF;
-                lastClass = byteMap[lastByte] & 0xFF;
-            }
-            int finalState = getTransition(transitions, stateOffset + lastClass);
-            if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
-                if (finalState == Integer.MIN_VALUE) {
-                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
-                    if (finalState == Integer.MIN_VALUE) {
-                        return SEARCH_FAILED;
-                    }
-                }
-            }
-            if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
-                matched = true;
-                lastMatchBoundary = position;
-            }
-        }
-        return finalizeResult(textBegin, textEnd, endMatch, matched, lastMatchBoundary, true);
     }
 
     private static long searchBackward(

@@ -1127,7 +1127,7 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   `Dfa.DfaInstance.rebuildPairedTransitions`,
   `Dfa.DfaInstance.selectPairedRows`, `Dfa.DfaInstance.recordPairedSearch`
 - **Applies when:** Forward searches of at least 256 bytes from a non-matching
-  start state, when no prefix, long anchored prefix, fixed-distance, or
+  start state, when no prefix, fixed-distance, or
   start-byte scan route takes the search; not reverse or many-match programs;
   never alongside a pointer table, which waits while paired rows exist and
   turns pairing off once allocated. After 16 paired-loop matches in a row
@@ -2487,7 +2487,7 @@ change is described.
 | Dead-state and full-match sentinels | [O-DFA-001], [O-DFA-002], [O-DFA-016], [O-RE2-012] | `Dfa.searchForwardContinuation` |
 | State cache and work-queue construction | [O-DFA-003], [O-DFA-009], [O-DFA-010], [O-DFA-011], [O-DFA-012], [O-DFA-015] | `Dfa.DfaInstance.workQueueToCachedState`, `Dfa.DfaInstance.addToQueue` |
 | Separate forward and backward search loops with an earliest-match exit; Java has no templates, so each direction is its own method where RE2 specializes one loop | [O-DFA-007], [O-RE2-014], [O-DFA-004], [O-RE2-013] | `Dfa.searchForwardContinuation`, `Dfa.searchBackward` |
-| Prefix acceleration in the DFA and NFA | [O-DFA-005], [O-RE2-004], [O-NFA-008] | `Prog.prefixAccel`, `Prog.prefixAccelSingleByteNoFoldCase`, `Prog.skipToStartCandidate` |
+| Prefix acceleration in the DFA and NFA | [O-DFA-005], [O-RE2-004], [O-NFA-008] | `Prog.prefixAccel`, `Prog.skipToStartCandidate` |
 | Byte classes; Regulator's builder skips small merged groups after 32 merges and renumbers active classes past 256 | [O-DFA-006], [O-PROG-003], [O-RE2-015] | `Prog.computeByteMap` |
 | Lock-free transition reads; publication changed in [Copy-on-reset readers](#copy-on-reset-readers) | [O-DFA-008] | `Dfa.DfaInstance.computeTransition` |
 | NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero search of a pattern with bounded matches runs the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
