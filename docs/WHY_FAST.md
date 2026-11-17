@@ -265,28 +265,77 @@ do.
 
 ## Where Regulator does not win
 
-The [README summary](../README.md#performance) puts Regulator behind the Rust
-crate on text processing, on Graviton with native access and reused patterns.
-The [benchmark report](https://airlift.github.io/regulator/benchmarks/) shows
-where that comes from:
+The [README summary](../README.md#performance) puts Regulator ahead of every
+comparator on Graviton with native access and reused patterns. Those are
+geometric means, and the
+[benchmark report](https://airlift.github.io/regulator/benchmarks/) shows the
+rows where a comparator is faster. Ratios below are how many times as long
+Regulator takes. In the Regulator 2.1 preliminary results:
 
-- **Line search, captures, and some counts.** The crate's clear wins are
-  mostly in grep-style searches over many lines and in capture-heavy
-  operations, such as the Ruff and Caddy workloads, and in some counts that
-  sum matched lengths, such as dictionary search over many English words.
-  Counting over the classic book-text corpora is close to parity overall,
-  with a few clear crate wins.
-- **Adversarial patterns.** Rows built to stress backtracking engines, such as
-  `imported/rsc/no-exponential` and `curated/06-cloud-flare-redos/original`,
-  run faster on native RE2 and the crate. The report groups them as
-  adversarial and stress workloads, which it notes are not representative of
-  typical application performance.
-- **Intel.** The README summary is measured on Graviton. Several everyday
-  `contains` rows lose to the crate more clearly on Intel than on Graviton.
-- **Compilation.** Regulator spends compile time on analysis and plans, so it
-  compiles more slowly than the JDK and Joni, and than native RE2 on most
-  everyday patterns. A pattern used only a few times may not earn that
-  back; see
+- **A single `find` on a short row.** The README summary covers `contains` and
+  `count`. A single `find` on a short everyday row is the clearest everyday
+  loss. On Graviton the crate is clearly faster on 6 of the 14 everyday
+  patterns, where Regulator takes 1.3 to 4.1× as long, the most on
+  `trinoLiteral`, `logLevel`, and `delimiter`. Such a `find` runs the general
+  engine (a forward DFA pass, and for some patterns a reverse one), while
+  `contains`, `count`, and a matcher's iteration take the pattern's
+  specialized routes. Regulator now finds an exact literal such as
+  `trinoLiteral`'s without the DFA, which these results predate. Part of each
+  short-row gap is likely the benchmark harness's own cost per call, which
+  differs between the JVM and native harnesses.
+- **A few text-processing workloads.** Of 104 text-processing rows on
+  Graviton, the crate is clearly faster on 5 and Regulator on 31; most of the
+  rest are ties.
+  - `curated/03-date/ascii` (1.26×): both engines run a forward and a reverse
+    lazy DFA pass for each of its 42,916 matches, and Regulator's fixed cost of
+    entering the DFA is higher.
+  - `curated/12-dictionary/single` (1.40×): the count stepped through the DFA
+    byte by byte rather than on the dictionary's own skipping automaton;
+    Regulator now counts such dictionaries on the automaton.
+  - `imported/sherlock/holmes-coword-watson` (1.55×): on Graviton the JIT
+    often compiles the search loop with the DFA state kept on the stack rather
+    than in a register, and even with it in a register the crate's loop is
+    about 1.2× as fast.
+  - `wild/bibleref/short` (1.51×) and `curated/11-unstructured-to-json/extract`
+    (1.37×): their captures run on the bounded backtracker (BitState), which
+    steps through character-class runs one byte at a time.
+
+  On Intel, `wild/bibleref/line` (1.40×) and `imported/sherlock/the-lower`
+  (1.78×) are also clear crate wins. The first runs a capture search on each
+  line, where each search's setup dominates. The second found its match spans
+  with the DFA rather than the literal's own scan, which Regulator now uses.
+- **Pure Java.** Without native access, each DFA step on the Java-array
+  pointer table adds an address computation to the loop's chain of dependent
+  instructions. A few more rows become clear crate wins, such as
+  `wild/ruff/space-around-operator` (1.26× on Graviton, 1.30× on Intel).
+- **Intel.** The README summary is measured on Graviton. On Intel, `logLevel`
+  `contains` is a clear crate win (1.50×), and `trinoLiteral` and
+  `quotedField` `contains` are modest ones; on Graviton only `logLevel` is a
+  modest crate win.
+- **Other comparators.** With reused patterns, native RE2 is clearly faster
+  only on `curated/11-unstructured-to-json/extract` and the adversarial
+  `imported/rsc/no-exponential`. The JDK is clearly faster on a few
+  capture-heavy text workloads, such as the Veryl lexer
+  (`curated/05-lexer-veryl/single`, about 3.1×),
+  `curated/11-unstructured-to-json/extract` (2.7 to 3.4×), and
+  `wild/bibleref/short` (1.6 to 2.3×). It is also faster on a greedy `.*` over
+  a whole book (`imported/sherlock/everything-greedy`, 3.2 to 4.7×) and on a
+  single `find` of two everyday patterns, one of them `trinoLiteral`. Joni is
+  clearly faster on the Veryl lexer (2.4 to 2.5×),
+  `imported/rsc/no-exponential`, a single `find` of `trinoLiteral`, and on
+  Intel `wild/bibleref/short`.
+- **Adversarial patterns.** Rows built to stress backtracking engines are
+  mostly large Regulator wins, but `imported/rsc/no-exponential` runs faster
+  on the crate (1.7× on Graviton, 2.0× on Intel), native RE2 (1.5×, 1.6×), and
+  Joni (3.7×, 3.0×): Regulator's candidate search verifies, falls back, and
+  reads the input forward again. The report groups such rows as adversarial
+  and stress workloads, which it notes are not representative of typical
+  application performance.
+- **Compilation.** Regulator spends compile time on analysis and plans,
+  building the bounded-repeat position automaton and the fixed-width
+  rare-class scan up front. On the 14 everyday patterns it compiles more
+  slowly than the JDK and Joni on every one, than native RE2 on 13, and than
+  the crate on 3. A pattern used only a few times may not earn that back; see
   [How many uses does a pattern need to pay back its compile time?](FAQ.md#how-many-uses-does-a-pattern-need-to-pay-back-its-compile-time).
 - **Warm-up.** The results are steady-state measurements after JIT warm-up.
   Until the JIT compiles a pattern's route, it runs more slowly. A generated

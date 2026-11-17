@@ -6,10 +6,10 @@ parser.
 
 | Compiler | Language reference |
 |---|---|
-| `Re2.compile(pattern)` | [RE2 Pattern Language](../reference/languages/RE2.md) |
-| `TrinoRegexp.compile(pattern)` | [Trino Regular-Expression Language](../reference/languages/TRINO_REGEXP.md) |
-| `JavaRegexp.compile(pattern)` | [Java Regular-Expression Language](../reference/languages/JAVA_REGEXP.md) |
 | `RustRegexp.compile(pattern)` | [Rust Regular-Expression Language](../reference/languages/RUST_REGEXP.md) |
+| `Re2.compile(pattern)` | [RE2 Pattern Language](../reference/languages/RE2.md) |
+| `JavaRegexp.compile(pattern)` | [Java Regular-Expression Language](../reference/languages/JAVA_REGEXP.md) |
+| `TrinoRegexp.compile(pattern)` | [Trino Regular-Expression Language](../reference/languages/TRINO_REGEXP.md) |
 | `TrinoLikePattern.compile(pattern)` | [Trino SQL LIKE Language](../reference/languages/TRINO_LIKE.md) |
 
 See [unsupported features](../reference/languages/UNSUPPORTED_FEATURES.md) for
@@ -31,8 +31,8 @@ MatchResult result = pattern.findResult(inputBytes);
 
 ## Compilation and execution
 
-Each compiler handles its own language's syntax and semantics. `Re2`,
-`TrinoRegexp`, `JavaRegexp`, and `RustRegexp` produce shared Regulator programs
+Each compiler handles its own language's syntax and semantics. `RustRegexp`,
+`Re2`, `JavaRegexp`, and `TrinoRegexp` produce shared Regulator programs
 that run on the same bounded DFA, NFA, OnePass, and BitState engines.
 `TrinoRegexp` can also choose a specialized matcher for an operation when
 pattern analysis proves it will produce the same result. In all four
