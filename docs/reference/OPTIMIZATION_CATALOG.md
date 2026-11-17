@@ -2049,13 +2049,29 @@ ordinary engine would.
   `LiteralAlternationSpanMatcher.ExactMatcher.findSpan`,
   `LiteralAlternationSpanMatcher.ExactMatcher.findSpanAtStop`,
   `LiteralAlternationSpanMatcher.ExactMatcher.holdsFilterRoute`,
-  `LiteralAlternationSpanMatcher.FoldedMatcher.findSpanAtStop`
+  `LiteralAlternationSpanMatcher.FoldedMatcher.findSpanAtStop`,
+  `LiteralAlternationSpanMatcher.FullCaseFoldAlternation.admits`,
+  `LiteralAlternationSpanMatcher.FullCaseFoldAlternation.windowEnd`
 - **Applies when:** Capture-free literal alternations with leftmost-first
   matching, in every regex language, case-sensitive or ASCII literals whose
   letters fold case, or are written as classes of their two cases, where the
   language gives them exactly two cases, the folded ones only with a selective
   filter and at most 64 bytes of literals per leading byte; a boolean find that
-  is dense from its start defers to the DFA
+  is dense from its start defers to the DFA. Trino's fully folded ASCII
+  literals take folded literals too, with escapes, a conservative set of the
+  characters outside ASCII their full case folding may match; an answer whose
+  checked range holds an escape comes from the compiled engine. Operations
+  that read every match check the whole input. For a folded match starting at
+  byte `s`, first-match operations and a matcher's finds check escape starts
+  in `[searchStart, min(source.length(), s + L))`, where `L` is the longest
+  folded literal's byte length; any earlier full-fold match would contain an
+  escape beginning in this window. With no folded match, they scan the rest
+  of the input, and contains scans only then. Where the engine's DFA searches
+  its own start literal filter, an escape scan would be a second pass over an
+  input that filter reads once: an input under 1 KiB takes one ASCII check
+  instead, all ASCII running on the folded literals and any other on the
+  engine, and a longer one runs the operations that read every match on the
+  engine
 - **What it does:** Up to 64 alternatives of up to 64 bytes go in a byte trie
   with a root table. When the span matcher runs with a filter and at least 64
   bytes left, the start literal filter skips non-starts; a filter route whose
@@ -2067,8 +2083,8 @@ ordinary engine would.
   unchanged. Each filter stop, and each position on the root-table route,
   compares them under masks that set a folded letter's case bit. Combined with
   the twelve-byte start literal filter, folded literals take rebar's
-  case-insensitive Sherlock names count to 0.43 of main's time on Graviton and
-  0.31 on Intel.
+  case-insensitive Sherlock names count in Rust's bytes mode to 0.43 of main's
+  time on Graviton and 0.31 on Intel.
 
 ### Aho-Corasick for large literal sets
 

@@ -21,6 +21,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static io.airlift.regulator.Regexp.FOLD_CASE;
 import static io.airlift.regulator.Regexp.FULL_CASE_FOLD;
@@ -174,7 +176,11 @@ abstract sealed class LiteralAlternationSpanMatcher
         if (!VectorSupport.isAvailable()) {
             return null;
         }
-        List<FoldedLiteral> folded = foldedLiterals(expression, 0);
+        return foldedMatcher(foldedLiterals(expression, 0, null, null));
+    }
+
+    private static FoldedMatcher foldedMatcher(List<FoldedLiteral> folded)
+    {
         if (folded == null || folded.size() < 2) {
             return null;
         }
@@ -211,10 +217,12 @@ abstract sealed class LiteralAlternationSpanMatcher
     /// a concatenation lists each prefix choice's literals before the next prefix choice's. It
     /// takes the elements [InnerLiteralSearch#appendFoldedElement] holds, which keep a letter's
     /// two cases only where the parser leaves no other case of it, so `(?i)s` with Unicode, whose
-    /// class also holds the long s, is no folded literal. Returns `null` for unsupported
+    /// class also holds the long s, is no folded literal. With a `caseFolding`, a Trino literal
+    /// that folds case fully is spelled by [#appendFullCaseFoldLiteral] instead, which adds to
+    /// `escapes` the characters outside ASCII it may match. Returns `null` for unsupported
     /// expressions or elements, or when it passes [#MAXIMUM_ALTERNATIVES] literals,
     /// [#MAXIMUM_TRIE_LITERAL_BYTES] bytes in one, or [#MAXIMUM_ANALYSIS_DEPTH] levels of nesting.
-    private static List<FoldedLiteral> foldedLiterals(Regexp expression, int depth)
+    private static List<FoldedLiteral> foldedLiterals(Regexp expression, int depth, CaseFolding caseFolding, Set<Integer> escapes)
     {
         if (depth >= MAXIMUM_ANALYSIS_DEPTH) {
             return null;
@@ -223,13 +231,15 @@ abstract sealed class LiteralAlternationSpanMatcher
             case LITERAL, LITERAL_STRING, CHAR_CLASS -> {
                 byte[] bytes = new byte[MAXIMUM_TRIE_LITERAL_BYTES];
                 byte[] masks = new byte[MAXIMUM_TRIE_LITERAL_BYTES];
-                int length = InnerLiteralSearch.appendFoldedElement(expression, bytes, masks, 0);
+                int length = caseFolding != null && (expression.parseFlags() & FULL_CASE_FOLD) != 0
+                        ? appendFullCaseFoldLiteral(expression, bytes, masks, caseFolding, escapes)
+                        : InnerLiteralSearch.appendFoldedElement(expression, bytes, masks, 0);
                 return length < 0 ? null : List.of(new FoldedLiteral(Arrays.copyOf(bytes, length), Arrays.copyOf(masks, length)));
             }
             case CONCAT -> {
                 List<FoldedLiteral> prefixes = List.of(new FoldedLiteral(new byte[0], new byte[0]));
                 for (Regexp child : expression.children()) {
-                    List<FoldedLiteral> suffixes = foldedLiterals(child, depth + 1);
+                    List<FoldedLiteral> suffixes = foldedLiterals(child, depth + 1, caseFolding, escapes);
                     if (suffixes == null || (long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
                         return null;
                     }
@@ -250,7 +260,7 @@ abstract sealed class LiteralAlternationSpanMatcher
             case ALTERNATE -> {
                 List<FoldedLiteral> alternatives = new ArrayList<>();
                 for (Regexp child : expression.children()) {
-                    List<FoldedLiteral> childAlternatives = foldedLiterals(child, depth + 1);
+                    List<FoldedLiteral> childAlternatives = foldedLiterals(child, depth + 1, caseFolding, escapes);
                     if (childAlternatives == null || alternatives.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
                         return null;
                     }
@@ -262,6 +272,98 @@ abstract sealed class LiteralAlternationSpanMatcher
                 return null;
             }
         }
+    }
+
+    /// Analyzes a Trino alternation of ASCII literals that fold case fully, such as
+    /// `(?i)Sherlock|Holmes|Watson`, which [#analyze] declines: Trino's `s` and `k` also match the
+    /// long s and the Kelvin sign, and its `ss` also matches sharp s. Its folded literals are their
+    /// ASCII spellings, built as [#analyzeFolded] builds them, and its escapes are a conservative
+    /// set of the characters outside ASCII that the literals may match, read from `caseFolding`'s
+    /// tables: they include the source of every multi-character fold that begins with a folded
+    /// letter, even where the rest of the fold cannot fit the literal, so `(?i)foo|bar` escapes
+    /// the ligature ff (U+FB00). Returns `null` for a pattern with capturing groups, if the
+    /// projected ASCII literals cannot form a folded matcher, if the escape set is empty, as it is
+    /// for an alternation without full case folding, or if the escapes have more leading bytes
+    /// than the scan's nibble tables hold.
+    static FullCaseFoldAlternation analyzeFullCaseFold(Regexp expression, int capturingGroupCount, CaseFolding caseFolding)
+    {
+        requireNonNull(caseFolding, "caseFolding is null");
+        if (capturingGroupCount != 0 || !VectorSupport.isAvailable()) {
+            return null;
+        }
+        Set<Integer> escapes = new TreeSet<>();
+        List<FoldedLiteral> folded = foldedLiterals(expression, 0, caseFolding, escapes);
+        FoldedMatcher matcher = foldedMatcher(folded);
+        if (matcher == null || escapes.isEmpty()) {
+            return null;
+        }
+        int maximumLiteralLength = 0;
+        for (FoldedLiteral literal : folded) {
+            maximumLiteralLength = Math.max(maximumLiteralLength, literal.bytes().length);
+        }
+        return FullCaseFoldAlternation.create(matcher, escapes, maximumLiteralLength);
+    }
+
+    // Spells a Trino literal that folds case fully as appendFoldedElement spells a folded one, and
+    // adds to `escapes` each character outside ASCII that its full case folding may match in
+    // place of one of its characters: the other members of the character's simple fold class, and
+    // the sources of every multi-character fold that begins with its folded character, whether or
+    // not the literal holds the rest of the fold, so no fold is missed wherever it ends. Returns
+    // the new length, or -1 for a character outside ASCII, a fold class whose ASCII members are
+    // neither the character alone nor an ASCII letter's two cases, or a literal that would not
+    // fit in `bytes`.
+    private static int appendFullCaseFoldLiteral(Regexp element, byte[] bytes, byte[] masks, CaseFolding caseFolding, Set<Integer> escapes)
+    {
+        int[] runes = switch (element.op()) {
+            case LITERAL -> new int[] {element.rune()};
+            case LITERAL_STRING -> element.runes();
+            default -> null;
+        };
+        if (runes == null || runes.length == 0 || runes.length > bytes.length) {
+            return -1;
+        }
+        int[] folded = caseFolding.fold(runes);
+        if (folded.length != runes.length) {
+            return -1;
+        }
+        for (int index = 0; index < runes.length; index++) {
+            int rune = runes[index];
+            if (rune < 0 || rune > 0x7F) {
+                return -1;
+            }
+            int asciiMembers = 0;
+            int lowestAscii = -1;
+            int highestAscii = -1;
+            CharClass foldClass = caseFolding.simpleFoldClass(folded[index]);
+            for (int rangeIndex = 0; rangeIndex < foldClass.rangeCount(); rangeIndex++) {
+                RuneRange range = foldClass.range(rangeIndex);
+                for (int member = range.low(); member <= range.high(); member++) {
+                    if (member > 0x7F) {
+                        escapes.add(member);
+                    }
+                    else {
+                        asciiMembers++;
+                        lowestAscii = lowestAscii < 0 ? member : lowestAscii;
+                        highestAscii = member;
+                    }
+                }
+            }
+            boolean letterCases = asciiMembers == 2 && 'A' <= lowestAscii && lowestAscii <= 'Z' && highestAscii == lowestAscii + ('a' - 'A');
+            if (!letterCases && (asciiMembers != 1 || lowestAscii != rune)) {
+                return -1;
+            }
+            for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokensStartingWith(folded[index])) {
+                CharClass sources = token.sourceRunes();
+                for (int rangeIndex = 0; rangeIndex < sources.rangeCount(); rangeIndex++) {
+                    for (int source = sources.range(rangeIndex).low(); source <= sources.range(rangeIndex).high(); source++) {
+                        escapes.add(source);
+                    }
+                }
+            }
+            bytes[index] = (byte) (letterCases ? highestAscii : rune);
+            masks[index] = letterCases ? (byte) 0x20 : 0;
+        }
+        return runes.length;
     }
 
     // A literal's bytes and its case masks: a folded letter's byte is its lower case, and its mask
@@ -1900,6 +2002,131 @@ abstract sealed class LiteralAlternationSpanMatcher
         /// What an extraction returns once what it builds passes its memory bound, or its
         /// duplicate tables' lookups step past their bound.
         static final ExtractedLiterals OVER_BUDGET = new ExtractedLiterals(List.of(), 0);
+    }
+
+    /// A Trino alternation of ASCII literals that fold case fully, as [#analyzeFullCaseFold]
+    /// builds it: its folded literals and its escapes. On an input that holds no escape, a match of
+    /// the literals that used a character outside ASCII would hold that escape, so only the ASCII
+    /// spellings can match, and the folded literals find those leftmost-first with the program's
+    /// byte lengths. On any other input the folded literals may miss matches.
+    ///
+    /// A first match needs less. A match the folded literals miss holds an escape, and every
+    /// character before its first escape is one ASCII byte that spells one literal character, so
+    /// that escape begins within the longest literal's length of the match's start. When the
+    /// folded literals' first match from a search start begins at `s`, any match they miss that
+    /// would come first, one that begins before `s` or at `s` in an earlier alternative, begins at
+    /// or after the search start, so its first escape begins before `s` plus the longest literal's
+    /// length. Where no escape begins in that window, as [#windowEnd] bounds it, the folded match
+    /// is the program's first match.
+    static final class FullCaseFoldAlternation
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(FullCaseFoldAlternation.class);
+
+        private final FoldedMatcher matcher;
+        private final int maximumLiteralLength;
+        // The UTF-8 encoding of each escape.
+        private final byte[][] escapes;
+        // The distinct leading bytes of the escapes, padded to three with the first for a scan of
+        // one to three bytes; more take the nibble tables.
+        private final byte[] leadingBytes;
+        private final int leadingByteCount;
+        private final byte[] nibbleTables;
+
+        private FullCaseFoldAlternation(FoldedMatcher matcher, int maximumLiteralLength, byte[][] escapes, byte[] leadingBytes, int leadingByteCount, byte[] nibbleTables)
+        {
+            this.matcher = requireNonNull(matcher, "matcher is null");
+            this.maximumLiteralLength = maximumLiteralLength;
+            this.escapes = requireNonNull(escapes, "escapes is null");
+            this.leadingBytes = requireNonNull(leadingBytes, "leadingBytes is null");
+            this.leadingByteCount = leadingByteCount;
+            this.nibbleTables = nibbleTables;
+        }
+
+        // Null when the leading bytes are more than the nibble tables hold.
+        private static FullCaseFoldAlternation create(FoldedMatcher matcher, Set<Integer> escapeCharacters, int maximumLiteralLength)
+        {
+            byte[][] escapes = new byte[escapeCharacters.size()][];
+            byte[] leadingByteMembers = new byte[256];
+            byte[] leadingBytes = new byte[3];
+            int leadingByteCount = 0;
+            int index = 0;
+            for (int character : escapeCharacters) {
+                byte[] encoding = new byte[Utf8.encodedLength(character)];
+                Utf8.encode(encoding, 0, character);
+                escapes[index++] = encoding;
+                if (leadingByteMembers[encoding[0] & 0xFF] == 0) {
+                    leadingByteMembers[encoding[0] & 0xFF] = 1;
+                    leadingBytes[Math.min(leadingByteCount, 2)] = encoding[0];
+                    leadingByteCount++;
+                }
+            }
+            byte[] nibbleTables = null;
+            if (leadingByteCount > 3) {
+                nibbleTables = VectorByteSetScanner.buildNibbleTables(leadingByteMembers);
+                if (nibbleTables == null) {
+                    return null;
+                }
+            }
+            for (int padding = leadingByteCount; padding < 3; padding++) {
+                leadingBytes[padding] = leadingBytes[0];
+            }
+            return new FullCaseFoldAlternation(matcher, maximumLiteralLength, escapes, leadingBytes, leadingByteCount, nibbleTables);
+        }
+
+        FoldedMatcher matcher()
+        {
+            return matcher;
+        }
+
+        /// The end of the window in which no escape may begin for the folded literals' first match
+        /// from a search start, beginning at `matchStart`, to be the program's: the longest
+        /// literal's length past its start, or the end of `source`.
+        int windowEnd(Slice source, int matchStart)
+        {
+            return (int) Math.min(source.length(), (long) matchStart + maximumLiteralLength);
+        }
+
+        /// True when no escape begins in `[from, to)` of `source`; over the whole of `source`, the
+        /// folded literals then find every match of the pattern. It scans the range for the
+        /// escapes' leading bytes and compares each escape at a stop, reading past `to` to the end
+        /// of `source`, so an escape that begins in the range counts wherever it ends, as the
+        /// first-match window needs. A stop that begins no escape resumes the scan at the next
+        /// byte, so an escape that follows a stray leading byte in malformed input is still found;
+        /// an escape cut short by the end of `source` or split by other bytes is not one the
+        /// program can match.
+        boolean admits(Slice source, int from, int to)
+        {
+            byte[] bytes = source.byteArray();
+            int position = source.byteArrayOffset() + from;
+            int scanEnd = source.byteArrayOffset() + to;
+            int end = source.byteArrayOffset() + source.length();
+            while (position < scanEnd) {
+                int stop = nibbleTables == null
+                        ? VectorByteSetScanner.find(bytes, position, scanEnd - position, leadingBytes[0], leadingBytes[1], leadingBytes[2], leadingByteCount)
+                        : VectorByteSetScanner.findNibbleTable(bytes, position, scanEnd - position, nibbleTables);
+                if (stop < 0) {
+                    return true;
+                }
+                for (byte[] escape : escapes) {
+                    if (escape.length <= end - stop && Arrays.equals(bytes, stop, stop + escape.length, escape, 0, escape.length)) {
+                        return false;
+                    }
+                }
+                position = stop + 1;
+            }
+            return true;
+        }
+
+        /// The bytes the folded literals and escapes retain, which the pattern reserves from the
+        /// engine's forward DFA memory.
+        long estimatedRetainedSize()
+        {
+            long size = INSTANCE_SIZE + matcher.estimatedRetainedSize() + SizeOf.sizeOfObjectArray(escapes.length) + SizeOf.sizeOf(leadingBytes) + SizeOf.sizeOf(nibbleTables);
+            for (byte[] escape : escapes) {
+                size += SizeOf.sizeOf(escape);
+            }
+            return size;
+        }
     }
 
     /// Counts the routes each search passed this object reads, for tests to check. Production

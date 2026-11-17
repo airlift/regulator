@@ -1159,6 +1159,22 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(atBound))).literalAlternationSpanMatcher() != null).isEqualTo(VectorSupport.isAvailable());
         assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(overBound))).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(longLiterals))).literalAlternationSpanMatcher()).isNull();
+
+        // Trino's full case folding also matches the long s and the Kelvin sign, so its
+        // case-insensitive names take their folded literals on text that holds neither, here with
+        // malformed bytes too, and keep the engine for other text.
+        String trinoNames = "Sherlock|Holmes|Watson|Irene|Adler|John|Baker";
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("(?i)" + trinoNames));
+        LiteralAlternationSpanMatcher trinoMatcher = trino.fullCaseFoldAlternationForDiagnostics();
+        assertThat(trinoMatcher != null).isEqualTo(VectorSupport.isAvailable());
+        if (trinoMatcher != null) {
+            String[] asciiVariants = Arrays.stream(foldedVariants(trinoNames))
+                    .filter(variant -> variant.chars().allMatch(character -> character < 0x80))
+                    .toArray(String[]::new);
+            Slice input = wrappedBuffer(literalText(random, asciiVariants, Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES));
+            assertThat(trino.count(input)).isEqualTo(generalEngineCount(trino.re2(), input));
+            assertThat(trinoMatcher.filterStopCountForDiagnostics()).isPositive();
+        }
     }
 
     @Test

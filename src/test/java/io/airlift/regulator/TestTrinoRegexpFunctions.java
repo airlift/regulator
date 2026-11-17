@@ -377,6 +377,34 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testFullCaseFoldAlternationMemoryIsReservedFromForwardDfa()
+    {
+        // The folded literals and escapes reserve their estimated retained size from the engine's
+        // forward DFA allowance.
+        Slice pattern = utf8("(?i)Sherlock|Holmes|Watson|Irene|Adler|John|Baker");
+        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
+        LiteralAlternationSpanMatcher.FullCaseFoldAlternation alternation = LiteralAlternationSpanMatcher.analyzeFullCaseFold(parsed.regexp(), parsed.capturingGroupCount(), parsed.caseFolding());
+        TrinoRegexp regexp = TrinoRegexp.compile(pattern);
+        assertThat(alternation != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(regexp.fullCaseFoldAlternationForDiagnostics() != null).isEqualTo(VectorSupport.isAvailable());
+        if (alternation != null) {
+            TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
+            assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
+                    .isEqualTo(alternation.estimatedRetainedSize());
+        }
+
+        // The smallest budget that compiles leaves the engine too little DFA memory for the
+        // folded literals, so the pattern keeps the engine and its answers, on text with and
+        // without escapes.
+        TrinoRegexp smallest = compileAtSmallestBudget(pattern);
+        assertThat(smallest.fullCaseFoldAlternationForDiagnostics()).isNull();
+        for (Slice source : List.of(utf8("Sherlock HOLMES, watson and IrEnE adler"), utf8("ſherlock Holmeſ, BaKer and John"))) {
+            assertThat(smallest.count(source)).isEqualTo(regexp.count(source));
+            assertThat(smallest.extractAll(source, 0)).isEqualTo(regexp.extractAll(source, 0));
+        }
+    }
+
+    @Test
     public void testOrderedLiteralMatcherKeepsRequiredBytesOnlyWhereForwardDfasStillInitialize()
     {
         // The matcher is charged first, with the required bytes' memory handed back, and the
@@ -614,7 +642,11 @@ public class TestTrinoRegexpFunctions
         // More than 64 literals take the literal set, whose filler words never occur in the source.
         String largeSet = "ERROR|WARN|FATAL|" + IntStream.range(0, 62).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
         assertThat(TrinoRegexp.compile(utf8(largeSet)).usesLiteralSetMatcherForDiagnostics()).isTrue();
-        for (String pattern : List.of("ERROR|WARN|FATAL", largeSet)) {
+        // A case-insensitive alternation keeps its engine, but this short ASCII source runs on its
+        // folded literals. Without the Vector API it has no folded literals.
+        String foldedNames = "(?i)error|warn|fatal";
+        assertThat(TrinoRegexp.compile(utf8(foldedNames)).fullCaseFoldAlternationForDiagnostics() != null).isEqualTo(VectorSupport.isAvailable());
+        for (String pattern : VectorSupport.isAvailable() ? List.of("ERROR|WARN|FATAL", largeSet, foldedNames) : List.of("ERROR|WARN|FATAL", largeSet)) {
             assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.contains(source)).isTrue());
             assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.count(source)).isEqualTo(3));
             assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.position(source, 1, 2)).isEqualTo(16));
@@ -630,11 +662,123 @@ public class TestTrinoRegexpFunctions
         }
     }
 
+    @Test
+    public void testFullCaseFoldFirstMatchOperationsIgnoreEscapesPastTheMatchWindow()
+    {
+        // The first-match operations and a matcher's first find check for escapes only in the
+        // window an earlier match could use, so an escape far after the first match, here the
+        // ligature ff, leaves them on the folded literals; checking the whole input would hand
+        // extract, position and the find to the engine.
+        String pattern = "(?i)error|warn|fatal";
+        if (!VectorSupport.isAvailable()) {
+            assertThat(TrinoRegexp.compile(utf8(pattern)).fullCaseFoldAlternationForDiagnostics()).isNull();
+            return;
+        }
+        Slice lateEscape = utf8("info WARN then " + "filler text, ".repeat(5000) + "\uFB00 ERROR");
+        assertFoldedLiteralsAnswer(pattern, regexp -> assertThat(regexp.contains(lateEscape)).isTrue());
+        assertFoldedLiteralsAnswer(pattern, regexp -> assertThat(regexp.extract(lateEscape)).isEqualTo(utf8("WARN")));
+        assertFoldedLiteralsAnswer(pattern, regexp -> assertThat(regexp.position(lateEscape, 1, 1)).isEqualTo(6));
+        assertFoldedLiteralsAnswer(pattern, regexp -> assertThat(regexp.matcher(lateEscape).find()).isTrue());
+
+        // An escape before the search start does not disqualify the search either.
+        Slice earlyEscape = utf8("\uFB00 info WARN then ERROR " + "filler text, ".repeat(100));
+        assertFoldedLiteralsAnswer(pattern, regexp -> assertThat(regexp.position(earlyEscape, 3, 1)).isEqualTo(8));
+    }
+
+    @Test
+    public void testFullCaseFoldAlternationScansOnceWhereTheEngineFiltersStarts()
+    {
+        // Where the engine searches for its own start literal filter, an escape scan would read
+        // the input a second time. A short input takes one check for bytes outside ASCII instead:
+        // all ASCII runs on the folded literals, and any other byte, here e acute, which is no
+        // escape, sends every operation to the engine. A long input sends the operations that read
+        // every match to the engine. A pattern whose engine has no start filter, such as rebar's
+        // seven names, keeps the escape scans on both.
+        String filtered = "(?i)error|warn|fatal";
+        String unfiltered = "(?i)Sherlock|Holmes|Watson|Irene|Adler|John|Baker";
+        if (!VectorSupport.isAvailable()) {
+            assertThat(TrinoRegexp.compile(utf8(filtered)).fullCaseFoldAlternationForDiagnostics()).isNull();
+            return;
+        }
+        for (String pattern : List.of(filtered, unfiltered)) {
+            Prog program = TrinoRegexp.compile(utf8(pattern)).re2().forwardProgramForDiagnostics();
+            assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).as(pattern).isEqualTo(pattern.equals(filtered));
+        }
+        String filler = "filler text, ".repeat(100);
+        Slice shortAscii = utf8("info WARN then ERROR, John");
+        Slice shortOther = utf8("caf\u00E9 WARN then ERROR, John");
+        Slice longAscii = utf8("info WARN then ERROR, John " + filler);
+        assertThat(shortOther.length()).isLessThan(TrinoRegexp.FullCaseFoldAlternationTrinoRegexp.SHORT_INPUT_BYTES);
+        assertThat(longAscii.length()).isGreaterThanOrEqualTo(TrinoRegexp.FullCaseFoldAlternationTrinoRegexp.SHORT_INPUT_BYTES);
+        List<Consumer<TrinoRegexp>> shortOperations = List.of(
+                regexp -> assertThat(regexp.contains(shortOther)).isTrue(),
+                regexp -> assertThat(regexp.count(shortOther)).isEqualTo(2),
+                regexp -> assertThat(regexp.position(shortOther, 1, 2)).isEqualTo(16),
+                regexp -> assertThat(regexp.extract(shortOther)).isEqualTo(utf8("WARN")),
+                regexp -> assertThat(regexp.extractAll(shortOther, 0)).containsExactly(utf8("WARN"), utf8("ERROR")),
+                regexp -> assertThat(regexp.split(shortOther)).hasSize(3),
+                regexp -> assertThat(regexp.replace(shortOther, utf8("x"))).isEqualTo(utf8("caf\u00E9 x then x, John")),
+                regexp -> assertThat(regexp.matcher(shortOther).find()).isTrue(),
+                regexp -> assertThat(regexp.matcher(shortAscii).reset(shortOther).find()).isTrue());
+        for (Consumer<TrinoRegexp> operation : shortOperations) {
+            assertEngineAnswers(filtered, operation);
+        }
+        assertFoldedLiteralsAnswer(unfiltered, regexp -> assertThat(regexp.count(shortOther)).isEqualTo(1));
+        assertFoldedLiteralsAnswer(unfiltered, regexp -> assertThat(regexp.matcher(shortOther).find()).isTrue());
+        assertFoldedLiteralsAnswer(filtered, regexp -> assertThat(regexp.count(shortAscii)).isEqualTo(2));
+        assertFoldedLiteralsAnswer(filtered, regexp -> assertThat(regexp.matcher(shortAscii).find()).isTrue());
+        assertEngineAnswers(filtered, regexp -> assertThat(regexp.count(longAscii)).isEqualTo(2));
+        assertEngineAnswers(filtered, regexp -> assertThat(regexp.extractAll(longAscii, 0)).hasSize(2));
+        assertFoldedLiteralsAnswer(filtered, regexp -> assertThat(regexp.extract(longAscii)).isEqualTo(utf8("WARN")));
+        assertFoldedLiteralsAnswer(unfiltered, regexp -> assertThat(regexp.count(longAscii)).isEqualTo(1));
+
+        // The first budget that admits the folded literals leaves the engine's first-match DFA
+        // too little memory to initialize, so no start filter runs and the pattern keeps the
+        // escape scans: e acute, which is no escape, stays on the folded literals, and a matcher
+        // creates no engine matcher, which would add to its retained size.
+        long maxMemory = smallestBudget(utf8(filtered));
+        TrinoRegexp starved = TrinoRegexp.compile(utf8(filtered), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+        while (starved.fullCaseFoldAlternationForDiagnostics() == null) {
+            assertThat(maxMemory).isLessThan(1 << 20);
+            maxMemory += 16;
+            starved = TrinoRegexp.compile(utf8(filtered), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+        }
+        assertThat(starved.re2().forwardProgramForDiagnostics().leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH)).as("DFA at %s", maxMemory).isFalse();
+        assertThat(starved.count(shortOther)).isEqualTo(2);
+        TrinoRegexpMatcher matcher = starved.matcher(shortOther);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.retainedSizeInBytes()).isEqualTo(starved.matcher(shortAscii).retainedSizeInBytes());
+    }
+
+    private static void assertFoldedLiteralsAnswer(String pattern, Consumer<TrinoRegexp> operation)
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8(pattern));
+        operation.accept(regexp);
+        assertNoCachedDfa(regexp);
+    }
+
+    // The engine initializes a DFA or the reverse program as it answers, and the folded literals
+    // neither.
+    private static void assertEngineAnswers(String pattern, Consumer<TrinoRegexp> operation)
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8(pattern));
+        operation.accept(regexp);
+        Prog program = regexp.re2().forwardProgramForDiagnostics();
+        assertThat(Stream.of(Dfa.DfaInstance.Kind.values()).anyMatch(kind -> program.cachedDfaIfPresent(kind) != null) || regexp.re2().isReverseProgramComputed())
+                .as("engine initialized a DFA or the reverse program")
+                .isTrue();
+    }
+
     private static void assertLiteralAlternationOperationDoesNotCreateDfa(String pattern, Consumer<TrinoRegexp> operation)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8(pattern));
         operation.accept(regexp);
-        assertThat(regexp.re2()).isNull();
+        if (regexp.fullCaseFoldAlternationForDiagnostics() == null) {
+            assertThat(regexp.re2()).isNull();
+        }
+        else {
+            assertNoCachedDfa(regexp);
+        }
     }
 
     @Test
