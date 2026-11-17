@@ -185,28 +185,9 @@ final class ScanKernelSupport
     {
         int minimum = run.minimum();
         int maximum = run.maximum();
-        if (!run.matchesNonAscii()) {
-            int limit = maximum < 0 ? end : cursor + Math.min(maximum, end - cursor);
-            int stop = runScan(run, input, cursor, limit);
-            return stop - cursor >= minimum ? stop : -1;
-        }
-        if (maximum < 0 && minimum <= 1) {
-            int stop = runScan(run, input, cursor, end);
-            return stop - cursor >= minimum ? stop : -1;
-        }
-        // Finite bounds count characters, not encoded bytes. For an unbounded run, decode
-        // only enough characters to prove its minimum, then resume the byte scan.
-        boolean[] members = run.members();
-        int count = 0;
-        int limit = maximum < 0 ? minimum : maximum;
-        while (count < limit && cursor < end && members[input[cursor] & 0xFF]) {
-            cursor += Utf8.decodedWidth(decode(input, cursor, end));
-            count++;
-        }
-        if (count < minimum) {
-            return -1;
-        }
-        return maximum < 0 ? runScan(run, input, cursor, end) : cursor;
+        int limit = maximum < 0 ? end : cursor + Math.min(maximum, end - cursor);
+        int stop = runScan(run, input, cursor, limit);
+        return stop - cursor >= minimum ? stop : -1;
     }
 
     /// A copy of `ScanPlanRun.matchMinimum`.
@@ -214,12 +195,11 @@ final class ScanKernelSupport
     {
         int minimum = run.minimum();
         boolean[] members = run.members();
-        boolean matchesNonAscii = run.matchesNonAscii();
         for (int count = 0; count < minimum; count++) {
             if (cursor >= end || !members[input[cursor] & 0xFF]) {
                 return -1;
             }
-            cursor += matchesNonAscii ? Utf8.decodedWidth(decode(input, cursor, end)) : 1;
+            cursor++;
         }
         return cursor;
     }
@@ -288,7 +268,7 @@ final class ScanKernelSupport
         while (true) {
             // Find the first non-member ASCII byte or non-ASCII byte, then consume the
             // non-ASCII characters there. Less than a vector of input is scanned by byte, as
-            // Trino's run scan does for its tail.
+            // the ASCII run scan does for its tail.
             if (needles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
                 cursor = VectorScanKernelSupport.findRe2RunStop(input, cursor, end, needles);
             }

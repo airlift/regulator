@@ -38,14 +38,14 @@ public class TestScanPlanRun
         String tail = "y".repeat(4096);
         for (String expression : List.of("[^/]+", "[^/]{3,}", "[^/]{2,5}", "[a-z]{2,}", "(?s).*", "[^/]*", "[^/]?", "[^/]", "[0-9]+")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), expression);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), expression);
             for (String text : List.of("", "a", "ab", "abc", "é", "é😀x", "例え", "😀😀😀😀", "a/", "/", "ab/c", "A", "1")) {
                 String value = text + tail;
                 byte[] input = ("!" + value + "!").getBytes(UTF_8);
                 int end = input.length - 1;
                 String description = expression + " on " + text;
-                int stop = run.matchMinimum(input, 1, end);
-                assertThat(stop < 0).as(description).isEqualTo(run.match(input, 1, end) < 0);
+                int stop = matchMinimum(run, input, 1, end);
+                assertThat(stop < 0).as(description).isEqualTo(match(run, input, 1, end) < 0);
                 if (stop >= 0) {
                     String minimum = value.substring(0, value.offsetByCodePoints(0, run.minimum()));
                     assertThat(stop).as(description).isEqualTo(1 + minimum.getBytes(UTF_8).length);
@@ -54,10 +54,22 @@ public class TestScanPlanRun
         }
         // A bounded view cannot take its minimum from bytes after the view.
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
-        ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false));
+        ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()));
         byte[] input = "xabc".getBytes(UTF_8);
-        assertThat(run.matchMinimum(input, 1, 3)).isEqualTo(-1);
-        assertThat(run.matchMinimum(input, 0, 3)).isEqualTo(3);
+        assertThat(matchMinimum(run, input, 1, 3)).isEqualTo(-1);
+        assertThat(matchMinimum(run, input, 0, 3)).isEqualTo(3);
+    }
+
+    // A plan reads a run of every non-ASCII character as RE2 does, and any other run of these
+    // tests holds ASCII characters alone.
+    private static int match(ScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        return run.matchesNonAscii() ? run.re2Match(input, cursor, end) : run.match(input, cursor, end);
+    }
+
+    private static int matchMinimum(ScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        return run.matchesNonAscii() ? run.re2MatchMinimum(input, cursor, end) : run.matchMinimum(input, cursor, end);
     }
 
     @Test
@@ -129,7 +141,7 @@ public class TestScanPlanRun
                 re2("[\\x{80}-\\x{10FFFE}]"),
                 re2("[^\\x{10FFFF}]"))) {
             ParseResult parsed = set.parsed();
-            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), true), set.name());
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set.name());
             assertThat(run.matchesSomeNonAscii()).as(set.name()).isTrue();
             for (byte[] sequence : sequences) {
                 String description = set.name() + " on " + HexFormat.of().formatHex(sequence);
@@ -150,17 +162,15 @@ public class TestScanPlanRun
                 assertThat(run.members()[value]).as("%s byte %s", set.name(), value).isFalse();
             }
             ParseResult unbounded = set.parse(set.name() + "+");
-            ScanPlanRun unboundedRun = requireNonNull(ScanPlanRun.analyze(unbounded.regexp(), unbounded.caseFolding(), true), set.name());
+            ScanPlanRun unboundedRun = requireNonNull(ScanPlanRun.analyze(unbounded.regexp(), unbounded.caseFolding()), set.name());
             assertThat(unboundedRun.unboundedScanTerminator()).as(set.name()).isEqualTo(-1);
             for (int value = 0; value < 256; value++) {
                 assertThat(unboundedRun.isComplementOf((byte) value)).as("%s byte %s", set.name(), value).isFalse();
             }
-            // Trino reads every non-ASCII byte alike, so such a set is not a Trino run.
-            assertThat(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false)).as(set.name()).isNull();
         }
         // Interned blocks and masks keep the member table of Rust's \w near 12 KB.
         ParseResult word = rust("\\w").parsed();
-        Utf8MemberTable wordTable = requireNonNull(ScanPlanRun.analyze(word.regexp(), word.caseFolding(), true)).nonAsciiMembers();
+        Utf8MemberTable wordTable = requireNonNull(ScanPlanRun.analyze(word.regexp(), word.caseFolding())).nonAsciiMembers();
         assertThat(wordTable.estimatedRetainedSize()).isLessThan(16 * 1024);
     }
 
@@ -205,7 +215,7 @@ public class TestScanPlanRun
         // negated classes hold line feeds and every non-ASCII byte without dotAll.
         for (String set : List.of("[^/]", "[^:]", "[^,]", "[^\\n]", "[^/x]", "[^=]", "[^\\x00-\\x7F]", "\\w", "[a]", "[\\x00-\\x7F]", ".", "(?s).")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(set + "+"), Regexp.LIKE_PERL);
-            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
             // Only a line feed ends a line in this dialect.
             Pattern reference = Pattern.compile(set, Pattern.UNIX_LINES);
             int excluded = -1;
@@ -232,7 +242,7 @@ public class TestScanPlanRun
         // copy must agree.
         for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
-            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
             Pattern reference = Pattern.compile("(?s)" + set);
             boolean[] members = new boolean[256];
             int filler = -1;

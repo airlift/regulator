@@ -366,7 +366,7 @@ public sealed class RustRegexp
         // past an empty match never applies, and the analysis declines every byte construct that
         // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
         // the any-byte dot, which has no such flag, by its kind.
-        RustRegexp compiled = create(analyzeParsed(patternCopy, parsed, compileFlags, inputs.maxMemory(), inputs.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode), inputs);
+        RustRegexp compiled = create(analyzeParsed(patternCopy, parsed, compileFlags, inputs.maxMemory(), inputs.byteFrequencies(), Compiler.Dialect.RUST, scanPlanMode), inputs);
         if (inputs.generateBytecode()) {
             RustRegexp generated = CompiledScanRustRegexp.create(compiled);
             if (generated != null) {

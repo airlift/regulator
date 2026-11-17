@@ -280,7 +280,7 @@ public sealed class JavaRegexp
         Slice patternCopy = pattern.copy();
         CompileInputs inputs = new CompileInputs(patternCopy, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, inputs.parseFlags());
-        JavaRegexp compiled = create(analyzeParsed(patternCopy, parsed, inputs.parseFlags(), inputs.maxMemory(), inputs.byteFrequencies(), ScanPlan.Language.JAVA, scanPlanMode), inputs);
+        JavaRegexp compiled = create(analyzeParsed(patternCopy, parsed, inputs.parseFlags(), inputs.maxMemory(), inputs.byteFrequencies(), Compiler.Dialect.JAVA, scanPlanMode), inputs);
         if (inputs.generateBytecode()) {
             JavaRegexp generated = CompiledScanJavaRegexp.create(compiled);
             if (generated != null) {

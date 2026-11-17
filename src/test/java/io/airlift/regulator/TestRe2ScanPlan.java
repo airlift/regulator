@@ -610,7 +610,7 @@ public class TestRe2ScanPlan
     private static ScanPlan plan(String expression)
     {
         ParseResult parsed = RegexpParser.parse(utf8Slice(expression), Re2.Options.defaults().parseFlags());
-        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.RE2, false, parsed.caseFolding(), ByteFrequencies.uniform());
+        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), ByteFrequencies.uniform());
     }
 
     private static Slice witness(String expression)
