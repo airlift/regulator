@@ -115,6 +115,10 @@ public sealed class TrinoRegexp
 
     // TrinoRegexp.Options has no syntax settings, so parsing always starts from the same flags.
     private static final int PARSE_FLAGS = Regexp.LIKE_PERL;
+    // The result of an extraction that finds no match without building a matcher: the list the
+    // matcher loop returns then, which unlike List.of() answers contains(null), as a list with
+    // unmatched groups does.
+    private static final List<Slice> NO_MATCHES = Collections.unmodifiableList(new ArrayList<>());
 
     /// The inputs of a compile, which decide equality: the pattern bytes and every option that
     /// can change what the compile builds, including those that change only performance, such as
@@ -128,6 +132,10 @@ public sealed class TrinoRegexp
     // The hash of compileInputs, computed when the pattern compiles.
     private final int hash;
     private final boolean mayHaveSingleByteRepeatMatcher;
+    // Whether a capture matcher's find over a whole input starts with the general route's checks
+    // and the pattern keeps required bytes for them, so a capture search runs those checks before
+    // it builds a matcher. See RegexpMatcher.captureFindRunsGeneralSearch.
+    private final boolean checksBeforeCaptureMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
     private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
 
@@ -137,6 +145,7 @@ public sealed class TrinoRegexp
         this.compileInputs = compileInputs;
         this.hash = compileInputs.hashCode();
         this.mayHaveSingleByteRepeatMatcher = false;
+        this.checksBeforeCaptureMatcher = false;
     }
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only nested implementations; the non-sealed CompiledScanTrinoRegexp is extended only by its generated hidden class")
@@ -146,6 +155,7 @@ public sealed class TrinoRegexp
         this.compileInputs = compileInputs;
         this.hash = compileInputs.hashCode();
         this.mayHaveSingleByteRepeatMatcher = compiledPattern.canMatchEmpty();
+        this.checksBeforeCaptureMatcher = compiledPattern.hasRequiredBytes() && RegexpMatcher.captureFindRunsGeneralSearch(compiledPattern);
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -283,8 +293,13 @@ public sealed class TrinoRegexp
         if (literalAlternation != null) {
             return new TrinoRegexpMatcher(literalAlternation, source);
         }
-        return new TrinoRegexpMatcher(retainedCapturingGroupCount == 0 ? newGroupZeroMatcher(source) :
-                re2.matcher(source, retainedCapturingGroupCount));
+        if (retainedCapturingGroupCount == 0) {
+            return new TrinoRegexpMatcher(newGroupZeroMatcher(source));
+        }
+        if (checksBeforeCaptureMatcher) {
+            return TrinoRegexpMatcher.deferredEngine(re2, source, retainedCapturingGroupCount);
+        }
+        return new TrinoRegexpMatcher(re2.matcher(source, retainedCapturingGroupCount));
     }
 
     TrinoCompiledPattern re2()
@@ -654,11 +669,21 @@ public sealed class TrinoRegexp
         if (plan != null) {
             return extractWithStartAnchoredScanPlan(plan, source, group);
         }
+        if (group != 0 && captureSearchFailsBeforeMatcher(source)) {
+            return null;
+        }
         RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         if (!matcher.find()) {
             return null;
         }
         return matcher.group(group);
+    }
+
+    /// Whether the first find of a capture matcher over all of `source` would fail before any
+    /// engine runs, so a capture search finds nothing without building the matcher.
+    private boolean captureSearchFailsBeforeMatcher(Slice source)
+    {
+        return checksBeforeCaptureMatcher && RegexpMatcher.firstGeneralFindFailsBeforeEngine(re2, source);
     }
 
     /// Returns the start-anchored scan plan that [#extract(Slice,int)] runs without a
@@ -707,6 +732,9 @@ public sealed class TrinoRegexp
             return Collections.unmodifiableList(matches);
         }
 
+        if (group != 0 && captureSearchFailsBeforeMatcher(source)) {
+            return NO_MATCHES;
+        }
         RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         List<Slice> matches = new ArrayList<>();
         while (matcher.find()) {

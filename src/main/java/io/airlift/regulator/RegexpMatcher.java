@@ -262,6 +262,24 @@ public final class RegexpMatcher
         return findGeneral();
     }
 
+    /// Whether [#find()] of a matcher of `pattern` that retains capturing groups, over the
+    /// whole of its input, goes straight to [#findGeneral]: such a matcher has no span search,
+    /// and `pattern` has no start-anchored scan plan, anchored submatch route, or Rust search.
+    static boolean captureFindRunsGeneralSearch(CompiledPattern pattern)
+    {
+        return pattern.startAnchoredScanPlan() == null && !pattern.hasAnchoredSubmatchRoute() && (pattern.flags() & Regexp.RUST_SEARCH) == 0;
+    }
+
+    /// Whether the first [#findGeneral] since reset over all of `input` fails on the checks it
+    /// makes before any engine runs, in the same order: the match length bounds, then the bytes
+    /// every match holds. A matcher that has only failed those checks has the state of a new
+    /// one. Keep in step with [#findGeneral].
+    static boolean firstGeneralFindFailsBeforeEngine(CompiledPattern pattern, Slice input)
+    {
+        int length = input.length();
+        return length < pattern.minimumMatchLength() || length > pattern.maximumSpanLength() || pattern.shortWindowLacksRequiredBytes(input, 0, length);
+    }
+
     /// A span search's patterns have no assertions, match no empty string, and read no context
     /// outside the region, so every language's search, a Rust one over a partial region included,
     /// is the span search of the rest of the region.
@@ -404,7 +422,8 @@ public final class RegexpMatcher
         }
         // A match of a pattern anchored at both ends spans all of its context but a final line
         // terminator, and the context holds the region. A match lies inside the rest of the
-        // region, whatever context a Rust search reads.
+        // region, whatever context a Rust search reads. firstGeneralFindFailsBeforeEngine repeats
+        // this check and the next; keep it in step.
         if (regionLength - nextFindStart < minimumMatchLength || regionLength > maximumSpanLength) {
             return failFind();
         }

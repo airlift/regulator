@@ -26,7 +26,9 @@ import static java.util.Objects.requireNonNull;
 /// may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
 /// mutations to their original input storage. Do not mutate input while matching it.
 public sealed class TrinoRegexpMatcher
-        permits TrinoRegexpMatcher.CompiledScanMatcher, TrinoRegexpMatcher.LiteralSetMatcher
+        permits TrinoRegexpMatcher.CompiledScanMatcher,
+                TrinoRegexpMatcher.DeferredEngineMatcher,
+                TrinoRegexpMatcher.LiteralSetMatcher
 {
     private static final int CURSOR_INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.Cursor.class);
 
@@ -196,10 +198,25 @@ public sealed class TrinoRegexpMatcher
         return CompiledScanMatcher.create(pattern, input, retainedCapturingGroupCount);
     }
 
+    /// Returns a matcher retaining `retainedCapturingGroupCount` groups, at least one, that builds
+    /// the [RegexpMatcher] of `pattern` only once a find passes the length and short-window
+    /// required-bytes checks, or a match-result accessor runs before a find. `pattern` must keep
+    /// required bytes and satisfy [RegexpMatcher#captureFindRunsGeneralSearch].
+    static TrinoRegexpMatcher deferredEngine(CompiledPattern pattern, Slice input, int retainedCapturingGroupCount)
+    {
+        return DeferredEngineMatcher.create(pattern, input, retainedCapturingGroupCount);
+    }
+
     /// Returns a group-zero matcher whose finds search a large literal alternation's automaton.
     static TrinoRegexpMatcher literalSet(LiteralSetSpanMatcher literalSet, Slice input)
     {
         return LiteralSetMatcher.create(literalSet, input);
+    }
+
+    /// Whether this matcher has yet to build the [RegexpMatcher] it runs.
+    boolean defersEngineMatcherForDiagnostics()
+    {
+        return false;
     }
 
     private void checkSpanGroup(int group)
@@ -327,6 +344,110 @@ public sealed class TrinoRegexpMatcher
             if (group < 0 || group > groupCount()) {
                 throw new IllegalArgumentException("group index out of range: " + group);
             }
+        }
+    }
+
+    /// A capture matcher that builds the [RegexpMatcher] it runs only when a find over an input
+    /// passes the checks that matcher's first find makes before any engine runs: the match length
+    /// bounds, then the bytes every match holds. Trino builds a matcher for each row, and most
+    /// rows of a line search fail those checks, so they build neither the matcher nor its group
+    /// storage. A failed check leaves the state of a new matcher, so the matcher built later, by
+    /// a find that passes them or by an accessor, gives the results and exceptions the base class
+    /// would have. Once built, it is reset and reused for every later input.
+    private static final class DeferredEngineMatcher
+            extends TrinoRegexpMatcher
+    {
+        private final CompiledPattern pattern;
+        private final int retainedCapturingGroupCount;
+        private Slice input;
+        private RegexpMatcher matcher;
+
+        private DeferredEngineMatcher(CompiledPattern pattern, Slice input, int retainedCapturingGroupCount)
+        {
+            this.pattern = requireNonNull(pattern, "pattern is null");
+            this.retainedCapturingGroupCount = retainedCapturingGroupCount;
+            reset(input);
+        }
+
+        /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this
+        /// class.
+        static TrinoRegexpMatcher create(CompiledPattern pattern, Slice input, int retainedCapturingGroupCount)
+        {
+            return new DeferredEngineMatcher(pattern, input, retainedCapturingGroupCount);
+        }
+
+        @Override
+        public TrinoRegexpMatcher reset(Slice input)
+        {
+            this.input = requireNonNull(input, "input is null");
+            if (matcher != null) {
+                matcher.reset(input);
+            }
+            return this;
+        }
+
+        @Override
+        public boolean find()
+        {
+            if (matcher == null) {
+                if (RegexpMatcher.firstGeneralFindFailsBeforeEngine(pattern, input)) {
+                    return false;
+                }
+                matcher = pattern.matcher(input, retainedCapturingGroupCount);
+            }
+            return matcher.find();
+        }
+
+        @Override
+        public int groupCount()
+        {
+            return retainedCapturingGroupCount;
+        }
+
+        @Override
+        public boolean matched(int group)
+        {
+            return engineMatcher().matched(group);
+        }
+
+        @Override
+        public int start(int group)
+        {
+            return engineMatcher().start(group);
+        }
+
+        @Override
+        public int end(int group)
+        {
+            return engineMatcher().end(group);
+        }
+
+        @Override
+        public Slice group(int group)
+        {
+            return engineMatcher().group(group);
+        }
+
+        @Override
+        public long retainedSizeInBytes()
+        {
+            return super.retainedSizeInBytes() + (matcher == null ? 0 : matcher.retainedSizeInBytes());
+        }
+
+        @Override
+        boolean defersEngineMatcherForDiagnostics()
+        {
+            return matcher == null;
+        }
+
+        /// Builds the matcher for an accessor called before a find built it. No match is current
+        /// then, so the accessor throws as the base class's would.
+        private RegexpMatcher engineMatcher()
+        {
+            if (matcher == null) {
+                matcher = pattern.matcher(input, retainedCapturingGroupCount);
+            }
+            return matcher;
         }
     }
 

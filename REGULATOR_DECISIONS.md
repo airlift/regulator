@@ -2835,7 +2835,13 @@ start-anchored program's impossible first byte, which costs less. Shapes whose
 full-Slice `find` takes its own route, such as literal kernels and scan plans,
 do not check there. A hook inside the ordinary engine would still pay the find
 and engine prologue: on r8i the uri-or-email row took 0.445 of the base's time
-with the early hooks and 0.551 with the check in the engine.
+with the early hooks and 0.551 with the check in the engine. Trino builds a
+matcher for each row, so where the pattern keeps required bytes and its capture
+find takes the general route, a Trino capture matcher and Trino's capture
+extractions run the length and short-window required-bytes checks before
+building the engine matcher: a row they reject allocates no engine matcher or
+group storage. Other patterns, such as `(.)` and `^(a)$`, build it at once, and
+so does a match-result accessor called before a find.
 
 An earlier check of short windows, recorded under
 [Minimum Inner Literal Search Window](#minimum-inner-literal-search-window),

@@ -2670,6 +2670,13 @@ abstract sealed class CompiledPattern
         return bytes != null && end - start < bytes.windowLimit() && !bytes.occursIn(input, start, end);
     }
 
+    /// Whether this pattern keeps the bytes every match holds, which
+    /// [#shortWindowLacksRequiredBytes] checks for.
+    final boolean hasRequiredBytes()
+    {
+        return requiredBytes != null;
+    }
+
     /// Whether `[start, end)` of `text`, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
     /// the exact literal every match consumes, or every one of the one-of bytes, for a pattern
     /// whose long windows are checked for them, so it holds no match. A window that holds them is

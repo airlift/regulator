@@ -206,6 +206,9 @@ public class TestTrinoRegexpFunctions
         assertThat(absent.position(source)).isEqualTo(-1);
         assertThat(absent.extract(source)).isNull();
         assertThat(absent.extractAll(source)).isEmpty();
+        // A capture extraction that rejects the row before building a matcher returns the list
+        // the matcher loop would, which answers contains(null).
+        assertThat(TrinoRegexp.compile(utf8("(\\s*)(# noqa)")).extractAll(source, 1).contains(null)).isFalse();
         assertThat(strings(absent.split(source))).containsExactly("zzz");
         assertThat(absent.replace(source, utf8("_"))).isSameAs(source);
         assertThat(absent.replace(source, _ -> utf8("_"))).isSameAs(source);
