@@ -1259,13 +1259,37 @@ final class ScanKernelGenerator
 
         /// Emits code that returns whether `input` holds a match: the attempt of a start-anchored
         /// plan, or the search of an unanchored one, before its handoff where it hands off,
-        /// finished on the ordinary engine of `pattern`.
+        /// finished on the ordinary engine of `pattern`. An unanchored plan with a required literal
+        /// first rejects a short input that lacks it.
         private void emitBooleanFind(CodeBlock.Builder body, Parameter input, BytecodeExpression pattern)
         {
             BytecodeExpression noGroups = constantNull(int[].class);
             if (anchored) {
                 body.ret(invokeStatic(attemptLoop, input, constantInt(0), length(input), constantFalse(), noGroups));
                 return;
+            }
+            // The short-window reject of CompiledPattern.findOnScanPlan. The plan checks its
+            // required literal only after its first failed attempt, yet every match consumes it,
+            // so a short input without it holds no match. The interpreted find checks the
+            // pattern's required bytes; this one checks the plan's required literal, through the
+            // copy of the plan's scan. A plan without one skips the check, as a literal-led plan
+            // must: its candidate scan is the search for its literal.
+            if (plan.requiredLiteralOperation() >= 0) {
+                Variable bytes = body.declare("bytes", input.invoke("byteArray", byte[].class));
+                Variable offset = body.declare("offset", input.invoke("byteArrayOffset", int.class));
+                Variable length = body.declare("length", length(input));
+                BytecodeExpression containsRequiredLiteral = invokeStatic(
+                        ScanKernelSupport.class,
+                        "containsRequiredLiteral",
+                        boolean.class,
+                        bytes,
+                        offset,
+                        offset.add(length),
+                        boundConstant(plan.step(plan.requiredLiteralOperation()), Step.class));
+                body.append(IfStatement.builder()
+                        .condition(length.lessThan(constantInt(RequiredBytes.SHORT_WINDOW_LIMIT)).and(containsRequiredLiteral.not()))
+                        .then(constantFalse().ret())
+                        .build());
             }
             Variable result = body.declare("result", searchBeforeHandoff != null
                     ? invokeStatic(searchBeforeHandoff, input)

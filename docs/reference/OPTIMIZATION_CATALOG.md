@@ -105,6 +105,8 @@ answer, or reject the input before any engine runs.
   `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
   `RequiredBytes.containsByte`,
   `CompiledPattern.shortWindowLacksRequiredBytes`,
+  `CompiledPattern.findOnScanPlan`,
+  `ScanKernelGenerator.ScanEmitter.emitBooleanFind`,
   `CompiledPattern.mayCheckRequiredLiteralOnLongWindows`,
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `InnerLiteralSearch.literalBeginsEveryMatch`,
@@ -200,21 +202,23 @@ answer, or reject the input before any engine runs.
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
   every match holds one. A window that lacks them returns no match before any
   engine runs; Trino capture matchers and capture extractions run the check
-  before building the engine matcher. The test reads 8-byte words; when the
-  first byte is rare, it loads the last byte's word only for a word that holds
-  the first byte. A single required byte takes the same scan as the inner
-  literal search's single-byte scan, two words a step. A longer window is
-  searched for an exact
-  required literal instead, with the vector pair scan from 1 KiB, or for any
-  of the one-of bytes, with the vector byte-set scan from 1 KiB; where an
-  inner literal search for one exact literal stands in for that check, the
-  routes that skip the search, BitState capture of groups and a skipped DFA,
-  scan the window for its literal instead. Under the handoff, full-Slice find
-  of a long window starts the inner literal search at the check's first hit
-  rather than at the window start. With the search-end bound, a long
-  search scans back from the window's end for the last occurrence of the bytes
-  every match ends with, the forward scan mirrored: none means no match, and
-  otherwise the search ends at that occurrence's end, since every match ends
+  before building the engine matcher. Full-Slice find of an unanchored scan
+  plan not led by a literal checks the window before the plan; a generated
+  class checks the plan's required literal there instead. The `RequiredBytes`
+  scan reads 8-byte words; when the first byte is rare, it loads the last
+  byte's word only for a word that holds the first byte. A single required
+  byte takes the same scan as the inner literal search's single-byte scan, two
+  words a step. A longer window is searched for an exact required literal
+  instead, with the vector pair scan from 1 KiB, or for any of the one-of
+  bytes, with the vector byte-set scan from 1 KiB; where an inner literal
+  search for one exact literal stands in for that check, the routes that skip
+  the search, BitState capture of groups and a skipped DFA, scan the window
+  for its literal instead. Under the handoff, full-Slice find of a long window
+  starts the inner literal search at the check's first hit rather than at the
+  window start. With the search-end bound, a long search scans back from the
+  window's end for the last occurrence of the bytes every match ends with, the
+  forward scan mirrored: none means no match, and otherwise the search ends at
+  that occurrence's end, since every match ends
   at the end of one. Where those bytes do not hold the literal, the window up
   to that end is still checked for the literal. `replaceAll` bounds the whole
   text once and ends each of its searches there. The same early answer comes

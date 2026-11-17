@@ -2819,15 +2819,15 @@ A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
 the long-window check is chosen, the pattern keeps its literal for that check
 alone, with the [search-end bound](#required-suffix-bound-on-long-windows) where
-it has one, and otherwise it keeps no fact. Every short-window hook rejects a
-window shorter than a match on its length first. For a one-of set of two or
-three distinct bytes beside an inner literal search, the short-window check
-covers only windows shorter than that search's
-[minimum](#minimum-inner-literal-search-window), where it is lower than 256
-bytes: from there the search scans each window for its literal before any engine
-runs unless the find skips the DFA, and the one-of scan would repeat or replace
-that scan. Where only the class-run proof admits that search, the set also takes
-the [long-window check](#required-literal-absence-on-long-windows).
+it has one, and otherwise it keeps no fact. The matcher's general find and the
+engine shape's full-Slice `find` reject a window shorter than a match on its
+length first. For a one-of set of two or three distinct bytes beside an inner
+literal search, the short-window check covers only windows shorter than that
+search's [minimum](#minimum-inner-literal-search-window), where it is lower than
+256 bytes: from there the search scans each window for its literal before any
+engine runs unless the find skips the DFA, and the one-of scan would repeat or
+replace that scan. Where only the class-run proof admits that search, the set
+also takes the [long-window check](#required-literal-absence-on-long-windows).
 A single required byte keeps every window below 256 bytes,
 since its scan costs as little as the search's single-byte scan and a check that
 changed with line length cost more on naturally mixed line lengths, as that
@@ -2835,20 +2835,28 @@ section records. Where the pattern qualifies, a gated one-byte search for the
 single required byte replaces its check: that search runs first in a full-Slice
 boolean find and scans for the byte itself.
 
-Two hooks run the check, both before any engine setup: the matcher's general
-find route, on the rest of its region right after the minimum-length check,
-and the engine shape's full-Slice `find`, after the one-load reject of a
-start-anchored program's impossible first byte, which costs less. Shapes whose
-full-Slice `find` takes its own route, such as literal kernels and scan plans,
-do not check there. A hook inside the ordinary engine would still pay the find
-and engine prologue: on r8i the uri-or-email row took 0.445 of the base's time
-with the early hooks and 0.551 with the check in the engine. Trino builds a
-matcher for each row, so where the pattern keeps required bytes and its capture
-find takes the general route, a Trino capture matcher and Trino's capture
-extractions run the length and short-window required-bytes checks before
-building the engine matcher: a row they reject allocates no engine matcher or
-group storage. Other patterns, such as `(.)` and `^(a)$`, build it at once, and
-so does a match-result accessor called before a find.
+Three hooks run the check, each before any engine setup: the matcher's general
+find route, on the rest of its region right after the minimum-length check; the
+engine shape's full-Slice `find`, after the one-load reject of a start-anchored
+program's impossible first byte, which costs less; and the full-Slice `find` of
+an unanchored scan plan not led by a literal, which Trino's `contains` also
+runs. That plan checks its own literal only after its first failed attempt, so
+each short line without it paid the plan call, a candidate scan, an attempt, and
+the literal scan; a plan led by a literal needs no check, since its candidate
+scan is the search for that literal. A generated class checks the plan's
+required literal there instead, through its copy of the plan's scan, as
+generated code calls copies of scan helpers; a plan without one skips the check.
+Shapes whose full-Slice `find` takes another route of its own, such as literal
+kernels and start-anchored scan plans, do not check there. A hook inside the
+ordinary engine would still pay the find and engine prologue: on r8i the
+uri-or-email row took 0.445 of the base's time with the early hooks and 0.551
+with the check in the engine. Trino builds a matcher for each row, so where the
+pattern keeps required bytes and its capture find takes the general route, a
+Trino capture matcher and Trino's capture extractions run the length and
+short-window required-bytes checks before building the engine matcher: a row
+they reject allocates no engine matcher or group storage. Other patterns, such
+as `(.)` and `^(a)$`, build it at once, and so does a match-result accessor
+called before a find.
 
 An earlier check of short windows, recorded under
 [Minimum Inner Literal Search Window](#minimum-inner-literal-search-window),
@@ -2897,6 +2905,11 @@ the base's, r9g / r8i, two hosts each):
 | `lh3lh3-reb/uri` | 0.61 / 0.68 | 1.00 / 1.00 | 1.00 / 1.01 | 0.61 / 0.63 |
 | `wild/ruff/space-around-operator`, no fact | 0.99 / 0.98 | | | 1.01 / 1.02 |
 | `rsc/reallyreallyhard0-32` | 1.12 / 1.12 | 1.10 / 1.12 | 1.07 / 1.11 | 1.10 / 1.12 |
+
+The Java and Trino `uri` cells predate the scan-plan hook: in those languages
+the pattern takes an unanchored scan plan led by a class run, whose full-Slice
+`find` did not check then. RE2's and Rust's compiles of this row, Latin-1 and
+byte mode since it leaves Unicode off, build no scan plan.
 
 `reallyreallyhard0-32` is a 47-byte row that holds the literal, so it pays the
 double scan. `around-holmes-english` counts one match in 613,357 bytes of text:
