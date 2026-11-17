@@ -40,9 +40,14 @@ Its `start` argument also uses one-based code-point positions.
 Separate parsing does not require duplicate execution code. Exact, prefix,
 suffix, contains, and ordered-literal plans use shared kernels whenever the two
 frontends prove equivalent semantics. An eligible `TrinoRegexp.contains` call
-uses the same ordered-literal search as LIKE, while the compiled RE2 program
-remains available for count, position, extraction, replacement, split, and
-fallback behavior.
+uses the same ordered-literal search as LIKE, but also checks each gap between
+two found literals, such as the `(?s:.*)` of `first(?s:.*)second`, against the
+characters the engine's `.` accepts, and asks the engine when a gap holds
+bytes that `.` rejects. So every operation gives the same answer on malformed
+input, and on such input `TrinoRegexp` follows the engine rather than Joni: on
+`first`, `FF`, `second`, `contains` is false, where Joni matches. The compiled
+RE2 program remains available for count, position, extraction, replacement,
+split, and fallback behavior.
 
 `TrinoRegexp.Options.setGenerateBytecode(true)` is an option, off by default,
 that compiles an eligible pattern's scan plan into its own hidden class.

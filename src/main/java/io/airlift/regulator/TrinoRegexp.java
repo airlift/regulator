@@ -525,11 +525,18 @@ public sealed class TrinoRegexp
             return matcher.estimatedRetainedSize();
         }
 
+        /// Searches the literals in order and reads the gaps between them as the engine's dot
+        /// does. A gap holding bytes the dot rejects leaves the answer to the engine on the whole
+        /// input, so contains agrees with the operations the engine answers.
         @Override
         public boolean contains(Slice source)
         {
             requireNonNull(source, "source is null");
-            return matcher.matches(source, 0, source.length());
+            int decision = matcher.findWithCharacterGaps(source);
+            if (decision == OrderedLiteralMatcher.UNDECIDED) {
+                return super.contains(source);
+            }
+            return decision == OrderedLiteralMatcher.MATCH;
         }
     }
 
