@@ -5,7 +5,8 @@ Reads `regexes.yaml`, `tests/test_ua.yaml`, and `tests/test_os.yaml` from a chec
 revision `uap-core-corpus.tsv` pins, and writes each resource the manifest lists as gzip JSON
 lines: the `user_agent_parsers` and `os_parsers` rules, one object per rule in file order, and the
 browser and OS test cases, one object per case. The device rules and tests are left out. Every
-string, regular expressions included, is the YAML value unchanged. With `--check`, verifies the
+string, regular expressions included, is the YAML value unchanged. uap-core's `LICENSE` is copied
+beside them unchanged, as Apache-2.0 requires of redistributed files. With `--check`, verifies the
 committed resources instead of writing them.
 
 Requires PyYAML.
@@ -86,7 +87,8 @@ def main():
         if len(source_data) != int(row["source_bytes"]) or sha256(source_data) != row["source_sha256"]:
             raise SystemExit(f"pinned uap-core file differs from manifest: {row['source_path']}")
 
-        data = resource_data(yaml.safe_load(source_data.decode("utf-8")), row["kind"])
+        verbatim = row["kind"] == "license"
+        data = source_data if verbatim else resource_data(yaml.safe_load(source_data.decode("utf-8")), row["kind"])
         if len(data) != int(row["uncompressed_bytes"]) or sha256(data) != row["sha256"]:
             raise SystemExit(f"generated uap-core resource differs from manifest: {row['resource_path']}")
 
@@ -94,11 +96,12 @@ def main():
         if arguments.check:
             if not resource.is_file():
                 raise SystemExit(f"uap-core resource does not exist: {resource}")
-            if gzip.decompress(resource.read_bytes()) != data:
+            committed = resource.read_bytes()
+            if (committed if verbatim else gzip.decompress(committed)) != data:
                 raise SystemExit(f"uap-core resource differs from pinned uap-core: {row['resource_path']}")
         else:
             resource.parent.mkdir(parents=True, exist_ok=True)
-            resource.write_bytes(gzip.compress(data, compresslevel=9, mtime=0))
+            resource.write_bytes(data if verbatim else gzip.compress(data, compresslevel=9, mtime=0))
 
     action = "verified" if arguments.check else "provisioned"
     print(f"{action} {len(rows)} uap-core resources from uap-core {expected_revision}")
