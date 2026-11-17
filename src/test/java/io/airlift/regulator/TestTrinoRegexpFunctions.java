@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -1285,6 +1286,58 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testEveryRouteGivesTheEngineAnswerOnMalformedUtf8()
+    {
+        // One pattern for each route, compared on its sample with malformed UTF-8 put at every
+        // byte offset: before, inside, and after its matches, and inside its characters. The
+        // reference is the whole expression on the plain engine's NFA.
+        TrinoRegexp.Options generating = TrinoRegexp.Options.defaults().setGenerateBytecode(true);
+        String literalSet = "ERROR|WARN|FATAL|" + IntStream.range(0, 62).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
+        List<MalformedInputRoute> routes = List.of(
+                new MalformedInputRoute("fixed-width byte", TrinoRegexp.compile(utf8("\\d{3}-\\d{2}")), "123-45é", regexp -> regexp instanceof TrinoRegexp.FixedWidthByteTrinoRegexp),
+                new MalformedInputRoute("character class", TrinoRegexp.compile(utf8("\\p{L}+")), "aé 中", regexp -> regexp.re2().hasCharacterClassSpan()),
+                new MalformedInputRoute("literal neighbors", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().literalNeighborMatcherForDiagnostics() != null),
+                new MalformedInputRoute("ordered literals", TrinoRegexp.compile(utf8("first(?s:.*)second")), "firsté\nsecond", TrinoRegexp::usesOrderedLiteralMatcherForDiagnostics),
+                new MalformedInputRoute("dot-star literal", TrinoRegexp.compile(utf8(".*ab.*")), "éab\nab", TrinoRegexp::usesDotStarLiteralSpanMatcherForDiagnostics),
+                new MalformedInputRoute("literal alternation", TrinoRegexp.compile(utf8("WARN|é中")), "WARN é中", regexp -> regexp.literalAlternationSpanMatcher() != null),
+                new MalformedInputRoute("folded literal alternation", TrinoRegexp.compile(utf8("[Xx]ylophone|[Zz]ephyr")), "Xylophone ézephyr", regexp -> (regexp.literalAlternationSpanMatcher() instanceof LiteralAlternationSpanMatcher.FoldedMatcher) == VectorSupport.isAvailable()),
+                new MalformedInputRoute("literal set", TrinoRegexp.compile(utf8(literalSet)), "WARN éERROR", TrinoRegexp::usesLiteralSetMatcherForDiagnostics),
+                new MalformedInputRoute("exact literal", TrinoRegexp.compile(utf8("é中")), "aé中b", regexp -> regexp.re2().hasExactLiteralSpan()),
+                new MalformedInputRoute("begin line", TrinoRegexp.compile(utf8("(?m)^")), "é\nb", TrinoRegexp::usesTrinoBeginLineCountForDiagnostics),
+                new MalformedInputRoute("scan plan", TrinoRegexp.compile(utf8("https?://([^/]+)/")), "http://hé/", regexp -> regexp.re2().usesScanPlanForDiagnostics()),
+                new MalformedInputRoute("start-anchored scan plan", TrinoRegexp.compile(utf8("^x([é中]+)/.*$")), "xé中/é", regexp -> regexp.re2().startAnchoredScanPlan() != null),
+                new MalformedInputRoute("generated class", TrinoRegexp.compile(utf8("https?://([^/]+)/"), generating), "http://hé/", TrinoRegexp::usesGeneratedBytecode),
+                new MalformedInputRoute("general engine", TrinoRegexp.compile(utf8("(é|中)+x")), "é中x", regexp -> regexp.getClass() == TrinoRegexp.class && !regexp.re2().usesScanPlanForDiagnostics()));
+        // Every non-ASCII byte alone, then overlong forms, an encoded surrogate, and forms above
+        // U+10FFFF.
+        List<byte[]> malformedSequences = new ArrayList<>();
+        for (int value = 0x80; value <= 0xFF; value++) {
+            malformedSequences.add(new byte[] {(byte) value});
+        }
+        malformedSequences.addAll(List.of(
+                bytes(0xC0, 0xAF),
+                bytes(0xE0, 0x80, 0xAF),
+                bytes(0xF0, 0x80, 0x80, 0xAF),
+                bytes(0xED, 0xA0, 0x80),
+                bytes(0xF4, 0x90, 0x80, 0x80),
+                bytes(0xF7, 0xBF, 0xBF, 0xBF)));
+        for (MalformedInputRoute route : routes) {
+            String description = route.name() + " " + route.regexp().pattern().toStringUtf8();
+            assertThat(route.route().test(route.regexp())).as(description).isTrue();
+            byte[] sample = utf8(route.sample()).getBytes();
+            List<Slice> sources = new ArrayList<>();
+            for (byte[] malformed : malformedSequences) {
+                for (int offset = 0; offset <= sample.length; offset++) {
+                    sources.add(inserted(sample, offset, malformed));
+                }
+            }
+            Prog program = plainEngineProgram(route.regexp().pattern());
+            int groupCount = route.regexp().capturingGroupCount();
+            TestingTrinoJoni.verifyOperations(description, route.regexp(), source -> plainEngineMatches(program, groupCount, source), sources);
+        }
+    }
+
+    @Test
     public void testForwardOnlyCountEligibility()
     {
         TrinoCompiledPattern delimiter = TrinoRegexp.compile(utf8(",")).re2();
@@ -1515,6 +1568,62 @@ public class TestTrinoRegexpFunctions
         return Slices.utf8Slice(value);
     }
 
+    private static byte[] bytes(int... values)
+    {
+        byte[] bytes = new byte[values.length];
+        for (int index = 0; index < values.length; index++) {
+            bytes[index] = (byte) values[index];
+        }
+        return bytes;
+    }
+
+    /// Returns `sample` with `malformed` inserted at `offset`, as a Slice with a nonzero offset.
+    private static Slice inserted(byte[] sample, int offset, byte[] malformed)
+    {
+        DynamicSliceOutput output = new DynamicSliceOutput(sample.length + malformed.length + 2);
+        output.writeByte('!');
+        output.writeBytes(sample, 0, offset);
+        output.writeBytes(malformed);
+        output.writeBytes(sample, offset, sample.length - offset);
+        output.writeByte('!');
+        Slice written = output.slice();
+        return written.slice(1, written.length() - 2);
+    }
+
+    /// Compiles the whole of Trino `pattern` for the plain engine, with no route of its own.
+    private static Prog plainEngineProgram(Slice pattern)
+    {
+        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
+        Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), Compiler.Dialect.TRINO, 64 << 20);
+        return Compiler.compileNormalized(simplified, false, 64 << 20, Compiler.Dialect.TRINO, parsed.caseFolding());
+    }
+
+    /// Returns every non-overlapping match of `program`'s NFA in `source`, with an empty match
+    /// advancing by one character as a matcher does.
+    private static List<int[]> plainEngineMatches(Prog program, int groupCount, Slice source)
+    {
+        List<int[]> matches = new ArrayList<>();
+        int next = 0;
+        while (next <= source.length()) {
+            int[] match = new int[2 * (groupCount + 1)];
+            if (!Nfa.search(program, source, next, source.length(), false, Prog.MatchKind.FIRST_MATCH, match)) {
+                break;
+            }
+            // The NFA reports offsets from the search start.
+            for (int index = 0; index < match.length; index++) {
+                if (match[index] >= 0) {
+                    match[index] += next;
+                }
+            }
+            matches.add(match);
+            next = match[1];
+            if (match[0] == match[1]) {
+                next += next < source.length() ? SliceUtf8.lengthOfCodePointSafe(source, next) : 1;
+            }
+        }
+        return matches;
+    }
+
     private enum Operation
     {
         CONTAINS,
@@ -1531,4 +1640,6 @@ public class TestTrinoRegexpFunctions
     private record MatchBoundary(int start, int end) {}
 
     private record ReplacementRoute(String expression, String source) {}
+
+    private record MalformedInputRoute(String name, TrinoRegexp regexp, String sample, Predicate<TrinoRegexp> route) {}
 }
