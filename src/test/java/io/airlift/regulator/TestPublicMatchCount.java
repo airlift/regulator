@@ -265,8 +265,7 @@ public class TestPublicMatchCount
                     assertSpanSearch(RustRegexp.compile(utf8Slice(spanExpression), rustOptions), text, expected);
                 }
             }
-            // Trino's count checks only the span maximum. Without captures, the matcher's find of
-            // ^(?:aaa|aa)$ takes the general route.
+            // Without captures, the matcher's find of ^(?:aaa|aa)$ takes the general route.
             TrinoRegexp.Options trinoOptions = TrinoRegexp.Options.defaults().setGenerateBytecode(generate);
             for (String trinoExpression : List.of(expression, "^(?:aaa|aa)$", planExpression)) {
                 for (String text : List.of("aaa\n", "aaaa\n", "aaa\r\n")) {
@@ -307,6 +306,9 @@ public class TestPublicMatchCount
         Re2 unanchored = Re2.compile(utf8Slice("\\w+@\\w+\\.\\w+"));
         assertThat(unanchored.count(utf8Slice("a@b"))).isZero();
         assertNoProgramSearch(unanchored, "unanchored count");
+        TrinoRegexp trinoUnanchored = TrinoRegexp.compile(utf8Slice("\\w+@\\w+\\.\\w+"));
+        assertThat(trinoUnanchored.count(utf8Slice("a@b"))).isZero();
+        assertNoProgramSearch(trinoUnanchored.re2(), "Trino unanchored count");
         // A generated unanchored plan overrides the count and makes the same check. Its plan
         // leaves no trace, so this row proves only that the answer stays right.
         Re2 generatedUnanchored = Re2.compile(utf8Slice("x([^/]+)/"), Re2.Options.defaults().setGenerateBytecode(true));
