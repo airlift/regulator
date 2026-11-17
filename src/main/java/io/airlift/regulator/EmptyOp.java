@@ -330,6 +330,32 @@ final class EmptyOp
         return isJavaLineTerminator(nextCodePoint) && nextPosition == end;
     }
 
+    /// Returns whether `text` ends in a line terminator before which `assertion`, an end
+    /// assertion [Prog#finalTerminatorEndAssertion()] names, also matches: an LF for
+    /// [#EMPTY_END_TEXT_OR_FINAL_NEWLINE], and any Java line terminator for
+    /// [#EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR]. If false, the assertion can hold only at the
+    /// text end.
+    static boolean endsWithFinalTerminator(int assertion, Slice text)
+    {
+        byte[] bytes = text.byteArray();
+        int begin = text.byteArrayOffset();
+        int end = begin + text.length();
+        if (end == begin) {
+            return false;
+        }
+        int last = bytes[end - 1] & 0xFF;
+        if (last == '\n') {
+            return true;
+        }
+        if (assertion != EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR) {
+            return false;
+        }
+        // CR, or the last byte of U+0085 (C2 85), U+2028 (E2 80 A8), or U+2029 (E2 80 A9).
+        return last == '\r' ||
+                (last == 0x85 && end - begin >= 2 && (bytes[end - 2] & 0xFF) == 0xC2) ||
+                ((last == 0xA8 || last == 0xA9) && end - begin >= 3 && (bytes[end - 2] & 0xFF) == 0x80 && (bytes[end - 3] & 0xFF) == 0xE2);
+    }
+
     /// Returns the Java $ flags to clear when a CR precedes the context: at a context start on the
     /// LF of a CR LF, because the JDK's $ reads the CR before a matcher region.
     static int javaEndFlagsRefusedAfterCarriageReturn(byte[] bytes, int begin, int end, int position)

@@ -251,8 +251,17 @@ public class TestJavaRegexpDifferential
         String dotStarSpan = "(?d).*ab.*";
         assertThat(JavaRegexp.compile(utf8Slice(dotStarSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(DotStarLiteralSpanMatcher.class);
         // These capture searches run on OnePass, which reads the terminator after the position from
-        // the region or, for a ranged call, the whole input.
-        List<String> onePassFinalTerminator = List.of("^(a*)(\\n??)$", "^(a*?)(\\n?)$", "^(a+)(\\r??)(\\n??)$", "(?d)^(a+)(\\r??)(\\n??)$", "^([ab]*)\\Z");
+        // the region or, for a ranged call, the whole input. A find over a whole input that ends in
+        // no terminator runs those that never match empty as a full match.
+        List<String> onePassFinalTerminator = List.of(
+                "^(a*)(\\n??)$",
+                "^(a*?)(\\n?)$",
+                "^(a+)(\\r??)(\\n??)$",
+                "(?d)^(a+)(\\r??)(\\n??)$",
+                "^([ab]*)\\Z",
+                "^(a+)(\\n??)$",
+                "^(a+?)(\\r?\\n?)$",
+                "(?d)^(a+)(\\r??)$");
         for (String pattern : onePassFinalTerminator) {
             RegexpMatcher matcher = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice("a\r\n"));
             assertThat(matcher.find()).as(pattern).isTrue();

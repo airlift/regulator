@@ -5597,6 +5597,15 @@ that differ only in such an assertion still make the program not one-pass.
 Other programs allocate no masks, and their empty-width check reads only the
 six bits.
 
+The compiler keeps Java's `$` and `\Z` and Trino's `$` rather than strip them
+as it strips RE2's `$`, so a program ending in one is not end-anchored. When
+one ends every match of a start-anchored one-pass program and a matcher's find
+covers a whole input that ends in no terminator the anchor accepts, the anchor
+holds only at the input end, and OnePass runs a full match, which keeps no
+bookkeeping for earlier matches. An input that ends in such a terminator runs a
+first match, since a lazy repetition before the anchor can then end the match
+before the terminator.
+
 ## Java Representation Adaptations
 
 The implementation uses garbage collection, Java collections and arrays, integer

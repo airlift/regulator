@@ -414,6 +414,9 @@ final class Prog
 
     private boolean anchorStart;
     private boolean anchorEnd;
+    // The end assertion every match of a forward program ends with when it also matches before a
+    // final line terminator, so the compiler keeps it rather than record anchorEnd, or 0.
+    private int finalTerminatorEndAssertion;
     private boolean canMatchEmpty;
     private boolean hasLoop = true;
     private boolean hasEmptyWidthAssertions;
@@ -746,6 +749,21 @@ final class Prog
     public void setAnchorEnd(boolean anchorEnd)
     {
         this.anchorEnd = anchorEnd;
+    }
+
+    /// Returns the end assertion every match ends with when it also matches before a final line
+    /// terminator: [EmptyOp#EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR] for Java's `$` and `\Z`,
+    /// [EmptyOp#EMPTY_END_TEXT_OR_FINAL_NEWLINE] for Trino's `$` and Java's under `UNIX_LINES`,
+    /// or 0. On a text that does not end in a terminator it holds only at the text end, as
+    /// [#anchorEnd()] does.
+    int finalTerminatorEndAssertion()
+    {
+        return finalTerminatorEndAssertion;
+    }
+
+    void setFinalTerminatorEndAssertion(int finalTerminatorEndAssertion)
+    {
+        this.finalTerminatorEndAssertion = finalTerminatorEndAssertion;
     }
 
     public boolean canMatchEmpty()

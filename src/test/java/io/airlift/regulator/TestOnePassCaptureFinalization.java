@@ -13,16 +13,22 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.joni.Regex;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Random;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.airlift.regulator.OnePass.CaptureFinalization.DIRECT_REBASE;
 import static io.airlift.regulator.OnePass.CaptureFinalization.DIRECT_ZERO_ORIGIN;
 import static io.airlift.regulator.OnePass.CaptureFinalization.SCRATCH_COPY;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
+import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
+import static io.airlift.regulator.TestingTrinoJoni.joniPattern;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,6 +94,88 @@ public class TestOnePassCaptureFinalization
         }
     }
 
+    /// The Unicode character data line pattern ends with an assertion that also matches before a
+    /// final line terminator: Java's `$` or `\Z`, Java's `$` under `UNIX_LINES`, or Trino's `$`.
+    /// On a line that ends in no such terminator, a fresh matcher's find runs OnePass as a full
+    /// match, which allocates no capture scratch, even when the input is a view with a terminator
+    /// after it. On a line that ends in one, the assertion can hold before it, so the find runs a
+    /// first match. Either way the captures are the authority's.
+    @Test
+    public void testFinalTerminatorEndRunsFullMatchOnLineWithoutTerminator()
+            throws ReflectiveOperationException
+    {
+        String pattern = "^" + TestingEngineAgreement.UNICODE_DATA_LINE_FIELDS;
+        String line = "0041;LATIN CAPITAL LETTER A;Lu;0;L;;;;;N;;;;0061;";
+        List<JavaCase> javaCases = List.of(
+                JavaCase.compile(pattern, false),
+                JavaCase.compile(pattern.substring(0, pattern.length() - 1) + "\\Z", false),
+                JavaCase.compile("(?d)" + pattern, true));
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(pattern));
+        Regex joni = joniPattern(pattern);
+        assertThat(trino.re2().hasAnchoredSubmatchRoute()).isTrue();
+        Field trinoCoreMatcher = field(TrinoRegexpMatcher.class, "matcher");
+        for (String end : List.of("", "\n", "\r\n", "\r", "\u0085", "\u2028")) {
+            String text = line + end;
+            for (Slice input : List.of(utf8Slice(text), utf8Slice(text + "\n").slice(0, utf8Slice(text).length()))) {
+                String ending = "on a line ending in %s".formatted(end.codePoints().mapToObj("U+%04X"::formatted).toList());
+
+                for (JavaCase javaCase : javaCases) {
+                    String description = javaCase.pattern() + " " + ending;
+                    Matcher expected = javaCase.jdk().matcher(text);
+                    assertThat(expected.find()).as(description).isTrue();
+                    RegexpMatcher javaMatcher = javaCase.regexp().matcher(input);
+                    assertThat(javaMatcher.find()).as(description).isTrue();
+                    for (int group = 0; group <= expected.groupCount(); group++) {
+                        assertThat(javaMatcher.start(group)).as(description).isEqualTo(utf8Offset(text, expected.start(group)));
+                        assertThat(javaMatcher.end(group)).as(description).isEqualTo(utf8Offset(text, expected.end(group)));
+                    }
+                    boolean javaScratch = javaCase.unixLines() ? end.endsWith("\n") : !end.isEmpty();
+                    assertThat(hasCaptureScratch(javaMatcher)).as(description).isEqualTo(javaScratch);
+                }
+
+                String description = pattern + " " + ending;
+                List<int[]> expected = joniMatches(joni, input);
+                assertThat(expected).as(description).hasSize(1);
+                TrinoRegexpMatcher trinoMatcher = trino.matcher(input);
+                assertThat(trinoMatcher.find()).as(description).isTrue();
+                for (int group = 0; group <= trino.capturingGroupCount(); group++) {
+                    assertThat(trinoMatcher.start(group)).as(description).isEqualTo(expected.getFirst()[2 * group]);
+                    assertThat(trinoMatcher.end(group)).as(description).isEqualTo(expected.getFirst()[2 * group + 1]);
+                }
+                assertThat(hasCaptureScratch((RegexpMatcher) trinoCoreMatcher.get(trinoMatcher))).as(description).isEqualTo(end.endsWith("\n"));
+            }
+        }
+    }
+
+    // Whether the matcher's OnePass searches allocated their capture scratch, which only a search
+    // other than a full match does.
+    private static boolean hasCaptureScratch(RegexpMatcher matcher)
+            throws ReflectiveOperationException
+    {
+        Object workspace = field(RegexpMatcher.class, "onePassWorkspace").get(matcher);
+        assertThat(workspace).isNotNull();
+        Object captures = field(OnePass.Workspace.class, "captures").get(workspace);
+        Object matchCaptures = field(OnePass.Workspace.class, "matchCaptures").get(workspace);
+        assertThat(matchCaptures == null).isEqualTo(captures == null);
+        return captures != null;
+    }
+
+    private static int utf8Offset(String input, int utf16Offset)
+    {
+        if (utf16Offset < 0) {
+            return -1;
+        }
+        return utf8Slice(input.substring(0, utf16Offset)).length();
+    }
+
+    private static Field field(Class<?> type, String name)
+            throws NoSuchFieldException
+    {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
+    }
+
     private static String randomText(Random random, String alphabet)
     {
         StringBuilder text = new StringBuilder();
@@ -99,4 +187,14 @@ public class TestOnePassCaptureFinalization
     }
 
     private record ExtendedCase(String pattern, List<String> samples) {}
+
+    private record JavaCase(String pattern, JavaRegexp regexp, Pattern jdk, boolean unixLines)
+    {
+        static JavaCase compile(String pattern, boolean unixLines)
+        {
+            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+            assertThat(regexp.hasAnchoredSubmatchRoute()).as(pattern).isTrue();
+            return new JavaCase(pattern, regexp, Pattern.compile(pattern), unixLines);
+        }
+    }
 }

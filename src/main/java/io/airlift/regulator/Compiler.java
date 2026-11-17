@@ -483,6 +483,7 @@ final class Compiler
         else {
             compiler.program.setAnchorStart(isAnchorStart);
             compiler.program.setAnchorEnd(isAnchorEnd);
+            compiler.program.setFinalTerminatorEndAssertion(finalTerminatorEndAssertion(simplifiedRegexp, 0));
         }
 
         compiler.program.setStart(compiledFragment.begin);
@@ -686,6 +687,27 @@ final class Compiler
                     ? new AnchorStripResult(true, Regexp.literalString(regexp.parseFlags(), new int[0]))
                     : new AnchorStripResult(false, regexp);
             default -> new AnchorStripResult(false, regexp);
+        };
+    }
+
+    // Finds a trailing final-terminator assertion through CONCAT and CAPTURE, using
+    // stripAnchorEnd's depth limit: Java's $ and \Z, or Trino's $ or Java's under UNIX_LINES,
+    // which stripAnchorEnd keeps. Returns its EmptyOp bit, or 0.
+    private static int finalTerminatorEndAssertion(Regexp regexp, int depth)
+    {
+        if (depth >= 4) {
+            return 0;
+        }
+        return switch (regexp.op()) {
+            case CONCAT -> regexp.childCount() == 0 ? 0 : finalTerminatorEndAssertion(regexp.child(regexp.childCount() - 1), depth + 1);
+            case CAPTURE -> finalTerminatorEndAssertion(regexp.child(0), depth + 1);
+            case END_TEXT -> {
+                if ((regexp.parseFlags() & Regexp.JAVA_FINAL_END) != 0) {
+                    yield EmptyOp.EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR;
+                }
+                yield (regexp.parseFlags() & Regexp.FINAL_LINE_END) != 0 ? EmptyOp.EMPTY_END_TEXT_OR_FINAL_NEWLINE : 0;
+            }
+            default -> 0;
         };
     }
 
