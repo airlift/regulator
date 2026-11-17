@@ -59,7 +59,7 @@ public class TestDfaGroupZeroForwardCursor
     }
 
     @Test
-    public void testNegativeProductivityDecisionExpiresForShortTail()
+    public void testNegativeProductivityDecisionHoldsThroughShortTail()
     {
         // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
         Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+[-+][0-9]+"));
@@ -75,11 +75,47 @@ public class TestDfaGroupZeroForwardCursor
         assertThat(search(cursor, input, 0)).isEqualTo(23);
         assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(1);
 
+        // The search from 11 has less than an epoch left, but the rejection's epoch has not ended,
+        // so the scan stays off without another sample.
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         int fallbacksBeforeShortTail = dfa.byteScanFallbackCount();
         assertThat(search(cursor, input, 11)).isEqualTo(12);
         assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(1);
-        assertThat(dfa.byteScanFallbackCount()).isEqualTo(fallbacksBeforeShortTail);
+        assertThat(dfa.byteScanFallbackCount()).isEqualTo(fallbacksBeforeShortTail + 1);
+    }
+
+    @Test
+    public void testExpiredRejectionSamplesSparseTailOnce()
+    {
+        // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+[-+][0-9]+"));
+        Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
+        byte[] bytes = new byte[PRODUCTIVITY_EPOCH_BYTES + PRODUCTIVITY_EPOCH_BYTES / 2];
+        Arrays.fill(bytes, (byte) '.');
+        for (int position = 0; position < PRODUCTIVITY_EPOCH_BYTES; position += 3) {
+            bytes[position] = 'a';
+            bytes[position + 1] = '-';
+            bytes[position + 2] = '1';
+        }
+        int sparseMatchStart = PRODUCTIVITY_EPOCH_BYTES + PRODUCTIVITY_EPOCH_BYTES / 4;
+        bytes[sparseMatchStart] = 'a';
+        bytes[sparseMatchStart + 1] = '-';
+        bytes[sparseMatchStart + 2] = '1';
+        Slice input = Slices.wrappedBuffer(bytes);
+
+        assertThat(search(cursor, input, 0)).isEqualTo(3);
+        assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(1);
+
+        // The dense epoch has ended and the sparse tail is shorter than an epoch: one sample of the
+        // tail turns the scan back on, and later searches of the tail keep it without sampling.
+        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int scansBeforeTail = scannerCount(dfa);
+        assertThat(search(cursor, input, PRODUCTIVITY_EPOCH_BYTES))
+                .isEqualTo(sparseMatchStart + 3L - PRODUCTIVITY_EPOCH_BYTES);
+        assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(2);
+        assertThat(scannerCount(dfa) > scansBeforeTail).isEqualTo(VectorSupport.isAvailable());
+        assertThat(search(cursor, input, sparseMatchStart + 3)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(2);
     }
 
     @Test
