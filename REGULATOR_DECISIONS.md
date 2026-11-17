@@ -273,7 +273,7 @@ Upstream's own never-capture test uses only unnamed groups.
   RE2 syntax and does not add a dialect selector to `Re2.compile`.
 - A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
   first invalid byte. Inputs are not validated as UTF-8. The JDK assigns no
-  meaning to malformed UTF-8, so Java follows Trino's garbage-in/garbage-out
+  meaning to malformed UTF-8, so Java has a garbage-in/garbage-out
   contract: Regulator makes no promise about matching malformed input. A
   pattern that runs on a scan plan still reports what the ordinary engine
   reports on malformed input; see [RE2 Scan Plans](#re2-scan-plans).
@@ -580,7 +580,9 @@ original pattern, including when quoting rewrites it before parsing.
   do. This deliberately differs from Trino, whose non-strict Joni path accepts
   such a pattern and compares its malformed bytes byte-for-byte; that reading
   is unspecified, so Regulator treats the pattern as a syntax error. Inputs are
-  not validated as UTF-8, matching Trino's garbage-in/garbage-out contract.
+  not validated as UTF-8, as in Trino, and malformed input follows the shared
+  engine on every route, as
+  [Trino Specialized Byte Scans](#trino-specialized-byte-scans) records.
   So a range, property, or complement that includes surrogates, such as
   `[\x{D7FF}-\x{E000}]` or `\p{Cs}`, compiles as in Joni, and its surrogate
   members match no valid UTF-8 text. On malformed input such a class may match
@@ -2293,8 +2295,8 @@ DFAs](#memory-budgets-and-dfa-caching). Release 2.0's Trino dot-star subtype
 reserved nothing and was always built. So at the budgets where it would cost a
 DFA, Trino now runs `.*literal.*` on that DFA rather than the matcher. Trino's
 dot-star spans previously ended at any byte sequence that is not well-formed
-UTF-8; they now read malformed input as Trino's ordinary engine does, which its
-garbage-in, garbage-out contract leaves unspecified either way.
+UTF-8; they now read malformed input as Trino's ordinary engine does, as every
+Trino route does.
 
 Full-Slice boolean `find` of literals in order with any bytes between them, such
 as RE2's `a\C*b\C*c`, `a(?s:.*)b(?s:.*)c` under RE2's Latin-1 option, or
@@ -6000,19 +6002,21 @@ OnePass, allocation, and ordinary-route final-line cases.
 ## Trino Specialized Byte Scans
 
 The Trino frontend may select a bounded scan plan for literals, deterministic
-character runs, optional bodies, nested captures, and terminal tails. Preserve
-specified matching and capture behavior on valid UTF-8. Malformed Trino input
-has a garbage-in, garbage-out contract, while bounded input access and normal
-matcher lifecycle behavior remain required. This does not authorize a public
-malformed-input opt-in. RE2, Java, and Rust patterns select the same plans,
-plus runs of sets of some non-ASCII characters, and report the ordinary engine's
-results on malformed input too, as described in
-[RE2 Scan Plans](#re2-scan-plans). By default the plan performs no runtime
-code generation; an option may compile the plan into its own class, as described
-in [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
+character runs, optional bodies, and nested captures. A plan matches Joni on
+valid UTF-8 and the shared engine on malformed input, so a pattern answers alike
+on every route: plans read characters by the rule in
+[RE2 Scan Plans](#re2-scan-plans) and select the same plans as RE2, Java, and
+Rust, runs of sets of some non-ASCII characters included. Joni reads a lone
+malformed byte as one character, and following it would need byte-level reads
+in every engine and route, so Joni is not the authority there. Release 2.1's
+Trino plans read class runs a byte at a time and so could take a malformed byte
+the engine rejects. This does not authorize a public malformed-input opt-in.
+By default the plan performs no runtime code generation; an option may compile
+the plan into its own class, as described in
+[Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
 semantic program remains the fallback. The
-[scan-plan guide](docs/benchmarks/SCAN_PLAN.md) describes candidate
-selection, resume rules, the executors, and optional-capture execution.
+[scan-plan guide](docs/benchmarks/SCAN_PLAN.md) describes candidate selection,
+resume rules, the executors, and optional-capture execution.
 
 Plans may require the logical input start or perform unanchored search. An
 unanchored plan must begin, after capture saves, with a literal, an exact
@@ -6021,8 +6025,8 @@ case-sensitive literal that follows it, and must contain a capture and a
 variable run. A capture-free plan must contain a character run or a variable
 literal repeat. These rules keep capture-free, fixed-width, and literal-only
 patterns on their direct routes. A lowered final-line plan takes precedence
-over a run-leading scan. RE2, Java, and Rust plans may also be led by a set of
-some non-ASCII characters, as [RE2 Scan Plans](#re2-scan-plans) records.
+over a run-leading scan. A plan may also be led by a set of some non-ASCII
+characters, as [RE2 Scan Plans](#re2-scan-plans) records.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
@@ -6034,8 +6038,8 @@ it, such as `([^/]+)/`, `([^:]+):([0-9]+)`, or `([^,]{2,}),`, is admitted. Its
 scan stops only at the delimiter, which the literal then matches, and this
 shape measured faster than the ordinary engine with no loss.
 
-Character sets must be ASCII-only or have uniform non-ASCII membership, except
-in RE2, Java, and Rust plans, as [RE2 Scan Plans](#re2-scan-plans) describes.
+Character sets may be ASCII-only, have uniform non-ASCII membership, or hold
+some non-ASCII characters, as [RE2 Scan Plans](#re2-scan-plans) describes.
 Variable repetition requires a continuation disjoint from the repeated set
 across both arms of optional groups, so a run never gives characters back;
 exact counts need no such proof. Finite bounds count characters, not bytes.
@@ -6097,9 +6101,9 @@ and keep each search linear in its input:
   No row of `BenchmarkRe2ScanPlan`, `BenchmarkTrinoScanPlan`,
   `BenchmarkTrinoScanProfiles`, or `BenchmarkClickBenchRegexp` became slower on
   any host, and `RETRY_64` and the longer retry rows, which keep the plan, are
-  unchanged. A Trino plan qualifies only when it consumes only ASCII bytes and
-  has no final-line end, which the DFA cannot evaluate, so no Trino benchmark
-  plan takes this route. Calls that report boundaries or captures run the plan.
+  unchanged. A Trino plan qualifies only when it has no final-line end, which
+  the DFA cannot evaluate, so no Trino benchmark plan takes this route. Calls
+  that report boundaries or captures run the plan.
 - A start-anchored plan with a fork and capture saves keeps a boolean plan, the
   same operations without the saves, which the pattern resolves when it
   compiles. Only full-Slice boolean `find` and the count of a start-anchored
@@ -6134,8 +6138,8 @@ and keep each search linear in its input:
   R8i. The one control that moved, `quotedField` `reusedCount` on R8i, took
   1.025 times, an accepted marginal cost of about 0.75 ns per call.
 
-On malformed input, a search that hands off may report the ordinary engine's
-match instead of the plan's. Every operation applies the same budget from the
+A handoff preserves the match sequence on every input, including malformed
+UTF-8. Every operation applies the same budget from the
 same search positions, and the density handoff, the short boolean route, and
 ranged boolean `find` use the ordinary engine only where both engines agree, so
 `find`, `count`, `extract`, `position`, `extractAll`, replacement, and split
@@ -6220,34 +6224,31 @@ development campaign evidence is in the private archive; see the
 
 RE2 patterns select the same scan plans as Trino patterns: the same eligible
 shapes, ASCII-folded ones included, reached by the same operations with the
-same memory charge, and on by default. They also admit runs of sets of some
-non-ASCII characters, which Trino plans decline. Trino captures and extraction
+same memory charge, and on by default. They admit runs of sets of some
+non-ASCII characters in every language. Trino captures and extraction
 run about eight times faster on a plan than on the ordinary engine, and nothing
-in those shapes is specific to Trino. The frontend chooses a plan's language
-explicitly, so `Re2.compileParsed` builds none. Java and Rust patterns select
+in those shapes is specific to Trino. The frontend chooses explicitly whether to
+build a plan, so `Re2.compileParsed` builds none. Java and Rust patterns select
 the same plans under these decisions; the last bullets record the rules and
 measurements specific to each language.
 
-- An RE2 plan reports exactly what the ordinary engine reports on every input,
-  including malformed UTF-8; RE2 has no garbage-in, garbage-out contract. Only
-  operations that can consume a byte at or above `0x80` read input differently:
-  runs admitting non-ASCII characters, with their bounded counts and minimums,
-  delimited captures, and terminal tails. They consume a non-ASCII character as
-  the ordinary engine's byte ranges do. A set of every non-ASCII character
-  reads leniently, accepting overlong three- and four-byte forms, encoded
-  surrogates, and values above U+10FFFF, and rejecting bare continuation bytes,
-  `C0`, `C1`, `F5`-`FF`, and truncated sequences. A set of only some non-ASCII
-  characters reads strictly, because the compiler splits its ranges into exact
-  encodings: it accepts the encoding of each member, an encoded surrogate
-  included when the set holds it, and rejects every other sequence. Its reader
-  is built from that same split, so the two cannot drift, and it runs only at
-  a non-ASCII byte, so ASCII input keeps the byte and vector scans. Trino plans
-  are unchanged, and a Trino run still declines such a set, since Trino reads
-  every non-ASCII byte alike.
+- A plan reports exactly what the ordinary engine reports on every input,
+  including malformed UTF-8. Only operations that can consume a byte at or
+  above `0x80` read input by this rule: runs admitting non-ASCII characters,
+  with their bounded counts and minimums, and delimited captures. They consume a
+  non-ASCII character as the ordinary engine's byte ranges do. A set of every
+  non-ASCII character reads leniently, accepting overlong three- and four-byte
+  forms, encoded surrogates, and values above U+10FFFF, and rejecting bare
+  continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated sequences. A set of
+  only some non-ASCII characters reads strictly, because the compiler splits its
+  ranges into exact encodings: it accepts the encoding of each member, an
+  encoded surrogate included when the set holds it, and rejects every other
+  sequence. Its reader is built from that same split, so the two cannot drift,
+  and it runs only at a non-ASCII byte, so ASCII input keeps the byte and vector
+  scans. Trino plans read input by the same rule.
 - The analysis, builder, proofs, budgets, candidate scans, and routing stay
   shared, so a coverage change reaches the Trino, RE2, Java, and Rust
-  frontends, except a change for sets of some non-ASCII characters, which Trino
-  plans decline. Every skip proof holds under the RE2 rule, as the
+  frontends. Every skip proof holds under the RE2 rule, as the
   [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#re2-patterns) restates.
   An unanchored search may also be led by one character of a set of some
   non-ASCII characters, such as `(?i)key=([^;]+);` led by the `k` that folds to
@@ -6272,7 +6273,7 @@ measurements specific to each language.
   does, and removing that retry would change Trino plans too. A failed `www.`
   retry occurs on 0.07% of Apache access-log referrers and 0.02% of GH Archive
   URL strings.
-- A run scan with less than a vector of input left scans by byte, as Trino's
+- A run scan with less than a vector of input left scans by byte, as the ASCII
   run scan finishes its tail, and reads the member table only when the run
   excludes an ASCII byte. On R8i this takes ClickBench `NEWLINE_PATH` without
   dotAll from 1.22 to 0.84 times the build without RE2 plans and

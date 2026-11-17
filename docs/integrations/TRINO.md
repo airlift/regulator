@@ -98,11 +98,13 @@ call. A defect in how pinned Joni compiles or searches a pattern is never
 copied, whether or not modern Joni fixed it.
 
 Trino's non-strict path assumes UTF-8 data is valid but does not validate it.
-Regulator likewise treats malformed input as garbage in, garbage out rather
-than validating it. Patterns differ: Trino accepts a pattern that is not valid
-UTF-8 and compares its malformed bytes byte-for-byte, while Regulator rejects
-it as a syntax error, as it does for `TrinoLikePattern`, `JavaRegexp`,
-`RustRegexp`, and UTF-8 `Re2` patterns.
+Regulator does not validate it either, and on malformed input every route
+gives its shared engine's answer, as the
+[Trino language reference](../reference/languages/TRINO_REGEXP.md) describes.
+Patterns differ: Trino accepts a pattern that is not valid UTF-8 and compares
+its malformed bytes byte-for-byte, while Regulator rejects it as a syntax error,
+as it does for `TrinoLikePattern`, `JavaRegexp`, `RustRegexp`, and UTF-8 `Re2`
+patterns.
 
 Backreferences, lookaround, atomic groups, possessive quantifiers, and other
 backtracking-dependent constructs are rejected during compilation with a

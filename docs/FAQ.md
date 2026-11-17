@@ -94,10 +94,10 @@ C++ RE2 optimizations. The license notices for ported code are in
 ## Do optimizations ever change results?
 
 No. Every specialized route must produce exactly what the ordinary engine
-produces under the pattern's language. For Rust, RE2, Java, and SQL `LIKE`
-patterns this holds on any input, malformed UTF-8 included. For Trino regular
-expressions it holds on valid UTF-8, and malformed input is garbage in,
-garbage out. Each language follows its own authority, listed in
+produces under the pattern's language. This holds on any input, malformed
+UTF-8 included: a Trino regular expression matches Joni on valid UTF-8, and on
+malformed input every route gives the shared engine's answer. Each language
+follows its own authority, listed in
 [Language Authorities](../REGULATOR_DECISIONS.md#language-authorities), and
 the [test map](porting/TEST_MAP.md) names each language's test oracle. The
 [maintenance guide](MAINTAINING_REGULATOR.md) defines the correctness gates a

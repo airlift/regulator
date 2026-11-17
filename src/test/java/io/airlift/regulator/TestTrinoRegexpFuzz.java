@@ -396,12 +396,11 @@ public class TestTrinoRegexpFuzz
             trace.add("replace callback", () -> hex(regexp.replace(source, TestScanPlan::callbackReplacement)));
         }
 
-        // Malformed input is garbage in, garbage out (TRINO_REGEXP.md), and a Trino scan plan
-        // promises no exact agreement with the ordinary engine on it (SCAN_PLAN.md).
+        // Malformed input follows the shared engine, not Joni, on every route (TRINO_REGEXP.md).
         @Override
         public boolean variantsAgreeOnMalformedInput()
         {
-            return false;
+            return true;
         }
 
         // Unlike RE2's and Rust's, Trino's routes read the scan plan from the RE2 pattern it
