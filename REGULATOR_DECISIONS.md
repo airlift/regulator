@@ -3243,8 +3243,8 @@ The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
 must have no other route that already searches for a literal at least as fast.
 So it has no required prefix, exact literal, literal kernel or literal search,
-scan plan, class counter, literal set or alternation, span, byte-run, word-run,
-or disjoint suffix-repeat matcher, or whole-input capture plan, and no inner
+scan plan, class counter, literal set or alternation, span, byte-run, or
+word-run matcher, or whole-input capture plan, and no inner
 literal search but one that only the
 [class-run proof](#inner-literal-class-run-prefix) admits. Such a pattern
 decides as it would without that search, so the proof neither adds the check nor
