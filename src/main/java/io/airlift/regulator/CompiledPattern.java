@@ -3521,6 +3521,10 @@ abstract sealed class CompiledPattern
         return length >= booleanPlans.innerLiteralCountMinimum() && booleanPlans.hasLiteralSearch();
     }
 
+    // Sweep leg: group-zero submatch searches skip the position automaton and step the Pike
+    // NFA; boolean searches that skip a thrashing DFA still answer from it.
+    private static final boolean SEARCHES_GROUP_ZERO_ON_POSITION_NFA = false;
+
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
         if (excludesCandidateStartCursor(booleanPlans, usesCompactBoundedCharacterClassForDiagnostics(), longestMatch, requiredPrefix, partialProg)) {
@@ -5868,7 +5872,7 @@ abstract sealed class CompiledPattern
                     bitStateWorkspace(workspaces));
         }
         boolean groupZeroOnly = groupOffsets == null || groupOffsets.length == 2;
-        if (groupZeroOnly && prog.positionNfa() != null) {
+        if (SEARCHES_GROUP_ZERO_ON_POSITION_NFA && groupZeroOnly && prog.positionNfa() != null) {
             return searchOnPositionNfa(prog, context, start, end, submatchAnchored, matchKind, groupOffsets, workspaces);
         }
         if (groupOffsets != null && groupOffsets.length == 2) {

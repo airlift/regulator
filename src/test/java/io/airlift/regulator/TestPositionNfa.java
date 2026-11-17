@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -98,6 +99,7 @@ public class TestPositionNfa
 
     /// A count on a matcher whose DFA bailed runs the automaton, not the Pike NFA.
     /// `TestDfaCountMatches` owns the public count's handoff to such a matcher.
+    @Disabled("Sweep leg b4-no-e11: pins the switched-off mechanism")
     @Test
     public void testCountAfterDfaBailSkipsPikeNfa()
     {
@@ -127,6 +129,7 @@ public class TestPositionNfa
     /// pattern's one-byte matches, the narrowest 403 bytes, fit BitState's limit, but their
     /// bitmaps are over the cap, so the Pike NFA searches them. The automaton, of seven words of
     /// state, keeps its state in the matcher's workspace, which shows that it ran.
+    @Disabled("Sweep leg b4-no-e11: pins the switched-off mechanism")
     @Test
     public void testWideWindowSearchesWithPikeNfa()
             throws ReflectiveOperationException
@@ -695,6 +698,7 @@ public class TestPositionNfa
     /// `a` after the match were the next search to start from that state. A search with no live
     /// state skips the `!`, which no match starts at, without stepping it, so only a search that
     /// starts from an empty state finds no match there.
+    @Disabled("Sweep leg b4-no-e11: pins the switched-off mechanism")
     @Test
     public void testMatcherOwnsAndReusesWorkspace()
             throws ReflectiveOperationException
@@ -1018,13 +1022,6 @@ public class TestPositionNfa
         List<String> expected = spans(captured.matcher(input), 1);
         RegexpMatcher matcher = pattern.matcher(input);
         assertThat(spans(matcher, 0)).as(description).isEqualTo(expected);
-        // Where BitState takes the automaton's widest window, on any text, it finds each span in
-        // it, so no find steps the Pike NFA.
-        Prog program = pattern.forwardProgramForDiagnostics();
-        int widestWindow = 2 * program.positionNfa().maxLength();
-        if (widestWindow <= program.unanchoredBitStateTextMaxSize() && program.listCount() * (widestWindow + 1L) <= CompiledPattern.POSITION_NFA_WINDOW_BIT_STATE_MAXIMUM_BYTES * Byte.SIZE) {
-            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(description).isFalse();
-        }
         // A region that starts past the first byte searches from a nonzero start.
         if (input.length() > 0) {
             List<String> expectedInRegion = spans(captured.matcher(input).reset(input, 1, input.length()), 1);
