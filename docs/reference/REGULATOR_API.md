@@ -332,9 +332,7 @@ by a multibyte UTF-8 character that ends before the literal's last byte, that
 character's last byte and the literal's last byte, and in vector scans of a
 periodic literal, whose smallest period is more than one byte and at most half
 its length, the first two adjacent bytes that differ from that pair's first byte
-on; the distribution decides only whether a folded run replaces that literal. A
-fixed-width pattern with no position rare enough to scan for also estimates with
-English text frequencies whether to test every start of a 64-byte block at once.
+on; the distribution decides only whether a folded run replaces that literal.
 A distribution that does not match the data can make literal scans several times
 slower per byte than first-byte scanning, because it moves the scan onto bytes
 that are common in the searched text; it never changes what matches, and the

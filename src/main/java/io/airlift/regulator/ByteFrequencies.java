@@ -29,7 +29,7 @@ import static java.util.Objects.requireNonNull;
 /// The start literal filter of a pattern that begins with a few literals, the start class filter
 /// of one that begins with a few narrow classes, an inner literal search's set filter, its choice
 /// of a rare class pair, the choice and short-window scan of the bytes every match holds, a
-/// fixed-width pattern's choice of candidate position or of its block search, and count's choice
+/// fixed-width pattern's choice of candidate position, and count's choice
 /// of the class counter for a single member ignore the option and always use [#englishText()].
 /// A case-insensitive prefix scan uses [#englishText()] only in place of [#uniform()].
 ///
@@ -82,8 +82,8 @@ import static java.util.Objects.requireNonNull;
 ///
 /// Each preset is the unweighted mean of its sources' add-one smoothed distributions and may probe
 /// any ASCII byte. Each byte at or above 0x80 has the probability of the most common ASCII byte,
-/// so presets probe only ASCII bytes. A fixed-width pattern's choice of candidate position or of
-/// its block search instead rates each such byte at the rarest ASCII byte's probability, close to
+/// so presets probe only ASCII bytes. A fixed-width pattern's choice of candidate position instead
+/// rates each such byte at the rarest ASCII byte's probability, close to
 /// how rarely English text holds a byte above ASCII, and takes a candidate position that can begin
 /// with such a byte only when no position whose first bytes are all ASCII is rare enough. Every
 /// table is regenerated from pinned public sources by

@@ -525,7 +525,7 @@ abstract sealed class CompiledPattern
                 : null;
         if (normalizedRegexp != null) {
             // Routes of the program can precede the matcher: a multi-byte inner literal search,
-            // and for a matcher that scans a rare candidate or searches blocks, the routes it
+            // and for a matcher that scans a rare candidate, the routes it
             // yields to. Trino decides them on its program, as every language does, so such a
             // pattern compiles one. A fixed-width pattern has no assertion, so its expression
             // predicts, before any program compiles, whether find would try a multi-byte inner
@@ -536,8 +536,8 @@ abstract sealed class CompiledPattern
                     Analysis analysis = buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
                     // The pattern takes the route without a program where the program fits but
                     // no route of it precedes the matcher. That route reserves the matcher's
-                    // memory from the forward budget. A matcher that scans a rare candidate or
-                    // searches blocks takes it where the matcher yields to no route of the program
+                    // memory from the forward budget. A matcher that scans a rare candidate
+                    // takes it where the matcher yields to no route of the program
                     // and find tries no multi-byte inner literal search. Any other matcher takes it
                     // where neither the inner literal search nor the matcher fits beside the
                     // program.
@@ -2410,7 +2410,7 @@ abstract sealed class CompiledPattern
 
     // The order between the fixed-width matcher and the routes the ordinary engine has for a
     // pattern. An ASCII singleton pattern keeps the matcher. A pattern that scans a rare
-    // candidate or searches blocks keeps the engine wherever the forward program skips to a literal
+    // candidate keeps the engine wherever the forward program skips to a literal
     // prefix or a forward DFA searches for a start literal filter that groups of one bit also give.
     // For (?i)Шерлок Холмс, the filter's three bytes of Шер stop far less often than the lead byte
     // of every Cyrillic letter, which the matcher scans for; a count on the matcher measured 89x
@@ -2421,7 +2421,7 @@ abstract sealed class CompiledPattern
     // [0-9]{4}, whose digits English text rates as it holds them, ran 9.4-10.9x faster on the
     // matcher than on the counter, and 3.8-4.6x on short rows. Neither a plain start-byte scan nor
     // a start class filter counts: every pattern the matcher takes has the scan, and the matcher's
-    // rare candidate or block search replaces either.
+    // rare candidate replaces either.
     private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Regexp suffixRegexp, boolean longestMatch, Prog program)
     {
         // The DFA kind decides the start bytes only for a program that can match empty, and a
