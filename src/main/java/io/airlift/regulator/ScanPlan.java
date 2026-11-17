@@ -30,15 +30,12 @@ import java.util.Map;
 import java.util.Set;
 
 /// A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2,
-/// Java, and Rust frontends; no other frontend builds one. A Trino plan preserves valid UTF-8
-/// behavior, and malformed input has Trino's garbage-in, garbage-out contract. An RE2, Java, or Rust
-/// plan reads each non-ASCII character as the ordinary engine compiled for those languages does:
-/// a run of every non-ASCII character reads it as RE2's classes do (see
-/// [Utf8#re2CharacterWidth]), and a run of some non-ASCII characters by the exact encodings
+/// Java, and Rust frontends; no other frontend builds one. A plan reads each non-ASCII character
+/// as the ordinary engine does: a run of every non-ASCII character reads it as RE2's classes do
+/// (see [Utf8#re2CharacterWidth]), and a run of some non-ASCII characters by the exact encodings
 /// of its members (see [Utf8MemberTable]). The plan therefore agrees with that engine on every
-/// input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
-/// Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
-/// an `RE2_` operation, and a Trino plan never contains one.
+/// input, malformed UTF-8 included. The languages share the analysis and the executors; each run
+/// admitting non-ASCII characters, and each delimited capture, is an `RE2_` operation.
 final class ScanPlan
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(ScanPlan.class);
@@ -93,30 +90,18 @@ final class ScanPlan
         ASCII_FOLDED_LITERAL,
         OPTIONAL,
         ASCII_FOLDED_OPTIONAL,
-        DELIMITED_CAPTURE,
-        DOT_ALL_TAIL,
-        LINE_TAIL,
         END,
+        // A run of ASCII characters alone.
         RUN,
         SAVE,
         FORK,
-        // In an RE2, Java, or Rust plan, a RUN whose set holds every non-ASCII character.
+        // A RUN whose set holds every non-ASCII character.
         RE2_RUN,
-        // In an RE2, Java, or Rust plan, a RUN whose set holds some non-ASCII characters but not
-        // all. It reads them by the exact encodings the compiler gives the set.
+        // A RUN whose set holds some non-ASCII characters but not all. It reads them by the exact
+        // encodings the compiler gives the set.
         RE2_SET_RUN,
-        // A DELIMITED_CAPTURE of an RE2, Java, or Rust plan: a captured RE2_RUN of every
-        // character except an ASCII delimiter, and the delimiter.
+        // A captured RE2_RUN of every character except an ASCII delimiter, and the delimiter.
         RE2_DELIMITED_CAPTURE,
-    }
-
-    /// The frontend whose semantics a plan follows.
-    enum Language
-    {
-        TRINO,
-        RE2,
-        JAVA,
-        RUST,
     }
 
     private enum StartKind
@@ -184,14 +169,12 @@ final class ScanPlan
     // scan when failed candidates are dense. That density handoff, and ranged boolean find on
     // the ordinary engine, depend on the input's shape rather than on the work spent, so they
     // need engines that agree on every input, malformed UTF-8 included: a plan that consumes
-    // only ASCII bytes matches only ASCII bytes. An RE2, Java, or Rust plan agrees with the
-    // ordinary engine on every input but keeps this rule, so that every language routes each
-    // shape alike.
+    // only ASCII bytes matches only ASCII bytes. Every plan agrees with the ordinary engine on
+    // every input, so the rule no longer protects an answer and only selects the shapes that may
+    // take this route.
     // Every unanchored search, of any plan, also continues on the ordinary engine once its failed
-    // attempts exceed the work budget. Both engines agree on valid UTF-8; on malformed input that
-    // continuation may give the ordinary engine's answer. Every operation applies the same budget
-    // from the same search positions, so find, boundaries, captures, and count still report one
-    // match sequence.
+    // attempts exceed the work budget. Every operation applies the same budget from the same
+    // search positions, so find, boundaries, captures, and count report one match sequence.
     private final boolean allowsOrdinaryBooleanSearch;
     // Set when a boolean match of a start-anchored plan on a short input (see
     // CompiledPattern.MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) may run on the ordinary engine
@@ -200,15 +183,14 @@ final class ScanPlan
     // operations than the DFA makes transitions, and its faster run scans cannot repay them. A plan
     // with a boolean tail keeps the plan, since its attempt stops at the run's minimum; without one
     // the attempt reads as far as the DFA does. The input's length picks the engine, so as for the
-    // density handoff both engines must agree on every input: an RE2, Java, or Rust plan always
-    // does, and a Trino plan does when it consumes only ASCII bytes. Calls that report boundaries
-    // or captures always run the plan.
+    // density handoff both engines must agree on every input, as every plan does. Calls that
+    // report boundaries or captures always run the plan.
     private final boolean allowsOrdinaryShortBooleanMatch;
     // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
 
-    private ScanPlan(List<Step> steps, boolean finalLineEnd, boolean javaFinalEnd, boolean partialMatch, boolean anchoredStart, boolean re2Characters, int workBudgetBytes, ByteFrequencies byteFrequencies)
+    private ScanPlan(List<Step> steps, boolean finalLineEnd, boolean javaFinalEnd, boolean partialMatch, boolean anchoredStart, int workBudgetBytes, ByteFrequencies byteFrequencies)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
@@ -227,10 +209,10 @@ final class ScanPlan
         this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.allowsOrdinaryBooleanSearch = !anchoredStart && !isLiteralLeading() && consumesOnlyAscii(this.steps);
         boolean anchoredFork = anchoredStart && hasFork(this.steps);
-        this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails) && (re2Characters || consumesOnlyAscii(this.steps));
+        this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails);
         this.workBudgetBytes = workBudgetBytes;
         this.booleanPlan = (anchoredFork || !anchoredStart) && hasSave(this.steps)
-                ? new ScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
+                ? new ScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, workBudgetBytes, byteFrequencies)
                 : this;
     }
 
@@ -265,11 +247,11 @@ final class ScanPlan
         for (int index = steps.length - 1; index >= 0; index--) {
             Step step = steps[index];
             nullable[index] = switch (step.kind) {
-                case LITERAL, ASCII_FOLDED_LITERAL, DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> false;
+                case LITERAL, ASCII_FOLDED_LITERAL, RE2_DELIMITED_CAPTURE -> false;
                 case SAVE, OPTIONAL, ASCII_FOLDED_OPTIONAL -> nullable[index + 1];
                 case RUN, RE2_RUN, RE2_SET_RUN -> step.run.minimum() == 0 && nullable[index + 1];
                 case FORK -> nullable[index + 1] || nullable[step.branch.target()];
-                case DOT_ALL_TAIL, LINE_TAIL, END -> throw new IllegalStateException("partial scan contains " + step.kind);
+                case END -> throw new IllegalStateException("partial scan contains " + step.kind);
             };
             booleanTails[index] = isRun(step) && nullable[index + 1];
         }
@@ -308,13 +290,7 @@ final class ScanPlan
     ///
     /// Runs never give back bytes. A failed attempt at `p` matched the leading character
     /// and then the second run up to its end `e`, and failed with every retry exhausted;
-    /// each retry lies at or after `e`. In a Trino plan every byte in `(p, e)` is a
-    /// member of the second run: the leading character's other bytes are non-ASCII, and a Trino
-    /// set holding one non-ASCII byte holds all of them. An attempt at a start in `(p, e)`
-    /// therefore fails on the leading character, or matches a character that ends by `e`;
-    /// `e` holds an ASCII byte or is the end, and no decoded character spans an ASCII byte.
-    ///
-    /// A run of an RE2, Java, or Rust plan reads a non-ASCII character only from a lead byte,
+    /// each retry lies at or after `e`. A run reads a non-ASCII character only from a lead byte,
     /// whose value fixes its width, and may also stop at a sequence it rejects. A start in
     /// `(p, e)` inside a character that either run read is a continuation byte, on which the
     /// leading run fails. At any other start the second run read a character, and the leading run
@@ -322,9 +298,9 @@ final class ScanPlan
     /// second run then reads the same characters as before, which end at `e`, where the
     /// byte or sequence that stopped it remains.
     ///
-    /// In either kind of plan, an attempt that passes the leading run therefore sees the second
-    /// run stop at `e` again, so it reaches `e` with the same operations and retries,
-    /// differs only in saved positions, and fails as well.
+    /// An attempt that passes the leading run therefore sees the second run stop at `e` again,
+    /// so it reaches `e` with the same operations and retries, differs only in saved positions,
+    /// and fails as well.
     private static int findFailureResumeOperation(Step[] steps, int leadingOperation)
     {
         Step leading = steps[leadingOperation];
@@ -425,7 +401,7 @@ final class ScanPlan
                     }
                 }
                 case END, SAVE, FORK -> {}
-                case DELIMITED_CAPTURE, DOT_ALL_TAIL, LINE_TAIL, RE2_RUN, RE2_SET_RUN, RE2_DELIMITED_CAPTURE -> {
+                case RE2_RUN, RE2_SET_RUN, RE2_DELIMITED_CAPTURE -> {
                     return false;
                 }
             }
@@ -433,21 +409,15 @@ final class ScanPlan
         return true;
     }
 
-    /// Analyzes `expression` for `language`, with `byteFrequencies` choosing the probe byte of a
-    /// case-sensitive leading literal. The languages share one builder and admit the same
-    /// shapes, except that a Java end admits fewer runs before it and only RE2, Java, and Rust
-    /// admit sets of some non-ASCII characters. Only Java's default `$` and `\Z` build a Java
-    /// end. An RE2, Java, or Rust plan reads input by RE2's rules. A plan built with
-    /// `forceHandoff` hands every unanchored search to the ordinary engine before its first
-    /// attempt, so tests can run the continuation on every input.
-    static ScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a case-sensitive
+    /// leading literal. Every language shares one builder and admits the same shapes, except that
+    /// a Java end admits fewer runs before it. Only Java's default `$` and `\Z` build a Java
+    /// end. Every frontend compiles characters to the same byte ranges, so every plan reads input
+    /// by RE2's rules. A plan built with `forceHandoff` hands every unanchored search to the
+    /// ordinary engine before its first attempt, so tests can run the continuation on every
+    /// input.
+    static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        // The RE2, Java, and Rust frontends compile characters to the same byte ranges, so their
-        // plans read characters as RE2's classes do.
-        boolean re2Characters = switch (language) {
-            case TRINO -> false;
-            case RE2, JAVA, RUST -> true;
-        };
         StartKind startKind = startKind(expression, 0);
         if (startKind != StartKind.ANCHORED && startKind != StartKind.LITERAL &&
                 startKind != StartKind.SINGLE_CHARACTER_RUN && startKind != StartKind.UNBOUNDED_RUN) {
@@ -456,7 +426,7 @@ final class ScanPlan
         if (startKind == StartKind.UNBOUNDED_RUN && endKind(expression, 0) == EndKind.FINAL_LINE) {
             return null;
         }
-        return Builder.analyze(expression, captureCount, re2Characters, forceHandoff ? -1 : WORK_BUDGET_BYTES, caseFolding, byteFrequencies);
+        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES, caseFolding, byteFrequencies);
     }
 
     private static StartKind startKind(Regexp expression, int depth)
@@ -776,18 +746,6 @@ final class ScanPlan
                         cursor += step.literal.length;
                     }
                 }
-                case DELIMITED_CAPTURE -> {
-                    int stop = findByte(bytes, cursor, end, step.delimiter);
-                    if (stop < 0 || stop - cursor < step.minimum) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop + 1;
-                }
                 case RE2_DELIMITED_CAPTURE -> {
                     int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
                     if (stop < 0) {
@@ -799,19 +757,6 @@ final class ScanPlan
                         groups[step.slot + 1] = stop - base;
                     }
                     cursor = stop + 1;
-                }
-                case DOT_ALL_TAIL -> {
-                    return success(groups, end - base);
-                }
-                case LINE_TAIL -> {
-                    int newline = findByte(bytes, cursor, end, (byte) '\n');
-                    if (newline < 0) {
-                        return success(groups, end - base);
-                    }
-                    if (finalLineEnd && !fullMatch && newline == end - 1) {
-                        return success(groups, newline - base);
-                    }
-                    failed = true;
                 }
                 case END -> {
                     if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
@@ -954,18 +899,6 @@ final class ScanPlan
                         cursor += step.literal.length;
                     }
                 }
-                case DELIMITED_CAPTURE -> {
-                    int stop = findByte(bytes, cursor, end, step.delimiter);
-                    if (stop < 0 || stop - cursor < step.minimum) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop + 1;
-                }
                 case RE2_DELIMITED_CAPTURE -> {
                     int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
                     if (stop < 0) {
@@ -977,19 +910,6 @@ final class ScanPlan
                         groups[step.slot + 1] = stop - base;
                     }
                     cursor = stop + 1;
-                }
-                case DOT_ALL_TAIL -> {
-                    return success(groups, end - base);
-                }
-                case LINE_TAIL -> {
-                    int newline = findByte(bytes, cursor, end, (byte) '\n');
-                    if (newline < 0) {
-                        return success(groups, end - base);
-                    }
-                    if (finalLineEnd && !fullMatch && newline == end - 1) {
-                        return success(groups, newline - base);
-                    }
-                    failed = true;
                 }
                 case END -> {
                     if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
@@ -1081,7 +1001,7 @@ final class ScanPlan
         }
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; partial plans have no END or tail, which the constructor checks")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; partial plans have no END, which the constructor checks")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
@@ -1123,18 +1043,6 @@ final class ScanPlan
                             retries++;
                             cursor += step.literal.length;
                         }
-                    }
-                    case DELIMITED_CAPTURE -> {
-                        int stop = findByte(bytes, cursor, end, step.delimiter);
-                        if (stop < 0 || stop - cursor < step.minimum) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop + 1;
                     }
                     case RE2_DELIMITED_CAPTURE -> {
                         int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
@@ -1256,7 +1164,7 @@ final class ScanPlan
         }
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END or tail, which the constructor checks")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END, which the constructor checks")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchAsciiFoldedPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
@@ -1315,18 +1223,6 @@ final class ScanPlan
                             retries++;
                             cursor += step.literal.length;
                         }
-                    }
-                    case DELIMITED_CAPTURE -> {
-                        int stop = findByte(bytes, cursor, end, step.delimiter);
-                        if (stop < 0 || stop - cursor < step.minimum) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop + 1;
                     }
                     case RE2_DELIMITED_CAPTURE -> {
                         int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
@@ -1685,12 +1581,11 @@ final class ScanPlan
     ///
     /// A leading run with a positive minimum must match its first byte, and only zero-width
     /// saves precede it, so every skipped byte would fail its attempt without advancing further
-    /// than this scan. A Trino run that admits one non-ASCII byte admits all of them, as does a run
-    /// of every non-ASCII character in an RE2, Java, or Rust plan, so from a character boundary the
-    /// first member byte of valid UTF-8 is never a continuation byte. A set of some non-ASCII
-    /// characters has only lead bytes as member bytes above 0x7F, so it finds its candidates at
-    /// ASCII members and at lead bytes; the attempt then reads the character there by the set's
-    /// exact encodings.
+    /// than this scan. A run of every non-ASCII character admits every non-ASCII byte, so from a
+    /// character boundary the first member byte of valid UTF-8 is never a continuation byte. A
+    /// set of some non-ASCII characters has only lead bytes as member bytes above 0x7F, so it
+    /// finds its candidates at ASCII members and at lead bytes; the attempt then reads the
+    /// character there by the set's exact encodings.
     private static int nextCandidate(byte[] bytes, int candidate, int end, Step leading)
     {
         if (leading.kind == Kind.LITERAL) {
@@ -1799,13 +1694,12 @@ final class ScanPlan
         }
         if (isRun(leading)) {
             // A failed minimum-width check must not retry from a continuation byte of
-            // otherwise valid UTF-8. In a Trino plan, malformed input retains Trino's unspecified
-            // behavior. In an RE2, Java, or Rust plan this skips only the continuation bytes of a
-            // valid character, where RE2 starts no match, and advances one byte from the start of
-            // an invalid sequence. A leading set of some non-ASCII characters fails at a lead byte
-            // whose sequence it does not read, such as E2 E2 84 AA for RE2's (?i)k, and this
-            // advances to the next byte, the start of the Kelvin sign; past a valid character
-            // outside the set it skips only that character's continuation bytes.
+            // otherwise valid UTF-8. This skips only the continuation bytes of a valid character,
+            // where RE2 starts no match, and advances one byte from the start of an invalid
+            // sequence. A leading set of some non-ASCII characters fails at a lead byte whose
+            // sequence it does not read, such as E2 E2 84 AA for RE2's (?i)k, and this advances
+            // to the next byte, the start of the Kelvin sign; past a valid character outside the
+            // set it skips only that character's continuation bytes.
             return candidate + Utf8.decodedWidth(Utf8.decode(bytes, candidate, end));
         }
         return candidate + 1;
@@ -1815,8 +1709,8 @@ final class ScanPlan
     /// Without it, the leading operation's candidate scan found `matchStart`, which precedes
     /// `end`, and an attempt at an ASCII candidate skips a leading one-character run (see
     /// `asciiCandidateCompletesLeadingRun`). The unanchored executors run only plans without a
-    /// start anchor, which compaction never rewrites into delimited captures or tails.
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; delimited captures and tails occur only in start-anchored plans")
+    /// start anchor, which compaction never rewrites into delimited captures.
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; delimited captures occur only in start-anchored plans")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullAttempt, boolean fullMatch, int[] groups)
     {
@@ -1996,7 +1890,7 @@ final class ScanPlan
         }
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures and tails occur only in start-anchored plans")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures occur only in start-anchored plans")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     private long matchAsciiFoldedUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
     {
@@ -2272,7 +2166,7 @@ final class ScanPlan
     }
 
     /// Lowers an expression to scan operations. A start-anchored plan with at most three simple
-    /// captured runs and no forks is then compacted into delimited captures and tails.
+    /// captured runs and no forks is then compacted into delimited captures.
     private static final class Builder
     {
         private static final int MAX_EMIT_DEPTH = 16;
@@ -2284,7 +2178,6 @@ final class ScanPlan
         private static final int[] JAVA_LINE_TERMINATORS = {'\n', '\r', 0x0085, 0x2028, 0x2029};
 
         private final CaseFolding caseFolding;
-        private final boolean re2Characters;
         // Runs of one set share its member table.
         private final Map<CharClass, Utf8MemberTable> memberTables = new HashMap<>();
         private final List<Step> steps = new ArrayList<>();
@@ -2292,13 +2185,12 @@ final class ScanPlan
         private int optionals;
         private boolean hasVariableLiteralRepeat;
 
-        private Builder(CaseFolding caseFolding, boolean re2Characters)
+        private Builder(CaseFolding caseFolding)
         {
             this.caseFolding = caseFolding;
-            this.re2Characters = re2Characters;
         }
 
-        private static ScanPlan analyze(Regexp expression, int captureCount, boolean re2Characters, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+        private static ScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
         {
             if (captureCount > MAX_GROUPS) {
                 return null;
@@ -2315,17 +2207,12 @@ final class ScanPlan
             }
             boolean anchoredEnd = sequence.getLast().op() == RegexpOp.END_TEXT;
             boolean javaFinalEnd = anchoredEnd && (sequence.getLast().parseFlags() & Regexp.JAVA_FINAL_END) != 0;
-            // Only the Java frontend builds a Java end, and its plans compact as RE2 plans do,
-            // keeping a final run rather than a tail that would not check the end.
-            if (javaFinalEnd && !re2Characters) {
-                return null;
-            }
             int bodyStart = anchoredStart ? 1 : 0;
             int bodyEnd = anchoredEnd ? sequence.size() - 1 : sequence.size();
             if (bodyStart >= bodyEnd) {
                 return null;
             }
-            Builder builder = new Builder(caseFolding, re2Characters);
+            Builder builder = new Builder(caseFolding);
             for (int index = bodyStart; index < bodyEnd; index++) {
                 if (!builder.emit(sequence.get(index), 0)) {
                     return null;
@@ -2343,7 +2230,7 @@ final class ScanPlan
                 return null;
             }
             if (anchoredStart) {
-                builder.compact(captureCount, anchoredEnd);
+                builder.compact(captureCount);
             }
             // MAX_OPERATIONS counts executable operations. END may occupy the
             // following slot, which the retry stack explicitly supports.
@@ -2356,16 +2243,13 @@ final class ScanPlan
             if (!anchoredStart && (!builder.hasVariableRun() || !builder.canSearchUnanchored())) {
                 return null;
             }
-            if (re2Characters) {
-                builder.useRe2Runs();
-            }
+            builder.useRe2Runs();
             return new ScanPlan(
                     builder.steps,
                     anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
                     javaFinalEnd,
                     !anchoredEnd,
                     anchoredStart,
-                    re2Characters,
                     workBudgetBytes,
                     byteFrequencies);
         }
@@ -2391,9 +2275,9 @@ final class ScanPlan
 
         /// Returns whether an unanchored search may attempt a match at each candidate of the
         /// leading operation, past capture saves. That operation must be a literal or a single
-        /// character whose member bytes each start a character: an ASCII character or, in an
-        /// RE2, Java, or Rust plan, one of a set of some non-ASCII characters, whose member
-        /// bytes above 0x7F are the lead bytes of its members' encodings. A continuation byte
+        /// character whose member bytes each start a character: an ASCII character or one of a
+        /// set of some non-ASCII characters, whose member bytes above 0x7F are the lead bytes of
+        /// its members' encodings. A continuation byte
         /// is then never a candidate, every start the ordinary engine can match from is one,
         /// and a failed attempt skips only the continuation bytes of the character it read.
         /// A run of every non-ASCII character admits continuation bytes, so it cannot lead as a
@@ -2403,10 +2287,10 @@ final class ScanPlan
         /// since each candidate inside one run rescans the rest of it, so the ordinary engine
         /// keeps those patterns. The exception is an unbounded run of every byte except the
         /// one-byte case-sensitive literal that follows it: the run stops only at that byte,
-        /// which the literal then matches, or, in an RE2, Java, or Rust plan, at a sequence RE2
-        /// rejects, where the attempt fails and the search resumes at the run end. In those
-        /// plans a run that holds every ASCII byte except the literal, and some non-ASCII characters
-        /// but not all, also stops at a non-ASCII character outside it, which the literal fails on
+        /// which the literal then matches, or at a sequence RE2 rejects, where the attempt fails
+        /// and the search resumes at the run end. A run that holds every ASCII byte except the
+        /// literal, and some non-ASCII characters but not all, also stops at a non-ASCII
+        /// character outside it, which the literal fails on
         /// in the same way. That character's lead byte can also start members, so the search
         /// attempts once more there, and with a minimum of at most one, each stop costs at most two
         /// failed attempts and none rescans the run. A larger minimum adds failed attempts only
@@ -2583,7 +2467,7 @@ final class ScanPlan
 
         private boolean emitRun(Regexp expression)
         {
-            ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
+            ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, memberTables);
             if (run == null) {
                 return false;
             }
@@ -2648,7 +2532,7 @@ final class ScanPlan
             // A top-level optional character atom is lowered to one bounded run
             // without a retry checkpoint.
             if (depth == 0) {
-                ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
+                ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, memberTables);
                 if (run != null) {
                     steps.add(Step.run(0, run));
                     return true;
@@ -2758,11 +2642,9 @@ final class ScanPlan
             }
         }
 
-        /// Compacts captured runs and tails. An RE2, Java, or Rust plan converts a captured run
-        /// that ends at its delimiter into an RE2 delimited capture, which validates the characters
-        /// it skips, and keeps a final run as a run before END, since a tail would skip bytes
-        /// unchecked; each swap is one for one, so the operation limit admits the same shapes.
-        private void compact(int captureCount, boolean anchoredEnd)
+        /// Compacts captured runs. A captured run that ends at its delimiter becomes an RE2
+        /// delimited capture, which validates the characters it skips.
+        private void compact(int captureCount)
         {
             // Compaction applies only to plans with at most three simple captured
             // runs and no forks; richer plans keep the builder representation.
@@ -2785,7 +2667,7 @@ final class ScanPlan
                     int terminator = following.run.unboundedScanTerminator();
                     if (terminator >= 0 && terminator < ScanPlanRun.MATCHES_EVERY_BYTE && afterCapture != null && afterCapture.kind == Kind.LITERAL &&
                             (afterCapture.literal[0] & 0xFF) == terminator) {
-                        compacted.add(re2Characters ? Step.re2DelimitedCapture(terminator, step.slot, following.run) : Step.delimitedCapture(terminator, step.slot, following.run.minimum()));
+                        compacted.add(Step.re2DelimitedCapture(terminator, step.slot, following.run));
                         if (afterCapture.literal.length > 1) {
                             compacted.add(Step.literal(Arrays.copyOfRange(afterCapture.literal, 1, afterCapture.literal.length)));
                         }
@@ -2796,19 +2678,6 @@ final class ScanPlan
                         index += 2;
                     }
                     continue;
-                }
-                if (anchoredEnd && !re2Characters && step.kind == Kind.RUN && following != null) {
-                    int terminator = step.run.unboundedScanTerminator();
-                    if (step.run.minimum() == 0 && following.kind == Kind.END) {
-                        if (terminator == ScanPlanRun.MATCHES_EVERY_BYTE) {
-                            compacted.add(Step.dotAllTail());
-                            continue;
-                        }
-                        if (terminator == '\n') {
-                            compacted.add(Step.lineTail());
-                            continue;
-                        }
-                    }
                 }
                 compacted.add(step);
             }
@@ -2851,7 +2720,6 @@ final class ScanPlan
         final byte[] literal;
         private final byte delimiter;
         private final int slot;
-        private final int minimum;
         private final int width;
         private final int lastOffset;
         private final long first;
@@ -2862,75 +2730,60 @@ final class ScanPlan
 
         private static Step literal(byte[] bytes)
         {
-            return new Step(Kind.LITERAL, bytes, 0, 0, 0, null, null);
+            return new Step(Kind.LITERAL, bytes, 0, 0, null, null);
         }
 
         private static Step asciiFoldedLiteral(byte[] bytes)
         {
-            return new Step(Kind.ASCII_FOLDED_LITERAL, bytes, 0, 0, 0, null, null);
+            return new Step(Kind.ASCII_FOLDED_LITERAL, bytes, 0, 0, null, null);
         }
 
         private static Step optionalLiteral(byte[] bytes)
         {
-            return new Step(Kind.OPTIONAL, bytes, 0, 0, 0, null, null);
+            return new Step(Kind.OPTIONAL, bytes, 0, 0, null, null);
         }
 
         private static Step asciiFoldedOptional(byte[] bytes)
         {
-            return new Step(Kind.ASCII_FOLDED_OPTIONAL, bytes, 0, 0, 0, null, null);
-        }
-
-        private static Step delimitedCapture(int delimiter, int slot, int minimum)
-        {
-            return new Step(Kind.DELIMITED_CAPTURE, null, delimiter, slot, minimum, null, null);
+            return new Step(Kind.ASCII_FOLDED_OPTIONAL, bytes, 0, 0, null, null);
         }
 
         private static Step re2DelimitedCapture(int delimiter, int slot, ScanPlanRun run)
         {
-            return new Step(Kind.RE2_DELIMITED_CAPTURE, null, delimiter, slot, 0, run, null);
-        }
-
-        private static Step dotAllTail()
-        {
-            return new Step(Kind.DOT_ALL_TAIL, null, 0, 0, 0, null, null);
-        }
-
-        private static Step lineTail()
-        {
-            return new Step(Kind.LINE_TAIL, null, 0, 0, 0, null, null);
+            return new Step(Kind.RE2_DELIMITED_CAPTURE, null, delimiter, slot, run, null);
         }
 
         private static Step end()
         {
-            return new Step(Kind.END, null, 0, 0, 0, null, null);
+            return new Step(Kind.END, null, 0, 0, null, null);
         }
 
         private static Step run(int slot, ScanPlanRun run)
         {
-            return new Step(Kind.RUN, null, 0, slot, 0, run, null);
+            return new Step(Kind.RUN, null, 0, slot, run, null);
         }
 
         private static Step re2Run(int slot, ScanPlanRun run)
         {
-            return new Step(Kind.RE2_RUN, null, 0, slot, 0, run, null);
+            return new Step(Kind.RE2_RUN, null, 0, slot, run, null);
         }
 
         private static Step re2SetRun(int slot, ScanPlanRun run)
         {
-            return new Step(Kind.RE2_SET_RUN, null, 0, slot, 0, run, null);
+            return new Step(Kind.RE2_SET_RUN, null, 0, slot, run, null);
         }
 
         private static Step save(int slot)
         {
-            return new Step(Kind.SAVE, null, 0, slot, 0, null, null);
+            return new Step(Kind.SAVE, null, 0, slot, null, null);
         }
 
         private static Step fork(int target, int captureMask)
         {
-            return new Step(Kind.FORK, null, 0, 0, 0, null, new Branch(target, captureMask));
+            return new Step(Kind.FORK, null, 0, 0, null, new Branch(target, captureMask));
         }
 
-        private Step(Kind kind, byte[] literal, int delimiter, int slot, int minimum, ScanPlanRun run, Branch branch)
+        private Step(Kind kind, byte[] literal, int delimiter, int slot, ScanPlanRun run, Branch branch)
         {
             this.kind = kind;
             this.literal = literal;
@@ -2938,7 +2791,6 @@ final class ScanPlan
             this.branch = branch;
             this.delimiter = (byte) delimiter;
             this.slot = slot;
-            this.minimum = minimum;
             this.width = literal == null ? 0 : Math.min(Integer.highestOneBit(literal.length), Long.BYTES);
             this.lastOffset = literal == null ? 0 : literal.length - width;
             this.first = literal == null ? 0 : read(literal, 0, width);
@@ -2961,11 +2813,6 @@ final class ScanPlan
         int slot()
         {
             return slot;
-        }
-
-        int minimum()
-        {
-            return minimum;
         }
 
         int width()

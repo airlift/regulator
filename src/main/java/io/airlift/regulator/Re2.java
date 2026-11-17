@@ -395,7 +395,7 @@ public sealed class Re2
     private static Re2 compileParsed(Slice pattern, ParseResult parsed, int parseFlags, Options options, ScanPlanMode scanPlanMode)
     {
         CompileInputs inputs = new CompileInputs(pattern, parseFlags, options.longestMatch(), options.maxMemory(), options.byteFrequencies(), options.generateBytecode(), scanPlanMode);
-        Re2 compiled = create(build(pattern, parsed, parseFlags, inputs.maxMemory(), inputs.byteFrequencies(), inputs.longestMatch(), Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode), inputs);
+        Re2 compiled = create(build(pattern, parsed, parseFlags, inputs.maxMemory(), inputs.byteFrequencies(), inputs.longestMatch(), Compiler.Dialect.RE2, scanPlanMode), inputs);
         if (inputs.generateBytecode()) {
             Re2 generated = CompiledScanRe2.create(compiled);
             if (generated != null) {
@@ -645,7 +645,7 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return create(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode), new CompileInputs(pattern, flags, longestMatch, maxMemory, byteFrequencies, false, scanPlanMode));
+        return create(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, scanPlanMode), new CompileInputs(pattern, flags, longestMatch, maxMemory, byteFrequencies, false, scanPlanMode));
     }
 
     /// The caller passes a private snapshot that it never mutates.
@@ -663,7 +663,7 @@ public sealed class Re2
     /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies)
     {
-        return create(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, ScanPlan.Language.RE2, ScanPlanMode.DISABLED), new CompileInputs(pattern, flags, false, maxMemory, byteFrequencies, false, ScanPlanMode.DISABLED));
+        return create(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, Compiler.Dialect.RE2, ScanPlanMode.DISABLED), new CompileInputs(pattern, flags, false, maxMemory, byteFrequencies, false, ScanPlanMode.DISABLED));
     }
 
     private static boolean rewrite(DynamicSliceOutput out, Slice rewrite, Slice text, int[] groupOffsets, int captureSlotCount)

@@ -125,7 +125,6 @@ public class TestScanKernel
             "ScanPlanRun.highestMember",
             "ScanPlanRun.isInverted",
             "ScanPlanRun.lowestMember",
-            "ScanPlanRun.matchesNonAscii",
             "ScanPlanRun.maximum",
             "ScanPlanRun.members",
             "ScanPlanRun.minimum",
@@ -268,10 +267,10 @@ public class TestScanKernel
     /// Each pattern exercises one executor route of [#ROUTES] or one operation shape:
     /// literal widths on either side of each comparison, a literal longer than the inline
     /// comparisons, optional literals of each comparison, delimited captures with and without a
-    /// minimum, both tails, END with and without the final line terminator, capture-free boolean
-    /// tails, saves, forks that clear skipped captures, retries late in the plan, and the range,
-    /// byte-set, and nibble-table candidate scans of a leading run, on views and exact-length
-    /// copies. In this package, the Trino, RE2, Java and Rust generated classes and the helpers
+    /// minimum, runs of ASCII, every non-ASCII, and some non-ASCII characters, END with and
+    /// without the final line terminator, capture-free boolean tails, saves, forks that clear
+    /// skipped captures, retries late in the plan, and the range, byte-set, and nibble-table
+    /// candidate scans of a leading run, on views and exact-length copies. In this package, the Trino, RE2, Java and Rust generated classes and the helpers
     /// they call invoke only [#GENERATED_CODE_CALLS].
     @Test
     public void testEveryOperationShape()
@@ -324,7 +323,8 @@ public class TestScanKernel
                 "é([a-z]+)😀",
                 "[a-z]([a-z0-9]*)!",
                 "([^/]+)/([^!]+)!x",
-                "[?&]([^=]+)=");
+                "[?&]([^=]+)=",
+                "x([é😀]+)!");
         Set<String> kinds = new LinkedHashSet<>();
         Set<String> invoked = new LinkedHashSet<>();
         invoked.addAll(invokedMethods(classfile(ScanKernelSupport.class)));
@@ -343,7 +343,7 @@ public class TestScanKernel
             sources.addAll(sources.stream().map(source -> wrappedBuffer(source.getBytes())).toList());
             verifySameOperations(expression, generated, TrinoRegexp.compile(utf8Slice(expression)), sources, true);
         }
-        assertThat(kinds).contains("LITERAL", "OPTIONAL", "DELIMITED_CAPTURE", "DOT_ALL_TAIL", "LINE_TAIL", "END", "RUN", "SAVE", "FORK");
+        assertThat(kinds).contains("LITERAL", "OPTIONAL", "RE2_DELIMITED_CAPTURE", "END", "RUN", "RE2_RUN", "RE2_SET_RUN", "SAVE", "FORK");
         // The RE2 pattern class of each attempt kind, whose run steps read characters as RE2 does.
         // TestRe2ScanPlan compares their results with the ordinary engine.
         Set<String> re2Kinds = new LinkedHashSet<>();

@@ -457,14 +457,14 @@ public class TestCompilerAllocations
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform())).isNotNull();
+            assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), ByteFrequencies.uniform())).isNotNull();
         }
 
         int iterations = 10_000;
         assertAllocatesAtMostOnceCompiled("testScanPlanContinuationAnalysisUsesCompactStorage", MAXIMUM_WINDOW_RUNS, iterations, 8_000L * iterations - 1, () -> {
             long planCount = 0;
             for (int iteration = 0; iteration < iterations; iteration++) {
-                planCount += ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform()) != null ? 1 : 0;
+                planCount += ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), ByteFrequencies.uniform()) != null ? 1 : 0;
             }
             return planCount;
         });
@@ -478,7 +478,7 @@ public class TestCompilerAllocations
                 TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
         for (int iteration = 0; iteration < 10_000; iteration++) {
             for (ParseResult expression : expressions) {
-                assertThat(ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform()))
+                assertThat(ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding(), ByteFrequencies.uniform()))
                         .as(RegexpToString.toString(expression.regexp()))
                         .isNull();
             }
@@ -489,7 +489,7 @@ public class TestCompilerAllocations
             long rejectedCount = 0;
             for (int iteration = 0; iteration < 10_000; iteration++) {
                 for (ParseResult expression : expressions) {
-                    rejectedCount += ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform()) == null ? 1 : 0;
+                    rejectedCount += ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding(), ByteFrequencies.uniform()) == null ? 1 : 0;
                 }
             }
             return rejectedCount;

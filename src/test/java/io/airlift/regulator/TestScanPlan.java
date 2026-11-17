@@ -31,6 +31,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
 
+import static io.airlift.regulator.TestRe2ScanPlan.bytes;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TestingTrinoJoni.group;
 import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
@@ -109,6 +110,8 @@ public class TestScanPlan
     private record LiteralKernelCase(String expression, CompiledPattern.BooleanPlanKind find, String text, String group) {}
 
     private record MalformedView(String expression, String template, boolean scanPlan) {}
+
+    private record MalformedRow(String expression, String template, byte[] malformed, String match) {}
 
     @Test
     public void testPublicCallsBypassTheSemanticProgram()
@@ -215,7 +218,7 @@ public class TestScanPlan
         ScanPlan plan = analyze("^https?://([^/]+)");
         assertThat(plan).isNotNull();
         assertThat(plan.isPartialMatch()).isTrue();
-        assertThat(plan.operationsForDiagnostics()).isEqualTo("LITERAL,OPTIONAL,LITERAL,RUN");
+        assertThat(plan.operationsForDiagnostics()).isEqualTo("LITERAL,OPTIONAL,LITERAL,RE2_RUN");
     }
 
     @Test
@@ -264,8 +267,7 @@ public class TestScanPlan
         for (String expression : List.of(
                 "(?i)^K([a-h]+):$",
                 "(?i)^S([a-h]+):$",
-                "(?i)^é([a-h]+):$",
-                "(?i)^([a-z]+):$")) {
+                "(?i)^é([a-h]+):$")) {
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics())
                     .as(expression).isFalse();
             verifyAgainstJoni(expression, inputs, false);
@@ -370,9 +372,9 @@ public class TestScanPlan
         }
 
         assertThat(scanOperations("^(?:ab){2}([^/]+)/$"))
-                .isEqualTo("LITERAL,DELIMITED_CAPTURE,END");
+                .isEqualTo("LITERAL,RE2_DELIMITED_CAPTURE,END");
         assertThat(scanOperations("^(?:ab){2,4}([^/]+)/$"))
-                .isEqualTo("LITERAL,OPTIONAL,OPTIONAL,DELIMITED_CAPTURE,END");
+                .isEqualTo("LITERAL,OPTIONAL,OPTIONAL,RE2_DELIMITED_CAPTURE,END");
         assertThat(scanOperations("(?i)^(?:ab){2,4}([c-h]+):$"))
                 .isEqualTo("ASCII_FOLDED_LITERAL,ASCII_FOLDED_OPTIONAL,ASCII_FOLDED_OPTIONAL,RUN,LITERAL,END");
 
@@ -557,7 +559,7 @@ public class TestScanPlan
                 "missing",
                 "？wide=1"));
 
-        assertThat(scanOperations(expression)).isEqualTo("RUN,SAVE,RUN,SAVE,LITERAL");
+        assertThat(scanOperations(expression)).isEqualTo("RUN,SAVE,RE2_RUN,SAVE,LITERAL");
         TrinoRegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(expression)).matcher(utf8Slice("path?first=1&second=2"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group(1)).isEqualTo(utf8Slice("first"));
@@ -1044,9 +1046,9 @@ public class TestScanPlan
         // operations without the saves.
         String keyValue = "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)";
         ScanPlan plan = requireNonNull(analyze(keyValue));
-        assertThat(plan.operationsForDiagnostics()).isEqualTo("SAVE,RUN,RUN,SAVE,LITERAL,SAVE,RUN,SAVE");
+        assertThat(plan.operationsForDiagnostics()).isEqualTo("SAVE,RUN,RUN,SAVE,LITERAL,SAVE,RE2_RUN,SAVE");
         ScanPlan booleanPlan = plan.booleanPlan();
-        assertThat(booleanPlan.operationsForDiagnostics()).isEqualTo("RUN,RUN,LITERAL,RUN");
+        assertThat(booleanPlan.operationsForDiagnostics()).isEqualTo("RUN,RUN,LITERAL,RE2_RUN");
 
         // The boolean plan leads with a run of exactly one character. Passing fullAttempt=false
         // deliberately treats the '#' as an ASCII candidate the scan already checked against that
@@ -1124,7 +1126,7 @@ public class TestScanPlan
                 new PlanAdmission("([a-z][a-z]{2,})x", false),
                 new PlanAdmission("([a-z][a-z]*)(x|yz)", false),
                 new PlanAdmission("([a-z][a-z]*)x?=", false),
-                new PlanAdmission("(?i)([a-z][a-z0-9]*)=v", false),
+                new PlanAdmission("(?i)([a-z][a-z0-9]*)=v", true),
                 new PlanAdmission("([a-z][a-z]*)=([a-z]*)$", false));
         List<Slice> sources = randomSources(
                 191,
@@ -1170,13 +1172,11 @@ public class TestScanPlan
         for (String expression : List.of(URL, "(?s)" + URL)) {
             ScanPlan plan = analyze(expression);
             assertThat(plan).isNotNull();
-            assertThat(plan.operationsForDiagnostics()).isEqualTo(expression.startsWith("(?s)")
-                    ? "LITERAL,OPTIONAL,LITERAL,OPTIONAL,DELIMITED_CAPTURE,DOT_ALL_TAIL,END"
-                    : "LITERAL,OPTIONAL,LITERAL,OPTIONAL,DELIMITED_CAPTURE,LINE_TAIL,END");
+            assertThat(plan.operationsForDiagnostics()).isEqualTo("LITERAL,OPTIONAL,LITERAL,OPTIONAL,RE2_DELIMITED_CAPTURE,RE2_RUN,END");
         }
         ScanPlan plan = analyze("^[a-z]?:([^/]+)/$");
         assertThat(plan).isNotNull();
-        assertThat(plan.operationsForDiagnostics()).isEqualTo("RUN,LITERAL,DELIMITED_CAPTURE,END");
+        assertThat(plan.operationsForDiagnostics()).isEqualTo("RUN,LITERAL,RE2_DELIMITED_CAPTURE,END");
         verifyAgainstJoni("^([^/]+)/(?:([a-z]+):)?end$", List.of("host/value:end", "host/end", "host/value!end", "/end"));
     }
 
@@ -1357,7 +1357,7 @@ public class TestScanPlan
                 byte[] bytes = utf8Slice("!abc:" + "a".repeat(length) + "/?").getBytes();
                 bytes[bytes.length - 3] = (byte) badByte;
                 Slice source = wrappedBuffer(bytes, 1, bytes.length - 2);
-                verifyMalformedLifecycle(regexp, source, expression + " on " + HexFormat.of().formatHex(source.getBytes()));
+                verifyMalformedAgainstOrdinaryEngine(regexp, source, expression + " on " + HexFormat.of().formatHex(source.getBytes()));
                 TrinoRegexpMatcher reusable = regexp.matcher(source);
                 reusable.find();
                 assertThat(reusable.find()).isFalse();
@@ -1387,7 +1387,7 @@ public class TestScanPlan
         ScanPlan plan = analyze(expression);
         assertThat(plan).isNotNull();
         assertThat(plan.operationCount()).isEqualTo(10);
-        assertThat(plan.operationsForDiagnostics()).isEqualTo("FORK,SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE,LITERAL,END");
+        assertThat(plan.operationsForDiagnostics()).isEqualTo("FORK,SAVE,RUN,SAVE,LITERAL,SAVE,RE2_RUN,SAVE,LITERAL,END");
         verifyAgainstJoni(expression, List.of("key:value/end", "/end", "key:/end", "key:例え😀/end", "key:value/end\n"));
         verifyAgainstJoni("^x([a-z]?)a$", List.of("xa", "xaa", "xba", "xbba", "xa\n"));
         verifyAgainstJoni("^x([a-z]{0,1})a$", List.of("xa", "xaa", "xba", "xbba", "xa\n"));
@@ -1565,8 +1565,17 @@ public class TestScanPlan
             byte[] bytes = utf8Slice("!https://www.host:42/path?").getBytes();
             bytes[15] = (byte) value;
             Slice malformed = wrappedBuffer(bytes, 1, bytes.length - 2);
-            verifyMalformedLifecycle(regexp, malformed, expression + " on " + HexFormat.of().formatHex(malformed.getBytes()));
+            verifyMalformedAgainstOrdinaryEngine(regexp, malformed, expression + " on " + HexFormat.of().formatHex(malformed.getBytes()));
         }
+    }
+
+    @Test
+    public void testSetsOfSomeNonAsciiCharactersUsePlans()
+    {
+        // A class that holds some non-ASCII characters but not all, such as (?i)[a-z] with the
+        // long s and the Kelvin sign, reads them by their exact encodings.
+        verifyAgainstJoni("^([é😀]+):$", List.of("é😀é:", "éa:", "e:", "😀", ":", "é😀:\n"));
+        verifyAgainstJoni("(?i)^([a-z]+):$", List.of("abc:", "ſ\u212Ab:", "ABC:", "é:", ":"));
     }
 
     @Test
@@ -1585,7 +1594,6 @@ public class TestScanPlan
                 "^([a-z]+)(?:a)?/$",
                 "^([a-z]*)$",
                 "([a-z]*)",
-                "^([é😀]+):$",
                 "^([a-z]+?):$",
                 "^([a-z]{2,4}?):$",
                 "^([a-z]+)[a-z]+:$",
@@ -1659,15 +1667,15 @@ public class TestScanPlan
     public void testBooleanTailOperations()
     {
         // A RUN may end a capture-free partial match only when everything after it is nullable.
-        assertThat(booleanTails("abc(.*)")).isEqualTo("2:RUN");
-        assertThat(booleanTails("(abc).*")).isEqualTo("3:RUN");
-        assertThat(booleanTails("^abc.*")).isEqualTo("1:RUN");
-        assertThat(booleanTails("^https?://([^/]+)")).isEqualTo("3:RUN");
-        assertThat(booleanTails("(x)[^/]+")).isEqualTo("3:RUN");
-        assertThat(booleanTails("(?i)^ABC([^:]+)")).isEqualTo("1:RUN");
-        assertThat(booleanTails("(?i)content-type:(.*)")).isEqualTo("2:RUN");
+        assertThat(booleanTails("abc(.*)")).isEqualTo("2:RE2_RUN");
+        assertThat(booleanTails("(abc).*")).isEqualTo("3:RE2_RUN");
+        assertThat(booleanTails("^abc.*")).isEqualTo("1:RE2_RUN");
+        assertThat(booleanTails("^https?://([^/]+)")).isEqualTo("3:RE2_RUN");
+        assertThat(booleanTails("(x)[^/]+")).isEqualTo("3:RE2_RUN");
+        assertThat(booleanTails("(?i)^ABC([^:]+)")).isEqualTo("1:RE2_RUN");
+        assertThat(booleanTails("(?i)content-type:(.*)")).isEqualTo("2:RE2_RUN");
         assertThat(booleanTails("x([0-9]+)y?")).isEqualTo("2:RUN");
-        assertThat(booleanTails("^a([^/]{2,4})")).isEqualTo("1:RUN");
+        assertThat(booleanTails("^a([^/]{2,4})")).isEqualTo("1:RE2_RUN");
         // Both the optional body and its skip arm reach a nullable run.
         assertThat(scanOperations("^abc(?:(x+))?y*")).isEqualTo("LITERAL,FORK,SAVE,RUN,SAVE,RUN");
         assertThat(booleanTails("^abc(?:(x+))?y*")).isEqualTo("3:RUN,5:RUN");
@@ -1925,8 +1933,6 @@ public class TestScanPlan
     {
         int partialPlans = 0;
         int delimitedCaptures = 0;
-        int lineTails = 0;
-        int dotAllTails = 0;
         for (long seed : new long[] {139, 149, 157}) {
             Random random = new Random(seed);
             int eligible = 0;
@@ -1937,7 +1943,7 @@ public class TestScanPlan
                 String witness = "x" + generated.text() + "!";
 
                 // Without a trailing anchor the plan is partial. A final delimited capture and
-                // tail make the compacted operations reachable; that variant omits the outer
+                // run make the compacted operations reachable; that variant omits the outer
                 // capture because compaction requires every capture to hold a single run. Neither
                 // variant draws from the random sequence, so the end-anchored cases stay unchanged.
                 String prefix = "x" + generated.text();
@@ -1958,9 +1964,7 @@ public class TestScanPlan
                 String compacted = flags + "^x" + generated.pattern() + "([^/]*)/.*$";
                 if (TrinoRegexp.compile(utf8Slice(compacted)).re2().usesScanPlanForDiagnostics()) {
                     String operations = scanOperations(compacted);
-                    delimitedCaptures += operations.contains("DELIMITED_CAPTURE") ? 1 : 0;
-                    lineTails += operations.contains("LINE_TAIL") ? 1 : 0;
-                    dotAllTails += operations.contains("DOT_ALL_TAIL") ? 1 : 0;
+                    delimitedCaptures += operations.contains("RE2_DELIMITED_CAPTURE") ? 1 : 0;
                     verifyAgainstJoni(compacted, List.of(
                             prefix + "host/path",
                             prefix + "/",
@@ -2003,8 +2007,6 @@ public class TestScanPlan
         }
         assertThat(partialPlans).isGreaterThan(200);
         assertThat(delimitedCaptures).isGreaterThan(50);
-        assertThat(lineTails).isGreaterThan(20);
-        assertThat(dotAllTails).isGreaterThan(20);
     }
 
     @Test
@@ -2107,8 +2109,10 @@ public class TestScanPlan
     record PatternWitness(String pattern, String text) {}
 
     @Test
-    public void testMalformedInputDoesNotRequireRe2Agreement()
+    public void testMalformedInputFollowsOrdinaryEngine()
     {
+        // Each route gives the ordinary engine's answer on malformed input, so a dot-all tail
+        // rejects a malformed byte as RE2 and Java do.
         String anchoredExpression = "(?s)" + URL;
         String unanchoredExpression = "(?s)https?://([^/]+)/.*$";
         String foldedExpression = "(?i)content-type:([^;]+);";
@@ -2120,27 +2124,16 @@ public class TestScanPlan
             bytes[bytes.length - 2] = (byte) badByte;
             Slice input = wrappedBuffer(bytes, 1, bytes.length - 2);
             String hex = HexFormat.of().formatHex(input.getBytes());
-            // No exact malformed-input result is promised. Still check that each route's
-            // operations agree with each other and stay within the view, and keep RE2's anchored
-            // UTF-8 behavior unchanged.
-            verifyMalformedLifecycle(regexp, input, anchoredExpression + " on " + hex);
-            TrinoRegexpMatcher matcher = regexp.matcher(input);
-            matcher.find();
-            assertThat(matcher.find()).isFalse();
-            verifyMalformedLifecycle(unanchored, input, unanchoredExpression + " on " + hex);
-            TrinoRegexpMatcher unanchoredMatcher = unanchored.matcher(input);
-            unanchoredMatcher.find();
-            assertThat(unanchoredMatcher.find()).isFalse();
+            verifyMalformedAgainstOrdinaryEngine(regexp, input, anchoredExpression + " on " + hex);
+            verifyMalformedAgainstOrdinaryEngine(unanchored, input, unanchoredExpression + " on " + hex);
+            assertThat(regexp.contains(input)).as(hex).isFalse();
+            assertThat(Re2.compile(utf8Slice(anchoredExpression)).find(input)).as(hex).isFalse();
+            assertThat(JavaRegexp.compile(utf8Slice(anchoredExpression)).find(input)).as(hex).isFalse();
 
             byte[] foldedBytes = utf8Slice("!CONTENT-TYPE:value;?").getBytes();
             foldedBytes[foldedBytes.length - 3] = (byte) badByte;
             Slice foldedInput = wrappedBuffer(foldedBytes, 1, foldedBytes.length - 2);
-            verifyMalformedLifecycle(folded, foldedInput, foldedExpression + " on " + HexFormat.of().formatHex(foldedInput.getBytes()));
-            TrinoRegexpMatcher foldedMatcher = folded.matcher(foldedInput);
-            foldedMatcher.find();
-            assertThat(foldedMatcher.find()).isFalse();
-            assertThat(Re2.compile(utf8Slice(anchoredExpression)).find(input)).isFalse();
-            assertThat(JavaRegexp.compile(utf8Slice(anchoredExpression)).find(input)).isFalse();
+            verifyMalformedAgainstOrdinaryEngine(folded, foldedInput, foldedExpression + " on " + HexFormat.of().formatHex(foldedInput.getBytes()));
         }
     }
 
@@ -2177,46 +2170,25 @@ public class TestScanPlan
                     System.arraycopy(tail, 0, bytes, prefix.length, tail.length);
                     System.arraycopy(trailing, 0, bytes, prefix.length + tail.length, trailing.length);
                     for (Slice input : List.of(wrappedBuffer(bytes, 1, bytes.length - 1), wrappedBuffer(bytes, 1, bytes.length - 1 - trailing.length))) {
-                        verifyMalformedLifecycle(regexp, input, view.expression() + " on " + HexFormat.of().formatHex(input.getBytes()));
+                        verifyMalformedAgainstOrdinaryEngine(regexp, input, view.expression() + " on " + HexFormat.of().formatHex(input.getBytes()));
                     }
                 }
             }
         }
     }
 
-    private static void verifyMalformedLifecycle(TrinoRegexp regexp, Slice input, String description)
+    /// Compares every public operation of `regexp` on malformed `input` with the matches of the
+    /// same pattern compiled without its plan, which every route gives on malformed UTF-8.
+    private static void verifyMalformedAgainstOrdinaryEngine(TrinoRegexp regexp, Slice input, String description)
     {
-        // No exact malformed-input result is promised. The scan plan's find operations must
-        // agree with each other, stay within the view, and terminate.
-        boolean found = regexp.contains(input);
-        TrinoRegexpMatcher matcher = regexp.matcher(input);
-        assertThat(matcher.find()).as(description).isEqualTo(found);
-        if (found) {
-            for (int group = 0; group <= matcher.groupCount(); group++) {
-                assertThat(matcher.start(group)).as(description).isBetween(-1, input.length());
-                assertThat(matcher.end(group)).as(description).isBetween(-1, input.length());
-                assertThat(regexp.extract(input, group)).as(description).isEqualTo(matcher.group(group));
-            }
-        }
-        else {
-            assertThat(regexp.extract(input, 1)).as(description).isNull();
-        }
-        long matches = found ? 1 : 0;
-        while (matcher.find()) {
-            matches++;
-            assertThat(matches).as(description).isLessThanOrEqualTo(input.length() + 1L);
-        }
-        assertThat(regexp.count(input)).as(description).isEqualTo(matches);
-        assertThat(regexp.extractAll(input, 1)).as(description).hasSize((int) matches);
-        assertThat(regexp.split(input)).as(description).hasSize((int) matches + 1);
-        regexp.replace(input, utf8Slice("$1"));
+        TrinoRegexp ordinary = TrinoRegexp.compileWithoutScanPlanForTesting(regexp.pattern());
+        TestingTrinoJoni.verifyOperations(List.of(description), regexp, source -> matcherMatches(ordinary, source), List.of(input));
     }
 
     @Test
     public void testUnanchoredCountAgreesWithFindOnMalformedInput()
     {
-        // No malformed-input result is promised, but count must reach the same plan as find.
-        // A member byte follows each malformed sequence, so Joni's lead-byte widths stay in the run.
+        // Count reaches the same plan as find, and both give the ordinary engine's answer.
         List<ExpressionTemplates> cases = List.of(
                 new ExpressionTemplates("https?://([^/]+)/", List.of("x https://ho%sst/ y", "http://a/ https://b%sc/ http://d/")),
                 new ExpressionTemplates("([^/]+)/", List.of("ho%sst/ y", "%sa/b%sc/")),
@@ -2228,7 +2200,7 @@ public class TestScanPlan
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             assertThat(regexp.re2().usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(regexp.re2().usesPartialScanPlanForDiagnostics()).as(expression).isFalse();
-            Regex oracle = joniPattern(expression);
+            TrinoRegexp ordinary = TrinoRegexp.compileWithoutScanPlanForTesting(utf8Slice(expression));
             for (String template : entry.templates()) {
                 for (byte[] bytes : MALFORMED_SEQUENCES) {
                     Slice input = malformedText(template, bytes);
@@ -2238,11 +2210,52 @@ public class TestScanPlan
                     while (matcher.find()) {
                         found++;
                     }
-                    assertThat(found).as(description).isPositive();
                     assertThat(regexp.count(input)).as(description).isEqualTo(found);
-                    assertThat(regexp.count(input)).as(description).isEqualTo(joniMatches(oracle, input).size());
+                    assertThat(found).as(description).isEqualTo(matcherMatches(ordinary, input).size());
                 }
             }
+        }
+    }
+
+    @Test
+    public void testPlansMatchTheOrdinaryEngineOnMalformedInput()
+    {
+        // Malformed UTF-8 follows the ordinary engine on every route. Classes use the ordinary
+        // engine's byte ranges, even a negated class or a range of every non-ASCII character. The
+        // rejected sequences below stop a run, and an unanchored search resumes after them.
+        List<MalformedRow> rows = List.of(
+                new MalformedRow("https?://([^/]+)/", "x https://ho%sst/ y", bytes(0xFF), null),
+                new MalformedRow("https?://([^/]+)/", "x https://ho%sst/ y", bytes(0xC3), null),
+                new MalformedRow("svc1://(?:www\\.)?([^/]+)/", "svc1://%s1abc/", bytes(0xC3), null),
+                new MalformedRow("a([^:]+):", "za%sb: y", bytes(0xE2, 0x82), null),
+                new MalformedRow("([^/]+)/", "ho%sst/", bytes(0xFF), "st/"),
+                new MalformedRow("(?i)x([^z]+)zq", "Xa%srXbZq", bytes(0x80), "XbZq"),
+                new MalformedRow("x([^z]+)zq", "xa%srxbzq", bytes(0x80), "xbzq"),
+                new MalformedRow("x([\\x{80}-\\x{10FFFF}]+)y", "x%sy", bytes(0x80), null),
+                new MalformedRow("x([[:^ascii:]]+)y", "x%sy", bytes(0xFF), null),
+                // A delimited capture, a dot-all tail, and a line tail of a start-anchored plan.
+                new MalformedRow("^x([^/]+)/", "xa%sb/", bytes(0xFF), null),
+                new MalformedRow("(?s)^x([^/]+)/.*$", "xab/c%sd", bytes(0xFF), null),
+                new MalformedRow("^x([^/]+)/.*$", "xab/c%sd", bytes(0xFF), null));
+        TrinoRegexp.Options generating = TrinoRegexp.Options.defaults().setGenerateBytecode(true);
+        for (MalformedRow row : rows) {
+            Slice pattern = utf8Slice(row.expression());
+            Slice input = malformedText(row.template(), row.malformed());
+            String description = row.expression();
+            TrinoRegexp ordinary = TrinoRegexp.compileWithoutScanPlanForTesting(pattern);
+            assertThat(ordinary.extract(input, 0)).as("%s on %s", description, HexFormat.of().formatHex(input.getBytes())).isEqualTo(row.match() == null ? null : utf8Slice(row.match()));
+            List<int[]> expected = matcherMatches(ordinary, input);
+            verifyOperations(description, TrinoRegexp.compile(pattern), _ -> expected, List.of(input), true);
+            verifyOperations(description + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern), _ -> expected, List.of(input), true);
+            // ASCII-folded plans have no generated class, so the folded row's generated
+            // compiles keep the interpreted plan.
+            boolean generates = !row.expression().startsWith("(?i)");
+            TrinoRegexp generated = TrinoRegexp.compile(pattern, generating);
+            assertThat(generated.usesGeneratedBytecode()).as(description).isEqualTo(generates);
+            verifyOperations(description + " generated", generated, _ -> expected, List.of(input), true);
+            TrinoRegexp generatedHandoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, generating);
+            assertThat(generatedHandoff.usesGeneratedBytecode()).as(description).isEqualTo(generates);
+            verifyOperations(description + " generated after handoff", generatedHandoff, _ -> expected, List.of(input), true);
         }
     }
 
@@ -2282,15 +2295,14 @@ public class TestScanPlan
     public void testOrdinaryShortBooleanMatchRoutes()
     {
         // Boolean find and count of a start-anchored plan with a fork and no boolean tail run on
-        // the ordinary engine's DFA over short inputs when both engines agree on every input:
-        // always for RE2, and for Trino when the plan consumes only ASCII bytes. A Trino
-        // final-line end, which the DFA cannot evaluate, keeps the plan.
+        // the ordinary engine's DFA over short inputs, since both engines agree on every input. A
+        // Trino final-line end, which the DFA cannot evaluate, keeps the plan.
         List<ShortBooleanMatchRoute> routes = List.of(
                 new ShortBooleanMatchRoute("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$", true, false),
                 new ShortBooleanMatchRoute("^https?://(www\\.)?([^/:]+)(?::([0-9]{1,5}))?/.*$", true, false),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/$", true, false),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/\\z", true, true),
-                new ShortBooleanMatchRoute("^(a)?(b)?abcd([^/]+)/\\z", true, false),
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([^/]+)/\\z", true, true),
                 new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/\\z", true, true),
                 new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/", true, true),
                 new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/", true, true),
@@ -2383,9 +2395,7 @@ public class TestScanPlan
     @Test
     public void testOrdinaryUnanchoredBooleanSearchAgreesOnMalformedInput()
     {
-        // No malformed-input result is promised, but every call must give the same answer.
-        // Plans that admit malformed bytes must keep their own boolean search: the ordinary
-        // engine rejects the byte before '/' in "%s/", which the plan's [^/] run accepts.
+        // Every call must give the same answer on malformed input.
         List<ExpressionTemplates> cases = List.of(
                 new ExpressionTemplates("\\d(\\d*)zz", List.of("%s12zz", "1%s2zz", "12%szz", "12z%sz", "%szz 7zz%s", "1%s")),
                 new ExpressionTemplates("[0-9]([0-9]*)a", List.of("%s9a", "9%sa", "x99%s1a", "99a%s")),
@@ -2572,10 +2582,9 @@ public class TestScanPlan
     @Test
     public void testOperationsAgreeOnMalformedInputAfterHandoff()
     {
-        // Past a handoff, malformed input may get the ordinary engine's answer instead of the
-        // plan's. Every operation searches through the same budgeted loop, in both the ordinary
-        // and the ASCII-folded executor, so all of them must still report the matcher's match
-        // sequence.
+        // Every operation searches through the same budgeted loop, in both the ordinary and the
+        // ASCII-folded executor, so all of them report the ordinary engine's match sequence on
+        // malformed input past a handoff.
         List<ExpressionTemplates> cases = List.of(
                 new ExpressionTemplates("([^/]+)/([^!]+)!x", List.of(
                         "a/".repeat(1500) + "!y%s!x/b/c!x",
@@ -2595,11 +2604,12 @@ public class TestScanPlan
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             assertThat(regexp.re2().usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(expression).isFalse();
             assertThat(regexp.re2().usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
+            TrinoRegexp ordinary = TrinoRegexp.compileWithoutScanPlanForTesting(utf8Slice(expression));
             for (String template : entry.templates()) {
                 for (byte[] bytes : MALFORMED_SEQUENCES) {
                     Slice input = malformedText(template, bytes);
                     String description = expression + " on " + HexFormat.of().formatHex(bytes) + " in " + template.substring(0, 12);
-                    verifyOperations(description, regexp, source -> matcherMatches(regexp, source), List.of(input), true);
+                    verifyOperations(description, regexp, source -> matcherMatches(ordinary, source), List.of(input), true);
                     assertThat(regexp.re2().find(input, 0, input.length())).as(description).isEqualTo(regexp.contains(input));
                 }
             }
@@ -2685,7 +2695,7 @@ public class TestScanPlan
     private static ScanPlan analyze(String expression, ByteFrequencies frequencies)
     {
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), frequencies);
+        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), frequencies);
     }
 
     /// Returns 400 views, each of up to 23 symbols drawn from `text` and then
@@ -2979,10 +2989,9 @@ public class TestScanPlan
         verifySourcesAgainstJoni(expression, sources, scanPlan);
     }
 
-    /// Compares every public operation with Joni. On valid UTF-8 the operations are compared
-    /// again with a plan that continues every unanchored search on the ordinary engine before its
-    /// first attempt. Malformed sources are excluded from that run: past a handoff they may get
-    /// the ordinary engine's answer rather than the plan's.
+    /// Compares every public operation with Joni on valid UTF-8 and with the ordinary engine on
+    /// malformed UTF-8, and again with a plan that continues every unanchored search on the
+    /// ordinary engine before its first attempt.
     private static void verifySourcesAgainstJoni(String expression, List<Slice> sources, boolean scanPlan)
     {
         verifySourcesAgainstJoni(expression, TrinoRegexp.Options.defaults(), sources, scanPlan);
@@ -2992,11 +3001,10 @@ public class TestScanPlan
     {
         Slice pattern = utf8Slice(expression);
         Regex oracle = joniPattern(expression);
-        verifyOperations(expression, TrinoRegexp.compile(pattern, options), source -> joniMatches(oracle, source), sources, scanPlan);
-        List<Slice> validSources = sources.stream()
-                .filter(source -> Utf8.firstInvalidOffset(source) < 0)
-                .toList();
-        verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), source -> joniMatches(oracle, source), validSources, scanPlan);
+        TrinoRegexp ordinary = TrinoRegexp.compileWithoutScanPlanForTesting(pattern, options);
+        Function<Slice, List<int[]>> expected = source -> Utf8.firstInvalidOffset(source) < 0 ? joniMatches(oracle, source) : matcherMatches(ordinary, source);
+        verifyOperations(expression, TrinoRegexp.compile(pattern, options), expected, sources, scanPlan);
+        verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), expected, sources, scanPlan);
     }
 
     private static void verifyOperations(String description, TrinoRegexp regexp, Function<Slice, List<int[]>> expectedMatches, List<Slice> sources, boolean scanPlan)

@@ -481,11 +481,11 @@ abstract sealed class CompiledPattern
     }
 
     /// Analyzes a parsed pattern: an RE2 pattern compiled from its parse result, or a pattern that
-    /// the Java or Rust frontend parsed. A Java pattern compiles in the Java dialect, a Rust pattern
-    /// in the Rust dialect, and an RE2 pattern in the RE2 dialect. The caller passes a private
-    /// snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an eligible
-    /// shape is built, and how it runs.
-    static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlan.Language language, ScanPlanMode scanPlanMode)
+    /// the Java or Rust frontend parsed, compiled in `compilerDialect`: a Java pattern in the Java
+    /// dialect, a Rust pattern in the Rust dialect, and an RE2 pattern in the RE2 dialect. The
+    /// caller passes a private snapshot that it never mutates. `scanPlanMode` decides whether the
+    /// scan plan of an eligible shape is built, and how it runs.
+    static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, Compiler.Dialect compilerDialect, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -493,12 +493,7 @@ abstract sealed class CompiledPattern
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        Compiler.Dialect compilerDialect = switch (language) {
-            case JAVA -> Compiler.Dialect.JAVA;
-            case RUST -> Compiler.Dialect.RUST;
-            default -> Compiler.Dialect.RE2;
-        };
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, compilerDialect, language, scanPlanMode);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, compilerDialect, scanPlanMode);
     }
 
     /// Analyzes a pattern parsed by the Trino frontend. The caller passes a private snapshot that
@@ -533,7 +528,7 @@ abstract sealed class CompiledPattern
             if (fixedWidthMatcher.yieldsToEngineScans() ||
                     innerLiteralPrecedesFixedWidth(InnerLiteralSearch.predictMinimumLiteralLength(normalizedRegexp, caseFolding, byteFrequencies))) {
                 try {
-                    Analysis analysis = buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+                    Analysis analysis = buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, scanPlanMode);
                     // The pattern takes the route without a program where the program fits but
                     // no route of it precedes the matcher. That route reserves the matcher's
                     // memory from the forward budget. A matcher that scans a rare candidate or
@@ -569,7 +564,7 @@ abstract sealed class CompiledPattern
                 return analysis;
             }
         }
-        return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+        return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, scanPlanMode);
     }
 
     /// Returns the analysis of a Trino fixed-width pattern that answers every operation from
@@ -655,11 +650,10 @@ abstract sealed class CompiledPattern
             ByteFrequencies byteFrequencies,
             boolean longestMatch,
             Compiler.Dialect compilerDialect,
-            ScanPlan.Language scanPlanLanguage,
             ScanPlanMode scanPlanMode)
     {
         try {
-            return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, compilerDialect, scanPlanLanguage, scanPlanMode);
+            return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, compilerDialect, scanPlanMode);
         }
         catch (RegexpCompileMemoryLimitException e) {
             // A route added here needs a required budget beside requiredLiteralSetWithoutProgramBudget.
@@ -881,7 +875,6 @@ abstract sealed class CompiledPattern
             ByteFrequencies byteFrequencies,
             boolean longestMatch,
             Compiler.Dialect compilerDialect,
-            ScanPlan.Language scanPlanLanguage,
             ScanPlanMode scanPlanMode)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
@@ -989,10 +982,10 @@ abstract sealed class CompiledPattern
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 requiredPrefix,
                 semanticProgram);
-        // The frontend chooses the plan's language and mode. A plan reports leftmost-first
-        // matches, so a longest-match pattern has none.
+        // The frontend chooses the plan's mode. A plan reports leftmost-first matches, so a
+        // longest-match pattern has none.
         ScanPlan scanPlan = scanPlanMode != ScanPlanMode.DISABLED && !longestMatch && !expressionAnalysis.canMatchEmpty()
-                ? ScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanLanguage, scanPlanMode == ScanPlanMode.FORCE_HANDOFF, caseFolding, byteFrequencies)
+                ? ScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanMode == ScanPlanMode.FORCE_HANDOFF, caseFolding, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
         // unanchored plan yields to one, which keeps the lowered final-line route.
@@ -4014,9 +4007,7 @@ abstract sealed class CompiledPattern
     /// one, which matches at most once, the capture-free boolean attempt of [#findOnScanPlan],
     /// so a plan with capture saves runs its save-free plan. A start-anchored plan that
     /// `singleAttemptCount` does not cover takes the ordinary count. An unanchored count stays on
-    /// the plan so that count agrees with find: a Trino plan gives malformed UTF-8 bytes the
-    /// membership find gives them, which the DFA count would reject, and an RE2, Java, or Rust
-    /// plan agrees with the ordinary engine.
+    /// the plan, as find does.
     final long countOnScanPlan(Slice text, boolean ordinaryShortBooleanMatch, boolean singleAttemptCount)
     {
         // ScanKernelGenerator.definePatternCount emits this route for a generated class; keep in

@@ -443,8 +443,7 @@ final class ScanKernelGenerator
             boolean supported = switch (step.kind()) {
                 case LITERAL, OPTIONAL, RUN, RE2_RUN, RE2_SET_RUN, SAVE, FORK -> true;
                 case END -> attempt != Attempt.PARTIAL;
-                case DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
-                case DOT_ALL_TAIL, LINE_TAIL -> attempt == Attempt.END_ANCHORED;
+                case RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
                 case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
             };
             if (!supported) {
@@ -456,8 +455,8 @@ final class ScanKernelGenerator
             if (attempt == Attempt.END_ANCHORED && index == operations - 1) {
                 // The end-anchored interpreter has no end-of-operations check; its last
                 // operation always returns or fails.
-                if (step.kind() != Kind.END && step.kind() != Kind.DOT_ALL_TAIL && step.kind() != Kind.LINE_TAIL) {
-                    throw new IllegalArgumentException("end-anchored scan plan does not end with END or a tail");
+                if (step.kind() != Kind.END) {
+                    throw new IllegalArgumentException("end-anchored scan plan does not end with END");
                 }
                 if (step.branch() != null) {
                     throw new IllegalArgumentException("end-anchored scan plan ends with a fork");
@@ -563,15 +562,6 @@ final class ScanKernelGenerator
                     emitPush(index);
                     body.append(cursor.set(cursor.add(constantInt(step.literal.length))));
                 }
-                case DELIMITED_CAPTURE -> {
-                    body.append(stop.set(findByte(step.delimiter())));
-                    body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
-                    if (step.minimum() > 0) {
-                        body.append(ifThenJump(stop.subtract(cursor).lessThan(constantInt(step.minimum())), fail));
-                    }
-                    emitCapture(step.slot());
-                    body.append(cursor.set(stop.add(constantInt(1))));
-                }
                 case RE2_DELIMITED_CAPTURE -> {
                     // The run validates the characters it skips, and the minimum counts characters.
                     BytecodeExpression run = boundConstant(step.run(), ScanPlanRun.class);
@@ -580,21 +570,6 @@ final class ScanKernelGenerator
                     body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
                     emitCapture(step.slot());
                     body.append(cursor.set(stop.add(constantInt(1))));
-                }
-                case DOT_ALL_TAIL -> body.append(anchoredSuccess(end.subtract(base)));
-                case LINE_TAIL -> {
-                    body.append(stop.set(findByte((byte) '\n')));
-                    body.append(IfStatement.builder()
-                            .condition(stop.lessThan(constantInt(0)))
-                            .then(anchoredSuccess(end.subtract(base)))
-                            .build());
-                    if (plan.hasFinalLineEnd()) {
-                        body.append(IfStatement.builder()
-                                .condition(fullMatch.not().and(stop.equal(end.subtract(constantInt(1)))))
-                                .then(anchoredSuccess(stop.subtract(base)))
-                                .build());
-                    }
-                    body.jump(fail);
                 }
                 case END -> {
                     BytecodeExpression atEnd = cursor.equal(end);
@@ -724,11 +699,6 @@ final class ScanKernelGenerator
             BytecodeExpression last = wide ? constantLong(step.last()) : constantInt((int) step.last());
             BytecodeExpression lastRead = invokeStatic(ScanKernelSupport.class, read, type, bytes, lastPosition);
             return firstRead.bitwiseXor(first).bitwiseOr(lastRead.bitwiseXor(last)).notEqual(zero);
-        }
-
-        private BytecodeExpression findByte(byte target)
-        {
-            return invokeStatic(ScanKernelSupport.class, "findByte", int.class, bytes, cursor, end, constantInt(target).cast(byte.class));
         }
 
         private void emitPush(int index)

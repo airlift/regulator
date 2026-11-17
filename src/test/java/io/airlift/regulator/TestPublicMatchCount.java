@@ -265,9 +265,8 @@ public class TestPublicMatchCount
                     assertSpanSearch(RustRegexp.compile(utf8Slice(spanExpression), rustOptions), text, expected);
                 }
             }
-            // Trino's count checks only the span maximum, as its plans read a lone malformed byte
-            // as one character. Without captures, the matcher's find of ^(?:aaa|aa)$ takes the
-            // general route.
+            // Trino's count checks only the span maximum. Without captures, the matcher's find of
+            // ^(?:aaa|aa)$ takes the general route.
             TrinoRegexp.Options trinoOptions = TrinoRegexp.Options.defaults().setGenerateBytecode(generate);
             for (String trinoExpression : List.of(expression, "^(?:aaa|aa)$", planExpression)) {
                 for (String text : List.of("aaa\n", "aaaa\n", "aaa\r\n")) {
@@ -369,8 +368,8 @@ public class TestPublicMatchCount
             assertThat(re2.count(input)).isEqualTo(expected);
         }
 
-        // Trino's start-anchored plans read a lone malformed byte as one character, generated or
-        // not, so its count can match a span shorter than the pattern's shortest valid encoding.
+        // Trino's start-anchored plans, generated or not, read a lone malformed byte as the
+        // ordinary engine does, as no character, and count agrees with the matcher.
         Slice malformed = wrappedBuffer(new byte[] {(byte) 0xFF});
         for (boolean generate : List.of(false, true)) {
             TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("^[^\\x00-\\x7f]$"), TrinoRegexp.Options.defaults().setGenerateBytecode(generate));
@@ -379,7 +378,7 @@ public class TestPublicMatchCount
             while (matcher.find()) {
                 expected++;
             }
-            assertThat(expected).as("generated %s", generate).isEqualTo(1);
+            assertThat(expected).as("generated %s", generate).isZero();
             assertThat(trino.count(malformed)).as("generated %s", generate).isEqualTo(expected).isEqualTo(trino.contains(malformed) ? 1 : 0);
         }
     }
