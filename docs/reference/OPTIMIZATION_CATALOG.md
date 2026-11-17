@@ -333,7 +333,11 @@ so the automata run only where a match can be.
   byte, the probe byte, and checks the other byte per candidate. The vector
   loop only tests whether any lane holds both bytes, so C2 compiles it as a
   counted loop, and candidates are rebuilt and verified after the loop exits;
-  the whole scan runs out of line from its callers. The counted form takes
+  the whole scan runs out of line from its callers. The KMP budget test after
+  a failed candidate is written in line: on Russian Sherlock text, where failed
+  candidates are rare, C2 left it out of line as a cold call, and the call made
+  it rebuild both probe broadcasts and the zero vector at every 16-byte step
+  on Graviton, 11 instructions per step against 8. The counted form takes
   Graviton `aqj`, Sherlock, and `the-upper` rows to 0.51 to 0.60 of their
   earlier time and Intel `aqj`, `no-match-common`, and `line-boundary` rows to
   0.78 to 0.80, and RE2's count of `The` from 1.39 to 0.75 of native RE2's time

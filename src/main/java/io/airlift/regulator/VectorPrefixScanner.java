@@ -117,7 +117,10 @@ final class VectorPrefixScanner
                     return candidate;
                 }
                 comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, prefixIndex);
-                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, candidate)) {
+                // LiteralSearchKernel.comparisonBudgetSpent, written in line. Where failed
+                // candidates are rare, as in Russian text, C2 left that call out of line here, and
+                // the call made it rebuild the broadcast vectors at every step of the scan.
+                if (comparisonEnd > candidate) {
                     return -2 - (candidate + 1);
                 }
                 candidateBits &= candidateBits - 1;
@@ -181,7 +184,8 @@ final class VectorPrefixScanner
                     return candidate;
                 }
                 comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, prefixIndex);
-                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, candidate)) {
+                // LiteralSearchKernel.comparisonBudgetSpent, written in line as in findPair.
+                if (comparisonEnd > candidate) {
                     return -2 - (candidate + 1);
                 }
                 candidateBits &= candidateBits - 1;
@@ -425,7 +429,8 @@ final class VectorPrefixScanner
                         return candidate;
                     }
                     comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, literalIndex);
-                    if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, lastCandidate - candidate)) {
+                    // LiteralSearchKernel.comparisonBudgetSpent, written in line as in findPair.
+                    if (comparisonEnd > lastCandidate - candidate) {
                         return -2 - (candidate + literalSize - 1);
                     }
                     candidateBits ^= 1L << lane;
