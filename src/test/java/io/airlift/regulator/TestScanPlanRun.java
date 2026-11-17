@@ -73,6 +73,60 @@ public class TestScanPlanRun
     }
 
     @Test
+    public void testRunReadsCharactersAcrossBlocksAsTheOrdinaryEngine()
+    {
+        // A run of every non-ASCII character reads characters as RE2 does, a block at a time
+        // where it can: each character below, valid, accepted only by RE2's lenient reading,
+        // malformed, or cut short, at every offset across the first three blocks of non-ASCII text,
+        // followed by ASCII or by the end. A character cut short at a block's end, followed by a
+        // block of ASCII alone, must stop the run. Lead bytes before the run must not affect it.
+        // Valid; accepted only by RE2's lenient reading; malformed or cut short; the runs' stop bytes.
+        List<String> characters = Arrays.asList(String.join(
+                " ",
+                "c3a9 e69db1 f09f9880",
+                "e08080 eda080 f4908080 f0808080",
+                "c080 c1bf f580 ff 80 bf c3 e2 e282 f0 f09f f09f98 e2c3a9",
+                "0a 22 2f 00").split(" "));
+        byte[] before = {(byte) 0xF0, (byte) 0xE2, (byte) 0xC3};
+        for (String set : List.of("(?s).", ".", "[^\"]", "[^\\x00]", "[^/:]")) {
+            Re2.Options options = Re2.Options.defaults();
+            ParseResult parsed = RegexpParser.parse(utf8Slice(set + "*"), options.parseFlags());
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
+            assertThat(run.matchesNonAscii()).as(set).isTrue();
+            Re2 ordinary = Re2.compileWithoutScanPlanForTesting(utf8Slice(set + "*"), options);
+            for (String character : characters) {
+                for (int offset = 0; offset < 48; offset++) {
+                    for (String after : List.of("", "b".repeat(40))) {
+                        String text = HexFormat.of().formatHex(before) + "c3a9" + "61".repeat(offset) + character + HexFormat.of().formatHex(after.getBytes(UTF_8));
+                        byte[] input = HexFormat.of().parseHex(text);
+                        int cursor = before.length;
+                        String description = "%s at %s on %s".formatted(set, offset, text);
+                        MatchResult result = ordinary.lookingAtResult(wrappedBuffer(input, cursor, input.length - cursor));
+                        int expected = cursor + requireNonNull(result, description).end();
+                        assertThat(run.re2Match(input, cursor, input.length)).as(description).isEqualTo(expected);
+                        assertThat(ScanKernelSupport.re2RunMatch(run, input, cursor, input.length)).as("kernel " + description).isEqualTo(expected);
+                    }
+                }
+            }
+        }
+
+        // The skip passes whole blocks of valid characters: from the first `é` it reaches the
+        // stop byte five blocks on, rather than leaving the walk by character to read them.
+        byte[] input = ("abc" + "é".repeat(40) + "\"" + "b".repeat(20)).getBytes(UTF_8);
+        assertThat(VectorScanner.skipRe2Run(input, 3, input.length, '"')).isEqualTo(83);
+        assertThat(VectorScanKernelSupport.skipRe2Run(input, 3, input.length, '"')).isEqualTo(83);
+    }
+
+    @Test
+    public void testWalkLimitNearEndOfLargestArray()
+    {
+        // A slice may end near Integer.MAX_VALUE in its array, where a block past the cursor
+        // overflows an int.
+        assertThat(ScanPlanRun.re2WalkLimit(Integer.MAX_VALUE - 15, Integer.MAX_VALUE - 8)).isEqualTo(Integer.MAX_VALUE - 8);
+        assertThat(ScanPlanRun.re2WalkLimit(Integer.MAX_VALUE - 40, Integer.MAX_VALUE - 8)).isEqualTo(Integer.MAX_VALUE - 24);
+    }
+
+    @Test
     public void testSetRunReadsCharactersAsTheOrdinaryEngine()
     {
         // A run of some non-ASCII characters but not all reads one character as the ordinary

@@ -4446,6 +4446,13 @@ key, `membersSve` in place of `members`, and the r9g counts that put the whole
 search at 0.27-0.39 of its earlier time ran the SVE form, as perfasm showed in
 `membersSve`, but the two forms were never measured against each other.
 
+The RE2 [validating run skip](docs/reference/OPTIMIZATION_CATALOG.md#validating-run-skip)
+takes the same key. In the SVE form, unsigned saturating subtraction leaves the
+high bit set in each byte that breaks a rule: a continuation byte where none is
+expected or a missing one where one is, `C0`, `C1`, or `F5`-`FF`, or the stop
+byte. One compare tests the OR of those bytes. The other form compares each rule
+and ORs the masks. The two forms have not been measured against each other.
+
 In each scan both forms find the same candidates. The x86 CI builds run the
 compare forms, and the arm64 CI build runs the suite with the XOR forms and
 fails if they are not selected.
@@ -6322,6 +6329,17 @@ measurements specific to each language.
   0.67 to 0.68, with `-XX:UseSVE=0` 0.95 and 0.90, and on R8i 0.76 to 0.78 and
   0.87 to 0.88. Generated kernels move the same way, and the `URL`,
   `URL_MALFORMED`, and `ANCHORED_HOST` rows stay within 0.95 to 1.01.
+- An RE2 run that holds every non-ASCII character and excludes at most one
+  ASCII byte reads that byte from a field, so its inlined scan loads no needle
+  array and, at an ASCII stop, reads no member table. At a non-ASCII byte with
+  at least 16 bytes left, it calls the out-of-line
+  [validating run skip](docs/reference/OPTIMIZATION_CATALOG.md#validating-run-skip),
+  which checks whole blocks by the lenient rule above, and then walks by
+  character from the boundary the skip returns to the exact stop. Without the
+  Vector API, the run reads as before. Before the skip, a mixed-script tail
+  restarted the stop scan at each non-ASCII stretch and read each character on
+  its own: a long mixed-script `(?s)^([^/]+)/.*$` row made about 441 character
+  reads and 294 scan restarts, and with the skip it makes about 2 of each.
 - The short boolean route to the DFA described in
   [Trino Specialized Byte Scans](#trino-specialized-byte-scans) applies to an
   RE2 plan whatever bytes it consumes, because an RE2 plan agrees with the

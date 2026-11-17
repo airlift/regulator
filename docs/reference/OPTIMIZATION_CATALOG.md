@@ -1816,6 +1816,36 @@ byte operations instead of an automaton.
   non-ASCII sets run at a geometric mean of 0.16 of the ordinary engine's time
   on Graviton and 0.14 on Intel ([#50]).
 
+### Validating run skip
+
+- **Origin:** Adapted from Keiser and Lemire, "Validating UTF-8 in less than
+  one instruction per byte" (Software: Practice and Experience, 2021)
+  ([paper][keiser-lemire-2021]), and its implementations in
+  [simdjson][simdjson] and [simdutf][simdutf], for the structural check of
+  lead and continuation bytes carried across blocks by loads one to three
+  bytes back. Regulator: the check narrowed to RE2's lenient reading, fused
+  with the run's stop byte, refined by a walk by character, and its
+  one-compare form on 128-bit SVE.
+- **Where:** `VectorScanner.skipRe2Run`, `ScanPlanRun.re2ScanBlocks`,
+  `VectorScanKernelSupport.skipRe2Run`
+- **Applies when:** RE2 runs, in every language's plans, that hold every
+  non-ASCII character and every ASCII byte but at most one, such as `[^"]*`,
+  `.*`, and `(?s).*`, when the Vector API is available and at least 16 bytes
+  remain at a non-ASCII byte
+- **What it does:** The run's ASCII stop scan stays inline. At a non-ASCII
+  byte, an out-of-line skip checks 16-byte blocks: a block passes when it holds
+  no stop byte, no `C0`, `C1`, or `F5`-`FF`, and a continuation byte exactly
+  where a lead byte one, two, or three bytes before it expects one. Unlike a
+  UTF-8 validator, it does not reject overlong three- and four-byte forms,
+  encoded surrogates, or values above U+10FFFF, because the engine's `.`
+  accepts them. A block of ASCII alone passes on the stop scan's one compare
+  unless the block before it ended inside a character. At the first block
+  that fails, the skip returns the boundary of the character there, and a
+  walk by character finds the exact stop. On SVE each check sets a byte's
+  high bit by unsigned saturating subtraction, and one compare tests their OR.
+  A long mixed-script `(?s)^([^/]+)/.*$` tail makes about 2 character reads
+  per row instead of about 441, with the skip covering 4,077 of 4,095 bytes.
+
 ## Specialized matchers
 
 Some pattern shapes skip the automata entirely. Each matcher reports what the
@@ -2850,6 +2880,7 @@ change is described.
 [jitrex-machine]: https://github.com/humio/jitrex/blob/0.1.15/src/main/java/com/humio/jitrex/jvm/RJavaClassMachine.java
 [joni-dist-search]: https://github.com/jruby/joni/blob/joni-2.2.1/src/org/joni/Matcher.java#L445-L458
 [kawa-regexps]: https://www.gnu.org/software/kawa/gnu.bytecode/compiling-regexps.html
+[keiser-lemire-2021]: https://doi.org/10.1002/spe.2940
 [kmp-1977]: https://doi.org/10.1137/0206024
 [knuth-taocp]: https://www-cs-faculty.stanford.edu/~knuth/taocp.html
 [kp-primes-arm64]: https://github.com/klauspost/compress/pull/1230
@@ -2922,6 +2953,8 @@ change is described.
 [re2-simplify]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/simplify.cc
 [rs-interval]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/interval.rs
 [rs-literal]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/literal.rs
+[simdjson]: https://github.com/simdjson/simdjson
+[simdutf]: https://github.com/simdutf/simdutf
 [spark-codegen-limit]: https://github.com/apache/spark/blob/v2.3.0/sql/core/src/main/scala/org/apache/spark/sql/execution/WholeStageCodegenExec.scala#L587-L599
 [spark-like]: https://github.com/apache/spark/blob/v1.1.0/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala#L117-L140
 [thompson-1968]: https://doi.org/10.1145/363347.363387
