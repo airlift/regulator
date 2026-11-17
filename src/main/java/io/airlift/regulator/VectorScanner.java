@@ -23,6 +23,9 @@ import jdk.incubator.vector.VectorSpecies;
 final class VectorScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_128;
+    // Loaded at offsets 2, 1, and 0, the lanes of a block that a byte one, two, or three bytes
+    // back can affect.
+    private static final byte[] FIRST_BLOCK_LANES = {0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
     private VectorScanner() {}
 
@@ -113,14 +116,22 @@ final class VectorScanner
         if (needles.length > 1) {
             return findRe2SetStop(input, cursor, end, needles);
         }
+        return findRe2ByteStop(input, cursor, end, needles.length > 0 ? needles[0] : -1);
+    }
+
+    /// [#findRe2RunStop] for at most one needle: returns the first byte at or after `cursor` that
+    /// is non-ASCII or equals `stopByte`, an ASCII byte or `-1` for none, or `end` when none
+    /// remains. Copied as `VectorScanKernelSupport.findRe2ByteStop`; keep the copy in step.
+    static int findRe2ByteStop(byte[] input, int cursor, int end, int stopByte)
+    {
         // Most runs stop at one ASCII byte, such as a host's '/', and their scans often end in the
         // first block. Keep this path small: callers inline it, and a larger body pushed them past
         // C2's inlining limits. The needle is ASCII, so a byte XORed with the needle is zero where
         // the byte equals it and negative where the byte is non-ASCII: one signed compare with 1
         // finds both. With no excluded ASCII byte, XOR with zero and compare with 0, stopping at
         // non-ASCII bytes only.
-        ByteVector needle = ByteVector.broadcast(SPECIES, needles.length > 0 ? needles[0] : 0);
-        ByteVector limit = ByteVector.broadcast(SPECIES, (byte) (needles.length > 0 ? 1 : 0));
+        ByteVector needle = ByteVector.broadcast(SPECIES, (byte) Math.max(stopByte, 0));
+        ByteVector limit = ByteVector.broadcast(SPECIES, (byte) (stopByte >= 0 ? 1 : 0));
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             VectorMask<Byte> stops = ByteVector.fromArray(SPECIES, input, cursor).lanewise(VectorOperators.XOR, needle).compare(VectorOperators.LT, limit);
             if (stops.anyTrue()) {
@@ -129,11 +140,118 @@ final class VectorScanner
         }
         for (; cursor < end; cursor++) {
             byte value = input[cursor];
-            if (value < 0 || (needles.length > 0 && value == needles[0])) {
+            if (value < 0 || value == stopByte) {
                 return cursor;
             }
         }
         return end;
+    }
+
+    /// For an RE2 run of every non-ASCII character and every ASCII byte except `stopByte`, an
+    /// ASCII byte or `-1` for none, that starts at `cursor`, a character boundary: passes whole
+    /// blocks of characters the run reads, and returns the character boundary at or before the
+    /// first byte where the run may stop, from which the caller reads by character to the exact
+    /// stop. It is out of line, called once per stretch of non-ASCII text that the inlined
+    /// [#findRe2ByteStop] stops at.
+    ///
+    /// The run reads characters as [Utf8#re2CharacterWidth] does, so a block passes when it holds
+    /// no `stopByte`, no C0, C1, or F5-FF, and a continuation byte exactly where a lead byte one,
+    /// two, or three bytes before it expects one. This is the structural part of the vector UTF-8
+    /// check of Keiser and Lemire, narrowed to RE2's lenient reading: it does not reject overlong
+    /// three- and four-byte forms, encoded surrogates, or values above U+10FFFF. The loads one to
+    /// three bytes back carry each lead byte's expectations across blocks; in the first block they
+    /// ignore the bytes before `cursor`. A block of ASCII bytes other than `stopByte` passes on the
+    /// compare of [#findRe2ByteStop], unless the block before it ended inside a character. With
+    /// [VectorSupport#SVE_128], each check sets the high bit of a byte and one compare tests their
+    /// OR, as "Candidate Masks on SVE" in `REGULATOR_DECISIONS.md` describes; elsewhere each check
+    /// is a compare and their masks are ORed.
+    /// Copied as `VectorScanKernelSupport.skipRe2Run`; keep the copy in step.
+    static int skipRe2Run(byte[] input, int cursor, int end, int stopByte)
+    {
+        int start = cursor;
+        if (start < 3) {
+            return start;
+        }
+        ByteVector needle = ByteVector.broadcast(SPECIES, (byte) Math.max(stopByte, 0));
+        ByteVector limit = ByteVector.broadcast(SPECIES, (byte) (stopByte >= 0 ? 1 : 0));
+        // The SVE form's constants. Each subtraction saturates at 0 as unsigned bytes, and only
+        // the high bit of its result counts:
+        // - a byte one, two, or three bytes after a lead byte of at least 0xC0, 0xE0, or 0xF0
+        //   must be a continuation byte, and `previous - 0x40`, `secondPrevious - 0x60`, or
+        //   `thirdPrevious - 0x70` keeps the high bit exactly for such a lead byte;
+        // - `shifted = byte + 0x40` is 0xC0-0xFF for a continuation byte, so `shifted - 0x40`
+        //   keeps the high bit exactly for one, and XOR with the expectation flags a mismatch;
+        // - `shifted` is 0 or 1 for C0 or C1, so `0x81 - shifted` has the high bit for those;
+        // - `byte - 0x75` has the high bit for F5-FF;
+        // - `0x80 - (byte XOR stopByte)` has the high bit for the stop byte, and with no stop
+        //   byte the minuend is 0.
+        ByteVector afterLead = ByteVector.broadcast(SPECIES, (byte) 0x40);
+        ByteVector afterThreeByteLead = ByteVector.broadcast(SPECIES, (byte) 0x60);
+        ByteVector afterFourByteLead = ByteVector.broadcast(SPECIES, (byte) 0x70);
+        ByteVector overlongLead = ByteVector.broadcast(SPECIES, (byte) 0x81);
+        ByteVector invalidLead = ByteVector.broadcast(SPECIES, (byte) 0x75);
+        ByteVector needleBit = ByteVector.broadcast(SPECIES, (byte) (stopByte >= 0 ? 0x80 : 0));
+        // Set after a block with non-ASCII bytes, whose last character may continue into the next.
+        boolean pending = false;
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            boolean hasNonAsciiOrStop = bytes.lanewise(VectorOperators.XOR, needle).compare(VectorOperators.LT, limit).anyTrue();
+            if (!hasNonAsciiOrStop && !pending) {
+                continue;
+            }
+            ByteVector previous = ByteVector.fromArray(SPECIES, input, cursor - 1);
+            ByteVector secondPrevious = ByteVector.fromArray(SPECIES, input, cursor - 2);
+            ByteVector thirdPrevious = ByteVector.fromArray(SPECIES, input, cursor - 3);
+            if (cursor == start) {
+                previous = previous.and(ByteVector.fromArray(SPECIES, FIRST_BLOCK_LANES, 2));
+                secondPrevious = secondPrevious.and(ByteVector.fromArray(SPECIES, FIRST_BLOCK_LANES, 1));
+                thirdPrevious = thirdPrevious.and(ByteVector.fromArray(SPECIES, FIRST_BLOCK_LANES, 0));
+            }
+            VectorMask<Byte> stops;
+            if (VectorSupport.SVE_128) {
+                ByteVector expected = previous.lanewise(VectorOperators.SUSUB, afterLead)
+                        .lanewise(VectorOperators.OR, secondPrevious.lanewise(VectorOperators.SUSUB, afterThreeByteLead))
+                        .lanewise(VectorOperators.OR, thirdPrevious.lanewise(VectorOperators.SUSUB, afterFourByteLead));
+                ByteVector shifted = bytes.add(afterLead);
+                stops = shifted.lanewise(VectorOperators.SUSUB, afterLead).lanewise(VectorOperators.XOR, expected)
+                        .lanewise(VectorOperators.OR, overlongLead.lanewise(VectorOperators.SUSUB, shifted))
+                        .lanewise(VectorOperators.OR, bytes.lanewise(VectorOperators.SUSUB, invalidLead))
+                        .lanewise(VectorOperators.OR, needleBit.lanewise(VectorOperators.SUSUB, bytes.lanewise(VectorOperators.XOR, needle)))
+                        .compare(VectorOperators.LT, (byte) 0);
+            }
+            else {
+                VectorMask<Byte> expected = previous.compare(VectorOperators.UGE, (byte) 0xC0)
+                        .or(secondPrevious.compare(VectorOperators.UGE, (byte) 0xE0))
+                        .or(thirdPrevious.compare(VectorOperators.UGE, (byte) 0xF0));
+                stops = bytes.compare(VectorOperators.LT, (byte) 0xC0).xor(expected)
+                        .or(bytes.lanewise(VectorOperators.AND, (byte) 0xFE).compare(VectorOperators.EQ, (byte) 0xC0))
+                        .or(bytes.compare(VectorOperators.UGE, (byte) 0xF5))
+                        .or(bytes.lanewise(VectorOperators.XOR, needle).compare(VectorOperators.ULT, limit));
+            }
+            if (stops.anyTrue()) {
+                return characterStart(input, start, cursor + stops.firstTrue());
+            }
+            pending = hasNonAsciiOrStop;
+        }
+        return characterStart(input, start, cursor);
+    }
+
+    // Returns `position`, or the lead byte of a character that starts in the three bytes before it,
+    // at or after `start`, and continues past it. Copied as VectorScanKernelSupport.characterStart;
+    // keep the copy in step.
+    private static int characterStart(byte[] input, int start, int position)
+    {
+        for (int back = 1; back <= 3 && position - back >= start; back++) {
+            int value = input[position - back] & 0xFF;
+            if (value < 0x80) {
+                return position;
+            }
+            if (value >= 0xC0) {
+                int width = value < 0xE0 ? 2 : value < 0xF0 ? 3 : 4;
+                return back < width ? position - back : position;
+            }
+        }
+        return position;
     }
 
     // findRe2RunStop for two to four needles. Copied as VectorScanKernelSupport.findRe2SetStop;

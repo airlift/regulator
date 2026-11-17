@@ -36,6 +36,10 @@ final class ScanPlanRun
     private static final int MAX_VECTOR_CANDIDATE_BYTES = 64;
     static final int SCALAR_CANDIDATE_PREFIX_BYTES = 16;
     static final int RE2_RUN_STOP_MINIMUM_BYTES = 16;
+    // The re2StopByte of a run of every non-ASCII character and every ASCII byte, and of any run
+    // that excludes more than one byte or some non-ASCII bytes.
+    static final int NO_STOP_BYTE = -1;
+    static final int SEVERAL_STOP_BYTES = -2;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(ScanPlanRun.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
@@ -47,6 +51,9 @@ final class ScanPlanRun
     private final long members2;
     private final long members3;
     private final byte[] needles;
+    // For a run of every non-ASCII character and every ASCII byte but at most one, that byte or
+    // NO_STOP_BYTE, which re2Scan reads in place of needles; otherwise SEVERAL_STOP_BYTES.
+    private final int re2StopByte;
     private final boolean inverted;
     // Candidate scans reuse the DFA's start-byte scanners for sets of at most 64 bytes.
     private final int candidateScan;
@@ -90,6 +97,12 @@ final class ScanPlanRun
                     needles[index++] = (byte) value;
                 }
             }
+        }
+        if (matchesNonAscii && needles != null && needles.length <= 1) {
+            this.re2StopByte = needles.length == 0 ? NO_STOP_BYTE : needles[0];
+        }
+        else {
+            this.re2StopByte = SEVERAL_STOP_BYTES;
         }
         int lowest = -1;
         int highest = -1;
@@ -339,6 +352,11 @@ final class ScanPlanRun
         return needles;
     }
 
+    int re2StopByte()
+    {
+        return re2StopByte;
+    }
+
     boolean isInverted()
     {
         return inverted;
@@ -525,6 +543,9 @@ final class ScanPlanRun
     // Copied as ScanKernelSupport.re2RunScan; keep the copy in step.
     private int re2Scan(byte[] input, int cursor, int end)
     {
+        if (re2StopByte != SEVERAL_STOP_BYTES && VectorSupport.isAvailable()) {
+            return re2ScanBlocks(input, cursor, end, re2StopByte);
+        }
         while (true) {
             // Find the first non-member ASCII byte or non-ASCII byte, then consume the
             // non-ASCII characters there. Less than a vector of input is scanned by byte, as
@@ -551,6 +572,54 @@ final class ScanPlanRun
                 return cursor;
             }
         }
+    }
+
+    // re2Scan with vectors for a run that excludes at most one ASCII byte, `stopByte`, or none
+    // when it is NO_STOP_BYTE. ASCII text stops at that byte in the inlined stop scan, so a
+    // stop there needs no member lookup. A stretch of non-ASCII text takes the out-of-line
+    // validating skip, and the walk by character from where it returns finds the exact stop
+    // within a block; less than a block of input is walked whole.
+    // Copied as ScanKernelSupport.re2RunScanBlocks; keep the copy in step.
+    private static int re2ScanBlocks(byte[] input, int cursor, int end, int stopByte)
+    {
+        while (true) {
+            if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
+                cursor = VectorScanner.findRe2ByteStop(input, cursor, end, stopByte);
+                if (cursor == end || input[cursor] >= 0) {
+                    return cursor;
+                }
+                if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
+                    cursor = VectorScanner.skipRe2Run(input, cursor, end, stopByte);
+                }
+            }
+            int limit = re2WalkLimit(cursor, end);
+            while (cursor < limit) {
+                int value = input[cursor];
+                if (value >= 0) {
+                    if (value == stopByte) {
+                        return cursor;
+                    }
+                    cursor++;
+                    continue;
+                }
+                int width = Utf8.re2CharacterWidth(input, cursor, end);
+                if (width == 0) {
+                    return cursor;
+                }
+                cursor += width;
+            }
+            if (cursor >= end) {
+                return cursor;
+            }
+        }
+    }
+
+    // Where a walk by character from `cursor` stops: one block on, or `end` if that is nearer.
+    // It adds the smaller distance, as a slice near the end of a 2 GiB array would overflow
+    // `cursor` plus a block.
+    static int re2WalkLimit(int cursor, int end)
+    {
+        return cursor + Math.min(end - cursor, RE2_RUN_STOP_MINIMUM_BYTES);
     }
 
     /// The version of [#re2Match] for a run of some non-ASCII characters but not all. It
