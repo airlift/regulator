@@ -3032,10 +3032,11 @@ final class Dfa
         try {
             MemorySegment addressSpace = HEAP_POINTER_TABLES ? absolutePointers.segment() : AbsoluteAddressSpace.EVERYTHING;
             byte[] byteMap = dfa.bytemap;
+            long[] classOffsets = dfa.classByteOffsets;
             for (; position < textEnd; position++) {
                 long transition = addressSpace.get(
                         ValueLayout.JAVA_LONG_UNALIGNED,
-                        transitionRowAddress + ((long) (byteMap[bytes[position] & 0xFF] & 0xFF) * Long.BYTES));
+                        transitionRowAddress + classOffsets[bytes[position] & 0xFF]);
                 if (transition == 0) {
                     break;
                 }
@@ -5275,10 +5276,11 @@ final class Dfa
         try {
             MemorySegment addressSpace = HEAP_POINTER_TABLES ? absolutePointers.segment() : AbsoluteAddressSpace.EVERYTHING;
             byte[] byteMap = dfa.bytemap;
+            long[] classOffsets = dfa.classByteOffsets;
             for (; position > textBegin; position--) {
                 long transition = addressSpace.get(
                         ValueLayout.JAVA_LONG_UNALIGNED,
-                        transitionRowAddress + ((long) (byteMap[bytes[position - 1] & 0xFF] & 0xFF) * Long.BYTES));
+                        transitionRowAddress + classOffsets[bytes[position - 1] & 0xFF]);
                 if (transition == 0) {
                     return ABSOLUTE_POINTER_RETRY_OBJECT;
                 }
@@ -6790,6 +6792,9 @@ final class Dfa
 
         private final Prog prog;
         final byte[] bytemap;
+        // Each byte's class times the bytes in a pointer-table entry, the offset of its transition
+        // in a pointer row, so the pointer loops add it without widening and scaling the class.
+        final long[] classByteOffsets;
         private final byte[] startByteCandidates;
         private final int startByteScanSet;
         private final byte[] startByteNibbleTables;
@@ -6959,6 +6964,10 @@ final class Dfa
         {
             this.prog = requireNonNull(prog, "prog is null");
             this.bytemap = prog.bytemapArray();
+            this.classByteOffsets = new long[bytemap.length];
+            for (int i = 0; i < bytemap.length; i++) {
+                classByteOffsets[i] = (bytemap[i] & 0xFF) * (long) Long.BYTES;
+            }
             this.bytemapRange = prog.bytemapRange();
             this.kind = requireNonNull(kind, "kind is null");
             this.nextSize = prog.bytemapRange() + 1;
@@ -8606,6 +8615,9 @@ final class Dfa
                     (startClassFilter == null ? 0 : StartClassFilter.INSTANCE_SIZE) +
                     2 * q0.estimatedRetainedSize() +
                     sizeOf(stack) +
+                    // The pointer loops' class byte offsets. The fixed overhead leaves them out, so
+                    // the budgets at which a DFA initializes stay upstream's.
+                    sizeOf(classByteOffsets) +
                     // The route counts, which exist only when tests count routes.
                     sizeOf(routeCounts) +
                     // The cache mutation lock and the queue of unreachable pointer tables.
