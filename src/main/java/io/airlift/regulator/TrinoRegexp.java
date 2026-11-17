@@ -560,9 +560,9 @@ public sealed class TrinoRegexp
     public long count(Slice source)
     {
         requireNonNull(source, "source is null");
-        // Only the span maximum bounds a Trino count. ScanKernelGenerator.defineCount emits this
-        // check for a generated class; keep in step.
-        if (source.length() > re2.maximumSpanLength()) {
+        // ScanKernelGenerator.defineCount emits this check for a generated class; keep in step.
+        int length = source.length();
+        if (length < re2.minimumSpanLength() || length > re2.maximumSpanLength()) {
             return 0;
         }
         SingleByteMatcher byteMatcher = singleByteMatcher();

@@ -184,12 +184,11 @@ answer, or reject the input before any engine runs.
   matcher, and `replaceAll` in one call, stop after eight scans in a row find
   the literal or one-of bytes within 256 bytes of their start. Minimum length:
   windows under 4 KiB, where longer ones skip the metadata load, matcher finds
-  that take the general route, and every count, generated or not; a Trino
-  count skips only the whole-pattern minimum, as its start-anchored plans read
-  a lone malformed byte as one character. Maximum length: patterns of bounded
-  length anchored at both ends, in count, matcher finds, start-anchored scan
-  plans, and anchored ordinary-engine searches. First byte: start-anchored,
-  non-nullable programs with no assertion before the first byte. Inner
+  that take the general route, and every count, generated or not. Maximum
+  length: patterns of bounded length anchored at both ends, in count, matcher
+  finds, start-anchored scan plans, and anchored ordinary-engine searches.
+  First byte: start-anchored, non-nullable programs with no assertion before
+  the first byte. Inner
   literal: find windows under the 64-byte minimum of a gated search for a
   one-byte exact literal, which the ordinary engine's full-Slice boolean find
   runs first, where the pattern qualifies, a find that, for a pattern on the

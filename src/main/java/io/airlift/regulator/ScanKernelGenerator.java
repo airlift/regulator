@@ -1272,8 +1272,9 @@ final class ScanKernelGenerator
             Parameter input = arg("input", Slice.class);
             CodeBlock.Builder body = definition.method("count", long.class, input).access(PUBLIC).body();
             body.append(nullCheck(input, "source is null"));
-            // A Trino count checks only the span maximum, as TrinoRegexp.count does; keep in step.
-            emitSpanLengthCheck(body, input, 0, routes.pattern().maximumSpanLength());
+            // The check TrinoRegexp.count makes; keep in step.
+            CompiledPattern pattern = routes.pattern();
+            emitSpanLengthCheck(body, input, pattern.minimumSpanLength(), pattern.maximumSpanLength());
             emitCount(body, input, routes.count(), trinoPattern());
         }
 
