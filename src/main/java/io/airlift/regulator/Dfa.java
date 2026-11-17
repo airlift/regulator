@@ -189,7 +189,8 @@ final class Dfa
     private static final int FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE = 15;
     private static final int PREFIX_RUN_SCAN_ROUTE = 16;
     private static final int ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE = 17;
-    private static final int COUNTED_ROUTES = 18;
+    private static final int TABLES_REFRESH_ROUTE = 18;
+    private static final int COUNTED_ROUTES = 19;
 
     private Dfa() {}
 
@@ -760,8 +761,10 @@ final class Dfa
                 continue;
             }
             try {
-                StateData startData = dfa.analyzeStart(tables, context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchoredEffective, runForward);
-                tables = dfa.tablesAfterWrite(tables);
+                StateData startData = dfa.analyzeStart(tables, context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchoredEffective, runForward, exclusiveSearch);
+                if (exclusiveSearch) {
+                    tables = dfa.tablesAfterWrite(tables);
+                }
                 if (startData.offset() == T_DEAD) {
                     return SEARCH_NO_MATCH;
                 }
@@ -1278,7 +1281,8 @@ final class Dfa
                         contextBegin,
                         contextLimit,
                         textBegin,
-                        cursor.fixedDistanceByteCandidates);
+                        cursor.fixedDistanceByteCandidates,
+                        exclusiveSearch);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
@@ -2270,15 +2274,18 @@ final class Dfa
             int contextBegin,
             int contextEnd,
             int textBegin,
-            Prog.FixedDistanceByteCandidates fixedDistanceCandidates)
+            Prog.FixedDistanceByteCandidates fixedDistanceCandidates,
+            boolean exclusiveSearch)
     {
         if (prog.anchorStart() && contextBegin != textBegin) {
             return SEARCH_NO_MATCH;
         }
 
         boolean endMatch = prog.anchorEnd();
-        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true);
-        tables = dfa.tablesAfterWrite(tables);
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true, exclusiveSearch);
+        if (exclusiveSearch) {
+            tables = dfa.tablesAfterWrite(tables);
+        }
         if (startData.offset() == T_DEAD) {
             return SEARCH_NO_MATCH;
         }
@@ -7095,6 +7102,7 @@ final class Dfa
         // unless a writer published meanwhile. The plain read costs a reader no fence.
         CacheTables tablesAfterWrite(CacheTables searchTables)
         {
+            countRoute(this, TABLES_REFRESH_ROUTE);
             CacheTables published = (CacheTables) TABLES.get(this);
             if (published == searchTables || !cacheMutationLock.isHeldByCurrentThread()) {
                 return searchTables;
@@ -8318,6 +8326,11 @@ final class Dfa
             return routeCount(ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE);
         }
 
+        int tablesRefreshCount()
+        {
+            return routeCount(TABLES_REFRESH_ROUTE);
+        }
+
         boolean absolutePointerTransitionsAvailable()
         {
             return tables.absolutePointerTransitions != null;
@@ -9264,14 +9277,22 @@ final class Dfa
             return analyzeStart(tables, context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchored, runForward);
         }
 
-        /// Returns the start state for a search over `[textBegin, textEnd)`, building it when missing.
-        /// `tables` is the caller's root; a write lands in the current tables, so an exclusive
-        /// caller reloads with `tablesAfterWrite`.
+        /// Analyzes the start as a caller that may have written would, refreshing `tables` first.
         StateData analyzeStart(CacheTables tables, byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean anchored, boolean runForward)
         {
-            // An exclusive search that reset the cache in an earlier step still holds the tables
-            // it began with, and must not start in them.
-            tables = tablesAfterWrite(tables);
+            return analyzeStart(tables, bytes, ctxBegin, ctxEnd, textBegin, textEnd, anchored, runForward, true);
+        }
+
+        /// Returns the start state for a search over `[textBegin, textEnd)`, building it when missing.
+        /// `tables` is the caller's root; a write lands in the current tables, so an exclusive
+        /// caller reloads with `tablesAfterWrite`. A reader never writes, so a missing start
+        /// asks it to retry exclusively.
+        StateData analyzeStart(CacheTables tables, byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean anchored, boolean runForward, boolean exclusiveSearch)
+        {
+            // A reader keeps its captured root. An exclusive caller may hold a root from before its own reset.
+            if (exclusiveSearch) {
+                tables = tablesAfterWrite(tables);
+            }
             // The cache slot depends only on the position and the bytes around the start; the
             // empty-width flags are needed only to build a missing start state.
             int dirIndex = runForward ? 1 : 0;
@@ -9283,7 +9304,7 @@ final class Dfa
                 return existing;
             }
 
-            if (!cacheMutationLock.isHeldByCurrentThread()) {
+            if (!exclusiveSearch || !cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
             }
 

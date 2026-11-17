@@ -142,6 +142,31 @@ public class TestDfaGroupZeroForwardCursor
         assertRepeatedMatchesReuseDecision(latin1Pattern, Slices.wrappedBuffer(latin1Bytes), 2);
     }
 
+    @Test
+    public void testWarmReadOnlyFindKeepsCapturedTables()
+    {
+        // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+[-+][0-9]+"));
+        Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
+        Slice input = Slices.utf8Slice("ab-12 cd+3");
+
+        // The cold find builds the states; the warm find reads them without refreshing either DFA's tables.
+        assertThat(pattern.findGroupZeroBoundary(cursor, input, 0, input.length(), 0)).isEqualTo(span(0, 5));
+        Dfa.DfaInstance forwardDfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Dfa.DfaInstance reverseDfa = pattern.reverseProgramIfComputedForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        int forwardRefreshes = forwardDfa.tablesRefreshCount();
+        int reverseRefreshes = reverseDfa.tablesRefreshCount();
+
+        assertThat(pattern.findGroupZeroBoundary(cursor, input, 0, input.length(), 0)).isEqualTo(span(0, 5));
+        assertThat(forwardDfa.tablesRefreshCount()).isEqualTo(forwardRefreshes);
+        assertThat(reverseDfa.tablesRefreshCount()).isEqualTo(reverseRefreshes);
+    }
+
+    private static long span(int start, int end)
+    {
+        return ((long) start << 32) | end;
+    }
+
     private static void assertRepeatedMatchesReuseDecision(Re2 pattern, Slice input, int matchLength)
     {
         Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
