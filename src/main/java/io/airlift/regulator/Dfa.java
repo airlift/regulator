@@ -6669,11 +6669,29 @@ final class Dfa
             return productive;
         }
 
+        // A rejection holds for its whole epoch, the last 64 KiB of the text included: a dense
+        // text whose scan the samples rejected would otherwise stop the scanner at most of its
+        // tail's matches. Once the epoch of a rejection ends in that tail, one 64-byte sample over
+        // the rest decides again, and with fewer bytes left than that the rejection stands. A
+        // cursor that has taken no rejection keeps the short-input rule: the scan runs unsampled.
         private boolean isStartByteScanProductive(byte[] bytes, int position, int textEnd)
         {
             if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
-                startByteScanProductivityRejectedUntil = 0;
-                return true;
+                if (startByteScanProductivityRejectedUntil == 0) {
+                    return true;
+                }
+                if (position < startByteScanProductivityRejectedUntil) {
+                    return false;
+                }
+                if (textEnd - position >= BYTE_SCAN_SAMPLE_SIZE) {
+                    startByteScanProductivityCheckCount++;
+                    if (dfa.isStartByteScanTailProductive(bytes, position, textEnd)) {
+                        startByteScanProductivityRejectedUntil = 0;
+                        return true;
+                    }
+                }
+                startByteScanProductivityRejectedUntil = textEnd;
+                return false;
             }
             if (position < startByteScanProductivityRejectedUntil) {
                 return false;
@@ -7721,6 +7739,20 @@ final class Dfa
                     position,
                     textEnd,
                     MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES,
+                    BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
+        }
+
+        // The same sample over a tail shorter than the sampling minimum, at least one sample long.
+        private boolean isStartByteScanTailProductive(byte[] bytes, int position, int textEnd)
+        {
+            return isByteCandidateScanProductive(
+                    startByteCandidates,
+                    startLiteralFilter,
+                    startClassFilter,
+                    bytes,
+                    position,
+                    textEnd,
+                    BYTE_SCAN_SAMPLE_SIZE,
                     BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
         }
 
