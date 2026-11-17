@@ -19,13 +19,16 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static io.airlift.regulator.CompiledPattern.DFA_QUIT_STREAK_LIMIT;
 import static io.airlift.regulator.TestRe2Api.assertNullInputFailures;
+import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestBudget;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -45,6 +48,10 @@ public class TestRustRegexp
     // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, CR, LF, both
     // bytes of é, and a byte that is never UTF-8.
     private static final List<byte[]> SHORT_TEXTS = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) '\r', (byte) '\n', (byte) 0xC3, (byte) 0xA9, (byte) 0xFF);
+    // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, the lead of
+    // Cyrillic letters, which are all word characters, the lead E2, whose characters include both
+    // classes, and three continuation bytes: ж, Д, —, and U+2D80 among them.
+    private static final List<byte[]> LEAD_TEXTS = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) 0xD0, (byte) 0xB6, (byte) 0xE2, (byte) 0x80, (byte) 0x94);
 
     @Test
     public void testParse()
@@ -331,7 +338,7 @@ public class TestRustRegexp
     {
         // Every short text, as a view between bytes outside ASCII, searched over every range with
         // the view as context: the DFA finds what the NFA finds, or quits, which it may do only on
-        // text outside ASCII in a program with a Unicode word assertion.
+        // malformed text in a program with a Unicode word assertion.
         List<String> patterns = new ArrayList<>(DFA_ROUTE_PATTERNS);
         patterns.replaceAll(pattern -> pattern.replace("foo", "a"));
         // In (?mR)^\b, the word boundary is reached only after the line start holds, so the state
@@ -345,60 +352,85 @@ public class TestRustRegexp
                 Prog forward = compileRustProgram(pattern, options, false);
                 Prog reverse = compileRustProgram(pattern, options, true);
                 TestingEngineAgreement.assertDfaAgreesWithNfa(pattern, forward, reverse, SHORT_TEXTS, "bytes " + bytes);
+                TestingEngineAgreement.assertDfaAgreesWithNfa(pattern, forward, reverse, LEAD_TEXTS, "bytes " + bytes);
             }
         }
     }
 
     @Test
-    public void testUnicodeWordAssertionDfaQuitIsLazyAndNotCached()
+    public void testUnicodeWordAssertionsDecideOnDfa()
     {
-        // In a program with a Unicode word assertion, the DFA quits only where a state that needs
-        // an assertion meets a non-ASCII byte, so a non-ASCII byte before the match does not stop
-        // it.
-        Prog endBoundary = compileRustProgram("foo\\b", RustRegexp.Options.defaults(), false);
-        assertThat(Dfa.search(endBoundary, utf8Slice("é foo"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(6);
+        // The forward DFA decides a Unicode word assertion beside a character outside ASCII from
+        // the character's lead byte, or from the text where the lead holds characters of both
+        // classes, and the reverse DFA from the text, so both find what the crate finds without
+        // quitting on valid text. Each pattern is compiled once, so a transition cached for one
+        // text serves the next.
+        List<Map.Entry<String, List<String>>> cases = List.of(
+                Map.entry("\\b\\w+\\b", List.of("жж жж", "0-4", "5-9")),
+                // A combining mark, an Arabic-Indic digit, a connector, and ZWNJ are word characters.
+                Map.entry("\\b\\w+\\b", List.of("a\u0301 ١ a‿b a\u200Cb", "0-3", "4-6", "7-12", "13-18")),
+                Map.entry("\\bfoo\\b", List.of("☃foo☃", "3-6")),
+                Map.entry("\\bfoo\\b", List.of("foo—", "0-3")),
+                Map.entry("foo\\b", List.of("foo☃", "0-3")),
+                Map.entry("foo\\b", List.of("fooж")),
+                Map.entry("a|é\\b", List.of("aé", "0-1", "1-3")),
+                Map.entry("\\b{start}\\w+\\b{end}", List.of("!ж", "1-3")),
+                Map.entry("\\B", List.of("жж", "2-2")),
+                Map.entry("(?-u:\\b)\\B", List.of("aж", "1-1")),
+                // × shares its lead with letters; ZWNJ and — share two bytes but not their class.
+                Map.entry("a\\b{end-half}", List.of("a× a\u200C a—", "0-1", "9-10")),
+                Map.entry("\\b{start-half}a", List.of("×a", "2-3")));
+        Map<String, Prog> forwardPrograms = new HashMap<>();
+        Map<String, Prog> reversePrograms = new HashMap<>();
+        for (Map.Entry<String, List<String>> entry : cases) {
+            Prog forward = forwardPrograms.computeIfAbsent(entry.getKey(), pattern -> compileRustProgram(pattern, RustRegexp.Options.defaults(), false));
+            Prog reverse = reversePrograms.computeIfAbsent(entry.getKey(), pattern -> compileRustProgram(pattern, RustRegexp.Options.defaults(), true));
+            List<String> spans = entry.getValue().subList(1, entry.getValue().size());
+            assertDfaSpans(entry.getKey(), forward, reverse, utf8Slice(entry.getValue().get(0)), spans);
+        }
 
-        // Byte 0x7F is ASCII, so \B next to it does not quit.
-        Prog nonBoundary = compileRustProgram("\\B", RustRegexp.Options.defaults(), false);
-        assertThat(Dfa.search(nonBoundary, Slices.wrappedBuffer((byte) 0x7F), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(0);
-
-        Prog boundaries = compileRustProgram("\\bfoo\\b", RustRegexp.Options.defaults(), false);
-        Slice nonAscii = utf8Slice("é foo");
-        assertThat(Dfa.search(boundaries, nonAscii, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
-        assertThat(Dfa.countMatches(boundaries, nonAscii, Prog.MatchKind.FIRST_MATCH)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-
-        // A quit is not cache exhaustion, so the count does not bail, and later ASCII searches
-        // keep the DFA.
-        assertThat(Dfa.countMatches(boundaries, utf8Slice("foo foo"), Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
-        assertThat(Dfa.search(boundaries, utf8Slice("a foo"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(5);
-
-        Slice text = utf8Slice("aé");
+        // Malformed bytes are not word characters; a lead whose character never arrives quits the
+        // forward DFA, and the search reruns without it.
+        Prog words = compileRustProgram("\\b\\w+\\b", RustRegexp.Options.defaults(), false);
+        Prog reverseWords = compileRustProgram("\\b\\w+\\b", RustRegexp.Options.defaults(), true);
+        assertDfaSpans("\\b\\w+\\b", words, reverseWords, Slices.wrappedBuffer((byte) 0xFF, (byte) 'a', (byte) 0xFF), List.of("1-2"));
+        assertDfaSpans("\\b\\w+\\b", words, reverseWords, Slices.wrappedBuffer((byte) 0xB6, (byte) 'a'), List.of("1-2"));
+        assertDfaSpans("\\b\\w+\\b", words, reverseWords, Slices.wrappedBuffer((byte) 0xD0, (byte) 0xB6, (byte) 0xB6), List.of("0-2"));
+        assertDfaSpans("\\b\\w+\\b", words, reverseWords, utf8Slice("\uFFFDa"), List.of("3-4"));
+        assertDfaSpans("\\B", compileRustProgram("\\B", RustRegexp.Options.defaults(), false), compileRustProgram("\\B", RustRegexp.Options.defaults(), true), Slices.wrappedBuffer((byte) 0xFF, (byte) 0xFF), List.of());
+        Slice truncated = truncatedLeads("#a");
+        assertThat(Dfa.search(words, truncated, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.countMatches(words, truncated, Prog.MatchKind.FIRST_MATCH)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+        assertThat(spans(RustRegexp.compile(utf8Slice("\\b")), truncated)).containsExactly("1-1", "2-2");
         for (RustRegexp.Options options : List.of(RustRegexp.Options.defaults(), RustRegexp.Options.bytes())) {
+            assertThat(RustRegexp.compile(utf8Slice("\\bfoo\\b"), options).count(truncatedLeads("# foo"))).isEqualTo(1);
             // A count over ASCII text long enough to probe the self-loop's exit bytes keeps the DFA.
             Prog boundariesProgram = compileRustProgram("\\bfoo\\b", options, false);
             assertThat(Dfa.countMatches(boundariesProgram, utf8Slice("foo ".repeat(100)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(100);
-
-            // When the reverse program quits after the forward program found the end, and when a
-            // count quits, the search reruns without the DFA.
-            RustRegexp compiled = RustRegexp.compile(utf8Slice("a|é\\b"), options);
-            int[] groups = new int[2];
-            assertThat(compiled.findInto(text, groups)).isTrue();
-            assertThat(groups).containsExactly(0, 1);
-            Prog reverse = compiled.reverseProgramIfComputedForDiagnostics();
-            assertThat(reverse).isNotNull();
-            assertThat(Dfa.search(reverse, text, 0, 1, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
-            assertThat(compiled.count(text)).isEqualTo(2);
         }
+
+        // A quit is not cache exhaustion, so the count does not bail, and later searches keep the
+        // DFA. Byte 0x7F is ASCII, so \B next to it does not quit.
+        assertThat(Dfa.countMatches(words, utf8Slice("foo жж"), Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
+        assertThat(Dfa.search(compileRustProgram("\\B", RustRegexp.Options.defaults(), false), Slices.wrappedBuffer((byte) 0x7F), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(0);
+
+        // At the least budget at which the counting DFA starts, a long Cyrillic text finds every word.
+        Slice cyrillic = utf8Slice("жж ".repeat(1000));
+        RustRegexp tight = compileAtSmallestBudget(
+                maxMemory -> RustRegexp.compile(utf8Slice("\\b\\w+\\b"), RustRegexp.Options.defaults().setMaxMemory(maxMemory)),
+                pattern -> pattern.count(utf8Slice("x ".repeat(100))) == 100 && pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH) != null);
+        assertThat(tight.count(cyrillic)).isEqualTo(1000);
+        assertThat(spans(tight, cyrillic)).isEqualTo(spans(RustRegexp.compile(utf8Slice("\\b\\w+\\b")), cyrillic));
     }
 
     @Test
     public void testDfaQuitStreakSkipsDfaForRestOfInput()
     {
-        // Each search over the Cyrillic words quits the forward DFA at its start. After four
-        // quits, the matcher's later searches of the input skip the DFA, including those over the
-        // ASCII words that follow, and still find every match.
+        // Each search over the words after a Cyrillic lead with no character quits the forward
+        // DFA at its start. After four quits, the matcher's later searches of the input skip the
+        // DFA, including those over the ASCII words that follow, and still find every match.
         RustRegexp words = RustRegexp.compile(utf8Slice("\\b\\w+\\b"));
-        Slice text = utf8Slice("жж ".repeat(8) + "foo bar");
+        Slice text = truncatedLeads("#a ".repeat(8) + "foo bar");
         RegexpMatcher matcher = words.matcher(text, 0);
         List<String> spans = new ArrayList<>();
         for (int quit = 0; quit < 4; quit++) {
@@ -415,44 +447,36 @@ public class TestRustRegexp
 
         List<String> expected = new ArrayList<>();
         for (int word = 0; word < 8; word++) {
-            expected.add((5 * word) + "-" + (5 * word + 4));
+            expected.add((3 * word + 1) + "-" + (3 * word + 2));
         }
-        expected.addAll(List.of("40-43", "44-47"));
+        expected.addAll(List.of("24-27", "28-31"));
         assertThat(spans).isEqualTo(expected);
         assertThat(matcher.dfaQuitStreak()).isEqualTo(4);
         assertThat(forward.cacheSnapshot().stateCount()).isEqualTo(stateCount);
 
         // A reset ends the streak, so the DFA runs over the ASCII words again.
-        matcher.reset(text, 40, text.length());
+        matcher.reset(text, 24, text.length());
         assertThat(matcher.find()).isTrue();
-        assertThat(matcher.start()).isEqualTo(40);
-        assertThat(matcher.end()).isEqualTo(43);
+        assertThat(matcher.start()).isEqualTo(24);
+        assertThat(matcher.end()).isEqualTo(27);
         assertThat(forward.cacheSnapshot().stateCount()).isGreaterThan(stateCount);
-
-        // A search whose reverse DFA quits after the forward DFA found the end counts toward the
-        // streak too, so searches that alternate reverse and forward quits reach the limit.
-        RegexpMatcher alternating = RustRegexp.compile(utf8Slice("a|é\\b")).matcher(utf8Slice("aé ".repeat(4)), 0);
-        for (int quit = 0; quit < 4; quit++) {
-            assertThat(alternating.find()).isTrue();
-            assertThat(alternating.dfaQuitStreak()).isEqualTo(quit + 1);
-        }
     }
 
     @Test
     public void testLiteralCandidateCursorFollowsDfaQuitStreak()
     {
-        // Each search over the Cyrillic words quits the literal cursor's DFA, which counts once
-        // toward the streak. At the limit, later searches skip the cursor until a reset. A matcher
-        // settles a candidate whose check quits only where matches have a longest length, so
-        // each pattern here contains an unbounded repeat.
-        RustRegexp cyrillic = RustRegexp.compile(utf8Slice("\\bжж\\b\\w*"));
-        Slice text = utf8Slice("жж ".repeat(2 * DFA_QUIT_STREAK_LIMIT) + "x".repeat(200));
-        RegexpMatcher matcher = cyrillic.matcher(text, 0);
+        // Each search over a word that ends at a Cyrillic lead with no character quits the
+        // literal cursor's DFA, which counts once toward the streak. At the limit, later searches
+        // skip the cursor until a reset. A matcher settles a candidate whose check quits only
+        // where matches have a longest length, so each pattern here contains an unbounded repeat.
+        RustRegexp truncatedWords = RustRegexp.compile(utf8Slice("\\bab\\w*\\b"));
+        Slice text = truncatedLeads("ab# ".repeat(2 * DFA_QUIT_STREAK_LIMIT) + "x".repeat(200));
+        RegexpMatcher matcher = truncatedWords.matcher(text, 0);
         assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
         for (int word = 0; word < 2 * DFA_QUIT_STREAK_LIMIT; word++) {
             assertThat(matcher.find()).isTrue();
-            assertThat(matcher.start()).isEqualTo(5 * word);
-            assertThat(matcher.end()).isEqualTo(5 * word + 4);
+            assertThat(matcher.start()).isEqualTo(4 * word);
+            assertThat(matcher.end()).isEqualTo(4 * word + 2);
             assertThat(matcher.dfaQuitStreak()).isEqualTo(Math.min(word + 1, DFA_QUIT_STREAK_LIMIT));
             assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(Math.min(word + 1, DFA_QUIT_STREAK_LIMIT));
         }
@@ -463,16 +487,10 @@ public class TestRustRegexp
         assertThat(matcher.dfaQuitStreak()).isEqualTo(1);
         assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(DFA_QUIT_STREAK_LIMIT + 1);
 
-        // The next find forgets a quit: its DFA runs over the ASCII tail and ends the streak.
-        RegexpMatcher tail = RustRegexp.compile(utf8Slice("\\bжж\\b (?:q.*)?")).matcher(utf8Slice("x ".repeat(35) + "жж x y z"), 0);
-        assertThat(tail.find()).isTrue();
-        assertThat(tail.dfaQuitStreak()).isEqualTo(1);
-        assertThat(tail.find()).isFalse();
-        assertThat(tail.dfaQuitStreak()).isZero();
-
         // A failed find that quits retries from the same start, so repeated quits also reach the
         // limit. The input is longer than the pattern's minimum length, so the DFA runs.
-        RegexpMatcher retrying = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}.*")).matcher(utf8Slice("fooж " + "x".repeat(110)), 0);
+        RustRegexp retryingPattern = RustRegexp.compile(utf8Slice("\\bfoo\\w*\\b.{100}.*"));
+        RegexpMatcher retrying = retryingPattern.matcher(truncatedLeads("foo# " + "x".repeat(110)), 0);
         assertThat(retrying.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
         for (int quit = 0; quit < 6; quit++) {
             assertThat(retrying.find()).isFalse();
@@ -480,14 +498,14 @@ public class TestRustRegexp
             assertThat(retrying.candidateStartFallbackCountForDiagnostics()).isEqualTo(Math.min(quit + 1, DFA_QUIT_STREAK_LIMIT));
         }
         // A shorter input fails on length before the DFA can quit.
-        RegexpMatcher tooShort = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}.*")).matcher(utf8Slice("fooж " + "x".repeat(70)), 0);
+        RegexpMatcher tooShort = retryingPattern.matcher(truncatedLeads("foo# " + "x".repeat(70)), 0);
         assertThat(tooShort.find()).isFalse();
         assertThat(tooShort.dfaQuitStreak()).isZero();
         assertThat(tooShort.candidateStartFallbackCountForDiagnostics()).isZero();
 
         // A match the cursor verifies ends the streak, so quits that alternate with matches never
         // reach the limit.
-        RegexpMatcher alternating = RustRegexp.compile(utf8Slice("\\bfoo\\b\\w*")).matcher(utf8Slice("fooж foo foo ".repeat(5) + "x".repeat(200)), 0);
+        RegexpMatcher alternating = RustRegexp.compile(utf8Slice("\\bfoo\\w*\\b")).matcher(truncatedLeads("foo# foo ".repeat(5) + "x".repeat(200)), 0);
         assertThat(alternating.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
         for (int search = 0; search < 10; search++) {
             assertThat(alternating.find()).isTrue();
@@ -497,7 +515,7 @@ public class TestRustRegexp
         assertThat(alternating.candidateStartRouteCountForDiagnostics()).isEqualTo(5);
 
         // So does a no-match the cursor proves.
-        RegexpMatcher exhausted = cyrillic.matcher(utf8Slice("жж " + "x".repeat(200)), 0);
+        RegexpMatcher exhausted = truncatedWords.matcher(truncatedLeads("ab# xab" + "x".repeat(200)), 0);
         assertThat(exhausted.find()).isTrue();
         assertThat(exhausted.dfaQuitStreak()).isEqualTo(1);
         assertThat(exhausted.find()).isFalse();
@@ -542,6 +560,47 @@ public class TestRustRegexp
                 assertThat(groups).as(pattern).containsExactly(1, 2, 1, 2);
             }
         }
+    }
+
+    // Finds every match of `pattern` in `text`, and checks the forward DFA's end of the first and
+    // the reverse DFA's start of it, either of which may quit only on malformed text.
+    private static void assertDfaSpans(String pattern, Prog forward, Prog reverse, Slice text, List<String> expected)
+    {
+        String description = "%s on %s".formatted(pattern, text.toStringUtf8());
+        assertThat(spans(RustRegexp.compile(utf8Slice(pattern)), text)).as(description).isEqualTo(expected);
+        boolean mayQuit = !TestingEngineAgreement.isUtf8(text.getBytes());
+        long end = Dfa.search(forward, text, false, Prog.MatchKind.FIRST_MATCH, true);
+        if (end != Dfa.SEARCH_FAILED || !mayQuit) {
+            assertThat(end).as(description).isEqualTo(expected.isEmpty() ? Dfa.SEARCH_NO_MATCH : Long.parseLong(expected.get(0).split("-")[1]));
+        }
+        if (!expected.isEmpty()) {
+            int matchEnd = Integer.parseInt(expected.get(0).split("-")[1]);
+            long start = Dfa.search(reverse, text, 0, matchEnd, true, Prog.MatchKind.LONGEST_MATCH, true);
+            assertThat(start).as(description).isEqualTo(Long.parseLong(expected.get(0).split("-")[0]));
+        }
+    }
+
+    private static List<String> spans(CompiledPattern pattern, Slice text)
+    {
+        RegexpMatcher matcher = pattern.matcher(text, 0);
+        List<String> spans = new ArrayList<>();
+        while (matcher.find()) {
+            spans.add(matcher.start() + "-" + matcher.end());
+        }
+        return spans;
+    }
+
+    // The UTF-8 bytes of `text`, with each # replaced by 0xD0, the lead of a Cyrillic letter, with
+    // no continuation byte after it.
+    private static Slice truncatedLeads(String text)
+    {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        for (int index = 0; index < bytes.length; index++) {
+            if (bytes[index] == '#') {
+                bytes[index] = (byte) 0xD0;
+            }
+        }
+        return Slices.wrappedBuffer(bytes);
     }
 
     private static Prog compileRustProgram(String pattern, RustRegexp.Options options, boolean reversed)

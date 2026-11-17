@@ -419,6 +419,130 @@ final class UnicodeGroups
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.LETTER_OR_DIGIT) != 0;
     }
 
+    // The word rules a DFA decides word assertions under, one bit each: Rust's Unicode word
+    // characters, Java's \b without and with UNICODE_CHARACTER_CLASS, and Trino's \b.
+    static final int RUST_WORD_RULE = 1;
+    static final int JAVA_WORD_RULE = 1 << 1;
+    static final int JAVA_UNICODE_WORD_RULE = 1 << 2;
+    static final int TRINO_WORD_RULE = 1 << 3;
+    private static final int WORD_RULE_COUNT = 4;
+
+    // The class of a character under a set of word rules: a word character under every rule, a
+    // non-word character under every rule, or one whose side of a boundary the character alone
+    // does not settle, because the rules disagree or because Java gives a nonspacing mark the
+    // class of a base before it.
+    static final int WORD_CHARACTER = 1;
+    static final int NON_WORD_CHARACTER = 2;
+    static final int CONTEXT_CHARACTER = 3;
+
+    /// Returns the class of `codePoint`, from 0 through `RUNEMAX`, under every rule in
+    /// `wordRules`: [#WORD_CHARACTER], [#NON_WORD_CHARACTER], or [#CONTEXT_CHARACTER].
+    static int wordCharacterClass(int codePoint, int wordRules)
+    {
+        int flags = WordFlags.FLAGS.get(codePoint);
+        int characterClass = 0;
+        for (int rule = 0; rule < WORD_RULE_COUNT; rule++) {
+            if ((wordRules & (1 << rule)) != 0) {
+                int ruleClass = wordCharacterClass(codePoint, flags, rule);
+                if (characterClass != 0 && characterClass != ruleClass) {
+                    return CONTEXT_CHARACTER;
+                }
+                characterClass = ruleClass;
+            }
+        }
+        return characterClass;
+    }
+
+    private static int wordCharacterClass(int codePoint, int flags, int rule)
+    {
+        boolean nonspacingMark = (flags & WordFlags.NONSPACING_MARK) != 0;
+        return switch (1 << rule) {
+            case RUST_WORD_RULE -> (flags & WordFlags.JAVA_WORD) != 0 ? WORD_CHARACTER : NON_WORD_CHARACTER;
+            case JAVA_WORD_RULE -> {
+                if (codePoint < 0x80) {
+                    yield (flags & WordFlags.JAVA_WORD) != 0 ? WORD_CHARACTER : NON_WORD_CHARACTER;
+                }
+                yield nonspacingMark ? CONTEXT_CHARACTER : NON_WORD_CHARACTER;
+            }
+            case JAVA_UNICODE_WORD_RULE -> {
+                if ((flags & WordFlags.JAVA_WORD) != 0) {
+                    yield WORD_CHARACTER;
+                }
+                yield nonspacingMark ? CONTEXT_CHARACTER : NON_WORD_CHARACTER;
+            }
+            case TRINO_WORD_RULE -> (flags & WordFlags.TRINO_WORD) != 0 ? WORD_CHARACTER : NON_WORD_CHARACTER;
+            default -> throw new IllegalArgumentException("not a word rule: " + rule);
+        };
+    }
+
+    /// Returns the class every character that lead byte `lead` starts shares under every rule in
+    /// `wordRules`, or 0 when they do not share one, so that the lead alone does not settle the
+    /// side of a boundary it is on. The leads E0, ED, F0, and F4, which limit the byte after them,
+    /// and bytes that are no lead of a valid character, are always 0.
+    static int wordLeadClass(int lead, int wordRules)
+    {
+        int leadClass = 0;
+        for (int rule = 0; rule < WORD_RULE_COUNT; rule++) {
+            if ((wordRules & (1 << rule)) != 0) {
+                int ruleClass = WordLeads.CLASSES[rule][lead & 0xFF];
+                if (ruleClass == 0 || (leadClass != 0 && leadClass != ruleClass)) {
+                    return 0;
+                }
+                leadClass = ruleClass;
+            }
+        }
+        return leadClass;
+    }
+
+    // The class every character a lead byte starts shares under each word rule, from one walk over
+    // the code points outside ASCII the first time a program with a decoding word assertion
+    // computes its byte map.
+    private static final class WordLeads
+    {
+        private static final byte[][] CLASSES = leadClasses();
+
+        private static byte[][] leadClasses()
+        {
+            // Bit k of a lead's entry records that the lead can start a character of class k.
+            byte[][] seen = new byte[WORD_RULE_COUNT][256];
+            for (int codePoint = 0x80; codePoint <= RUNEMAX; codePoint++) {
+                if (codePoint == 0xD800) {
+                    codePoint = 0xDFFF;
+                    continue;
+                }
+                int lead;
+                if (codePoint < 0x800) {
+                    lead = 0xC0 | (codePoint >>> 6);
+                }
+                else if (codePoint < 0x10000) {
+                    lead = 0xE0 | (codePoint >>> 12);
+                }
+                else {
+                    lead = 0xF0 | (codePoint >>> 18);
+                }
+                int flags = WordFlags.FLAGS.get(codePoint);
+                for (int rule = 0; rule < WORD_RULE_COUNT; rule++) {
+                    seen[rule][lead] |= (byte) (1 << wordCharacterClass(codePoint, flags, rule));
+                }
+            }
+            byte[][] classes = new byte[WORD_RULE_COUNT][256];
+            for (int rule = 0; rule < WORD_RULE_COUNT; rule++) {
+                for (int lead = 0xC2; lead <= 0xF4; lead++) {
+                    if (lead == 0xE0 || lead == 0xED || lead == 0xF0 || lead == 0xF4) {
+                        continue;
+                    }
+                    if (seen[rule][lead] == 1 << WORD_CHARACTER) {
+                        classes[rule][lead] = WORD_CHARACTER;
+                    }
+                    else if (seen[rule][lead] == 1 << NON_WORD_CHARACTER) {
+                        classes[rule][lead] = NON_WORD_CHARACTER;
+                    }
+                }
+            }
+            return classes;
+        }
+    }
+
     // The classes that match-time word boundaries read for each input code point, as the flags of
     // one table, built when the first pattern with such a boundary compiles rather than by each
     // pattern.

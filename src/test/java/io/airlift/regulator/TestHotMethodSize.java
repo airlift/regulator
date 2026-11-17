@@ -13,6 +13,9 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.Dfa.CacheTables;
+import io.airlift.regulator.Dfa.DfaInstance;
+import io.airlift.regulator.Dfa.StateData;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.ExactMatcher;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
@@ -26,18 +29,24 @@ import java.lang.classfile.ClassModel;
 import java.lang.classfile.CodeModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
+import java.lang.classfile.attribute.MethodParameterInfo;
 import java.lang.classfile.instruction.BranchInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
+import java.lang.constant.ClassDesc;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.airlift.regulator.TestScanKernel.classfile;
 import static io.airlift.regulator.TestScanKernel.patternClassfile;
 import static io.airlift.regulator.TestScanPlan.URL;
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHotMethodSize
@@ -51,6 +60,8 @@ public class TestHotMethodSize
     // C2 inlines a callee of at most MaxTrivialSize, 6 bytecode bytes, even at a call site it
     // judges too rarely reached to inline anything larger.
     private static final int MAX_TRIVIAL_SIZE = 6;
+    // The byte-array overload of the start state lookup every DFA search runs.
+    private static final String ANALYZE_START = MethodType.methodType(StateData.class, CacheTables.class, byte[].class, int.class, int.class, int.class, int.class, boolean.class, boolean.class).toMethodDescriptorString();
 
     /// Keeps each full-Slice find, count, matches, and lookingAt route small enough for C2 to
     /// inline into the one-line override of the pattern's shape class, and that override into
@@ -585,6 +596,105 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorByteSetScanner.class, "findLiteralSet")).as("VectorByteSetScanner.findLiteralSet bytecode bytes").isPositive().isLessThanOrEqualTo(152);
     }
 
+    /// Keeps the DFA search loops' leading parameters, by type and name, as they were before the
+    /// DFA decided Unicode word boundaries, with the text context a decoding transition reads
+    /// after them. x86-64 passes six Java arguments in registers and AArch64 eight, so a context
+    /// parameter inserted among the leading ones pushed a loop bound onto the stack on x86, and
+    /// searches that never decode slowed there.
+    @Test
+    public void testDfaSearchesKeepLeadingParameters()
+    {
+        for (Map.Entry<String, String> method : List.of(
+                Map.entry("searchForward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean pairedSearch, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardAbsolutePointers", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int startOffset, int initialMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardContinuation", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, int initialMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardScanAcceleration", "DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, byte[] byteCandidates, int byteScanSet, int byteCandidateOffset"),
+                Map.entry("searchForwardPrefixAccelSingleByte", "DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardAnchoredLongPrefixInt", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardSampledSelfLoops", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardPairs", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardPairsFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardPairsFlat", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsFlatAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardPairsFlatFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardCountSelfLoopScan", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int contextEnd, int startOffset"),
+                Map.entry("searchBackward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxBegin, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, int maximumBytes"),
+                Map.entry("searchAnchoredCandidate", "CandidateStartCursor cursor, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int candidate"),
+                Map.entry("searchAnchoredWithStop", "DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd"),
+                Map.entry("searchReverseThenAnchoredWithStop", "DfaInstance reverseDfa, CacheTables reverseTables, DfaInstance forwardDfa, CacheTables forwardTables, byte[] bytes, int contextOffset, int contextBegin, int contextEnd, int textBegin, int literalBegin, int textEnd, int maximumReverseBytes"))) {
+            // The loop is the one method of its name that reads the text's bytes; a Slice
+            // facade of the same name only enters it.
+            assertThat(parameterLists(Dfa.class, method.getKey()))
+                    .as("Dfa.%s parameters", method.getKey())
+                    .filteredOn(parameters -> parameters.contains("byte[] bytes"))
+                    .singleElement()
+                    .satisfies(parameters -> assertThat(parameters.split(", ")).startsWith(method.getValue().split(", ")));
+        }
+    }
+
+    /// Keeps the pair loops decoding their own misses, where C2 inlines the decode on the loop's
+    /// profile. A miss method runs once per search and, once its loop compiles, only inlined
+    /// there, so its own profile stays immature; a decode left out of line there can keep the
+    /// loop's position in a stack slot on x86.
+    @Test
+    public void testPairLoopsDecodeTheirOwnMisses()
+    {
+        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+            assertThat(calledMethods(Dfa.class, loop, Dfa.class))
+                    .as("Dfa methods Dfa.%s calls", loop)
+                    .contains("decodePairedTransition");
+            assertThat(calledMethods(Dfa.class, loop + "AfterMiss", Dfa.class))
+                    .as("Dfa methods Dfa.%sAfterMiss calls", loop)
+                    .doesNotContain("decodePairedTransition");
+        }
+    }
+
+    /// Keeps the pair loops and their miss methods ending in the one-byte continuation, which
+    /// measures its result from `resultBegin` itself. A position read after an out-of-line
+    /// one-byte search, to offset its result, can keep the loop's position in a stack slot on x86.
+    @Test
+    public void testPairLoopExitsUseContinuation()
+    {
+        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+            for (String method : List.of(loop, loop + "AfterMiss")) {
+                assertThat(calledMethods(Dfa.class, method, Dfa.class))
+                        .as("Dfa methods Dfa.%s calls", method)
+                        .contains("searchForwardContinuation")
+                        .doesNotContain("searchForward");
+            }
+        }
+    }
+
+    /// Keeps the DFA's uncomputed transition below C2's 200-byte limit for inlining a method that
+    /// throws often, as the quit and retry exceptions do, with every decoding step in a helper
+    /// only a decoding DFA reaches; at 210 bytes a reverse search's fallback stopped inlining it.
+    /// Caps the start state lookup every find runs at its measured size, which keeps the decoding
+    /// DFA's start setup out of it.
+    @Test
+    public void testDfaTransitionAndStartStayAtMeasuredSize()
+    {
+        assertThat(codeLength(DfaInstance.class, "computeTransition")).as("Dfa.DfaInstance.computeTransition bytecode bytes").isPositive().isLessThan(200);
+        assertThat(codeLength(DfaInstance.class, "analyzeStart", ANALYZE_START)).as("Dfa.DfaInstance.analyzeStart bytecode bytes").isPositive().isLessThanOrEqualTo(140);
+        assertThat(codeLength(DfaInstance.class, "startCache")).as("Dfa.DfaInstance.startCache bytecode bytes").isPositive().isLessThanOrEqualTo(212);
+    }
+
+    /// Keeps the start state lookup's lock check before the builder call rather than inside the
+    /// builder. A shared search never holds the lock, so with the check before the call its
+    /// compile drops the builder call, which C2 leaves out of line.
+    @Test
+    public void testStartLookupChecksLockBeforeBuilder()
+    {
+        assertThat(calledMethods(DfaInstance.class, "analyzeStart", ANALYZE_START, ReentrantLock.class))
+                .as("ReentrantLock methods Dfa.DfaInstance.analyzeStart calls")
+                .contains("isHeldByCurrentThread");
+        assertThat(calledMethods(DfaInstance.class, "buildStartState", ReentrantLock.class))
+                .as("ReentrantLock methods Dfa.DfaInstance.buildStartState calls")
+                .doesNotContain("isHeldByCurrentThread");
+    }
+
     /// Caps the exact literal alternation's root-table loop, which inlines the trie walk, at the
     /// size it was measured at, and keeps the folded matcher's stop compare, byte compare, and
     /// root-table loop within C2's inline size, so each inlines into the route loop that calls it.
@@ -694,6 +804,15 @@ public class TestHotMethodSize
                 .toList();
     }
 
+    // The names of the methods of `owner` that the method of `type` with `methodName` and
+    // `descriptor` calls.
+    private static List<String> calledMethods(Class<?> type, String methodName, String descriptor, Class<?> owner)
+    {
+        return invocations(type, model -> model.methodName().equalsString(methodName) && model.methodType().equalsString(descriptor), owner)
+                .map(invoke -> invoke.name().stringValue())
+                .toList();
+    }
+
     // The methods of `owner`, each as its name and descriptor, that the methods of `type` that
     // `callers` accepts call.
     private static List<String> calledOverloads(Class<?> type, Predicate<MethodModel> callers, Class<?> owner)
@@ -730,6 +849,34 @@ public class TestHotMethodSize
         List<Integer> lengths = codeLengths(type, methodName);
         assertThat(lengths).as("methods named %s", methodName).hasSize(1);
         return lengths.getFirst();
+    }
+
+    private static int codeLength(Class<?> type, String methodName, String descriptor)
+    {
+        return ClassFile.of().parse(classfile(type)).methods().stream()
+                .filter(method -> method.methodName().equalsString(methodName) && method.methodType().equalsString(descriptor))
+                .map(method -> method.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0))
+                .findFirst()
+                .orElse(0);
+    }
+
+    // Each method of `type` named `methodName` as its parameters, each as its type's simple name
+    // and its name, joined as a declaration lists them.
+    private static List<String> parameterLists(Class<?> type, String methodName)
+    {
+        return ClassFile.of().parse(classfile(type)).methods().stream()
+                .filter(method -> method.methodName().equalsString(methodName))
+                .map(method -> {
+                    List<ClassDesc> types = method.methodTypeSymbol().parameterList();
+                    List<MethodParameterInfo> names = method.findAttribute(Attributes.methodParameters()).orElseThrow().parameters();
+                    return IntStream.range(0, types.size())
+                            .mapToObj(index -> {
+                                String typeName = types.get(index).displayName();
+                                return typeName.substring(typeName.lastIndexOf('$') + 1) + " " + names.get(index).name().orElseThrow().stringValue();
+                            })
+                            .collect(joining(", "));
+                })
+                .toList();
     }
 
     private static List<Integer> codeLengths(Class<?> type, String methodName)

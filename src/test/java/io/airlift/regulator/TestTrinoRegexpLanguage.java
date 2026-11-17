@@ -734,15 +734,16 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testUnicodeWordBoundariesRunOnDfaAndOnePass()
     {
-        // The forward and reverse DFAs evaluate Unicode \b and \B between ASCII bytes and quit
-        // next to any other byte, and OnePass evaluates them as BitState does, over text with ²,
-        // which Joni counts as a word character, a combining acute accent, and their bytes alone.
+        // The forward DFA decides Unicode \b and \B from a lead byte whose characters share one
+        // class, and otherwise from the text, as the reverse DFA does, and quits only on malformed
+        // text; OnePass evaluates them as BitState does. Both run over text with ², which Joni
+        // counts as a word character, a combining acute accent, ж, and their bytes alone.
         Slice text = utf8Slice("x foo bar");
         TrinoCompiledPattern words = TrinoRegexp.compile(utf8Slice("\\bfoo\\b")).re2();
         assertThat(words.findInto(text, new int[2])).isTrue();
         assertThat(words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
 
-        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81);
+        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81, (byte) 0xD0, (byte) 0xB6);
         for (String pattern : List.of("\\ba\\b", "\\B", "a\\b", "\\b", "(?m)^\\b")) {
             Prog forward = compileTrinoProgram(pattern, false);
             assertThat(forward.hasDfaUnsupportedAssertions()).as(pattern).isFalse();
@@ -752,6 +753,29 @@ public class TestTrinoRegexpLanguage
             Prog program = compileTrinoProgram(entry.getKey(), false);
             assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
             TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), texts, "Trino");
+        }
+
+        // Each pattern, compiled once, finds what Joni finds beside characters outside ASCII, and
+        // its forward DFA ends the first match without quitting.
+        List<Slice> inputs = List.of(
+                utf8Slice("жж жж"),
+                utf8Slice("☃foo☃"),
+                utf8Slice("foo—"),
+                utf8Slice("foo☃"),
+                utf8Slice("fooж"),
+                utf8Slice("aé"));
+        for (String patternText : List.of("\\b\\w+\\b", "\\bfoo\\b", "foo\\b", "a|é\\b")) {
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(patternText)).re2();
+            Regex joniPattern = joniPattern(utf8Slice(patternText));
+            Prog forward = compileTrinoProgram(patternText, false);
+            for (Slice input : inputs) {
+                List<MatchBoundary> expected = joniMatchBoundaries(joniPattern, input);
+                String description = "%s against %s".formatted(patternText, input.toStringUtf8());
+                assertThat(matchBoundaries(pattern.matcher(input))).as(description).isEqualTo(expected);
+                assertThat(Dfa.search(forward, input, false, Prog.MatchKind.FIRST_MATCH, true))
+                        .as(description)
+                        .isEqualTo(expected.isEmpty() ? Dfa.SEARCH_NO_MATCH : expected.get(0).end());
+            }
         }
     }
 

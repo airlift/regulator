@@ -487,7 +487,7 @@ public class TestUpstreamDfa
                         transition = Dfa.T_DEAD;
                     }
                     else {
-                        transition = dfa.computeTransition(dfa.cacheTablesForTesting(), stateOffset, inputByClass[byteClass]);
+                        transition = dfa.computeTransitionFromState(dfa.cacheTablesForTesting(), stateOffset, inputByClass[byteClass]);
                     }
 
                     if (transition == Integer.MIN_VALUE) {

@@ -50,16 +50,27 @@ public class TestTaggedAlternationProgram
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
         }
 
-        // Next to é the DFA quits, and the matches come from the NFA. Java's \b reads é as a
-        // non-word character and Joni's as a word character, so they pick different branches.
-        // This shape has one participating branch, so no per-thread capture array is needed.
+        // Next to é the DFA decides each language's boundary from the text. Java's \b reads é as
+        // a non-word character and Joni's as a word character, so they pick different branches.
         Slice accented = utf8Slice("éfoo foo");
         RegexpMatcher javaMatcher = java.matcher(accented);
         assertThat(winningBranches(javaMatcher)).containsExactly("0-2:3", "2-5:1", "5-6:3", "6-9:1");
-        assertThat(javaMatcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
+        assertThat(javaMatcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
         RegexpMatcher trinoMatcher = trino.matcher(accented);
         assertThat(winningBranches(trinoMatcher)).containsExactly("0-2:3", "2-5:2", "5-6:3", "6-9:1");
-        assertThat(trinoMatcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
+        assertThat(trinoMatcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+
+        // A lead byte that no continuation byte finishes quits the first find's DFA, and an
+        // engine that decodes the text finds its match. This shape has one participating branch,
+        // so no per-thread capture array is needed.
+        Slice truncated = wrappedBuffer(new byte[] {(byte) 0xD0, 'f', 'o', 'o', ' ', 'f', 'o', 'o'});
+        for (CompiledPattern pattern : List.of(java, trino)) {
+            RegexpMatcher matcher = pattern.matcher(truncated);
+            assertThat(matcher.find()).isTrue();
+            assertThat(matcher.dfaQuitStreak()).isEqualTo(1);
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics() || matcher.bitStateWorkspaceInitializedForDiagnostics() || matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+            assertThat(winningBranches(pattern.matcher(truncated))).containsExactly("1-4:1", "4-5:3", "5-8:1");
+        }
     }
 
     @Test
