@@ -179,17 +179,31 @@ public class TestRetainedSize
             assertThat(matcher.find()).isTrue();
         }
         assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
-        assertWithinHeapGraph("matcher after BitState finds", matcher.retainedSizeInBytes(), matcherHeapBytes(matcher, pattern));
+        assertWithinHeapGraph("matcher after BitState finds", matcher.retainedSizeInBytes(), matcherHeapBytes(matcher, pattern, TEXT));
 
         Re2 namedPattern = Re2.compile(Slices.utf8Slice("(?P<first>a)(?P<second>b)(?P<third>c)(?P<fourth>d)"));
         RegexpMatcher fewerGroups = namedPattern.matcher(TEXT, 3);
-        assertWithinHeapGraph("matcher keeping fewer groups (own name map omitted)", fewerGroups.retainedSizeInBytes(), matcherHeapBytes(fewerGroups, namedPattern));
+        assertWithinHeapGraph("matcher keeping fewer groups (own name map omitted)", fewerGroups.retainedSizeInBytes(), matcherHeapBytes(fewerGroups, namedPattern, TEXT));
+
+        // A Trino case-insensitive alternation's matcher keeps a matcher for each route, and the
+        // one an input switches away from lets go of the previous input.
+        TrinoRegexp folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)sherlock|holmes"));
+        assertThat(folded.fullCaseFoldAlternationForDiagnostics() != null).isEqualTo(VectorSupport.isAvailable());
+        Slice escaped = Slices.utf8Slice("\u017F" + TEXT.toStringUtf8());
+        TrinoRegexpMatcher foldedMatcher = folded.matcher(escaped);
+        assertThat(foldedMatcher.find()).isTrue();
+        assertWithinHeapGraph("full case fold matcher on the engine", foldedMatcher.retainedSizeInBytes(), matcherHeapBytes(foldedMatcher, folded, escaped));
+        assertThat(foldedMatcher.reset(TEXT).find()).isTrue();
+        assertWithinHeapGraph("full case fold matcher switched to the literals", foldedMatcher.retainedSizeInBytes(), matcherHeapBytes(foldedMatcher, folded, TEXT));
+        assertThat(foldedMatcher.reset(escaped).find()).isTrue();
+        assertWithinHeapGraph("full case fold matcher switched to the engine", foldedMatcher.retainedSizeInBytes(), matcherHeapBytes(foldedMatcher, folded, escaped));
     }
 
-    // What JOL walks from a matcher beyond its pattern and input.
-    private static long matcherHeapBytes(RegexpMatcher matcher, CompiledPattern pattern)
+    // What JOL walks from a matcher beyond its pattern, its current input, and the shared empty
+    // input an idle matcher holds.
+    private static long matcherHeapBytes(Object matcher, Object pattern, Slice input)
     {
-        return GraphLayout.parseInstance(matcher, pattern, TEXT).totalSize() - GraphLayout.parseInstance(pattern, TEXT).totalSize();
+        return GraphLayout.parseInstance(matcher, pattern, input, Slices.EMPTY_SLICE).totalSize() - GraphLayout.parseInstance(pattern, input, Slices.EMPTY_SLICE).totalSize();
     }
 
     private static <T> void assertMatchesHeapGraph(String row, Supplier<T> compile, BiConsumer<T, Slice> settle, ToLongFunction<T> size)

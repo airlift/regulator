@@ -293,6 +293,91 @@ public class TestTrinoRegexpDifferential
         }
     }
 
+    @Test
+    public void testFullCaseFoldAlternationsMatchJoni()
+    {
+        // A case-insensitive alternation of ASCII literals runs on its folded literals where the
+        // text holds none of its escapes, the characters outside ASCII that its letters may match,
+        // and on the engine elsewhere; the matchers verifyOperations reuses meet both in turn.
+        // Each text is a view between the long s and the Kelvin sign, alone, inside filler long
+        // enough for the start literal filter, and inside filler past the short inputs that a
+        // pattern whose engine filters its starts checks for ASCII alone. The next ones hold the
+        // long s behind a stray leading byte or split by one. The rest put an escape, alone or
+        // spelling the second literal, at each distance after the first or second match, across
+        // the end of the window the first-match operations check, and the Kelvin sign also cut
+        // short by the end of the text.
+        String fillerUnit = "filler text, ";
+        Map<String, List<String>> alternationTexts = Map.of(
+                "(?i)Sherlock|Holmes|Watson|Irene|Adler|John|Baker", List.of(
+                        "Sherlock HOLMES, watson and IrEnE adler",
+                        "\u017Fherlock Holme\u017F, Ba\u212Aer and John",
+                        "caf\u00E9 Sherlock, \u00DF Holmes, \uFB00 Watson"),
+                "(?i)pass|class", List.of(
+                        "pass CLASS PaSs classs",
+                        "pa\u00DF cla\u00DF PA\u017F\u017F clas\u017F",
+                        "caf\u00E9 pass \uFB00 class"),
+                "(?i)strauss|strau", List.of(
+                        // Priority: an escape spelling of the first literal starts where the
+                        // second one matches.
+                        "strau\u00DF strau",
+                        "STRAU\u017F\u017F strau",
+                        // Final byte: the escape is the first literal's last character, on the
+                        // window's last byte.
+                        "Straus\u017F strau",
+                        "strau STRAUS\u017F",
+                        // Leading ligature: one escape spells the first literal's first two letters.
+                        "\uFB05rauss strau",
+                        "\uFB06RAUSS strauss"));
+        Map<String, List<String>> windowLiterals = Map.of(
+                "(?i)Sherlock|Holmes|Watson|Irene|Adler|John|Baker", List.of("Holmes", "Watson", "Wat\u017Fon"),
+                "(?i)pass|class", List.of("pass", "class", "cla\u017Fs"),
+                "(?i)strauss|strau", List.of("strauss", "strau", "\u017Ftrau"));
+        for (Map.Entry<String, List<String>> entry : alternationTexts.entrySet()) {
+            String pattern = entry.getKey();
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            assertThat(regexp.fullCaseFoldAlternationForDiagnostics() != null).as(pattern).isEqualTo(VectorSupport.isAvailable());
+            List<Slice> sources = new ArrayList<>();
+            for (String text : entry.getValue()) {
+                for (String filled : List.of(text, fillerUnit.repeat(8) + text + fillerUnit.repeat(8), fillerUnit.repeat(80) + text + fillerUnit.repeat(80))) {
+                    sources.add(utf8Slice("\u017F" + filled + "\u212A").slice(2, utf8Slice(filled).length()));
+                }
+            }
+            byte[] longS = "\u017F".getBytes(UTF_8);
+            for (byte[] stray : List.of(new byte[] {longS[0], longS[0], longS[1]}, new byte[] {longS[0], 'x', longS[1]})) {
+                byte[] text = "Holme...s pa...s class Holmes".getBytes(US_ASCII);
+                System.arraycopy(stray, 0, text, 5, stray.length);
+                System.arraycopy(stray, 0, text, 12, stray.length);
+                sources.add(Slices.wrappedBuffer(text));
+            }
+            String first = windowLiterals.get(pattern).get(0);
+            String second = windowLiterals.get(pattern).get(1);
+            String escapedSecond = windowLiterals.get(pattern).get(2);
+            // The window the first-match operations check ends the longest literal's byte length
+            // past the match start, so an escape at these distances after the first or second
+            // match starts at the window's end, one less on its last byte, one more past it.
+            int longest = Stream.of(pattern.substring("(?i)".length()).split("\\|")).mapToInt(String::length).max().orElseThrow();
+            int firstWindowEnd = longest - first.length();
+            int secondWindowEnd = longest - second.length();
+            // The distances run on until the escape starts past byte 32, which carries it across
+            // the escape scan's 16- and 32-byte vector boundaries, between its vector loop and
+            // its tail; the window distances lie inside that sweep.
+            int pastVectorBoundaries = 33 - first.length();
+            assertThat(Math.max(firstWindowEnd, secondWindowEnd) + 1).isLessThanOrEqualTo(pastVectorBoundaries);
+            for (int distance = 0; distance <= pastVectorBoundaries; distance++) {
+                String gap = "x".repeat(distance);
+                for (String escape : List.of("\u017F", "\u212A", escapedSecond)) {
+                    sources.add(utf8Slice(first + gap + escape + " " + second));
+                    sources.add(utf8Slice(first + " " + second + gap + escape + " " + first));
+                }
+                sources.add(utf8Slice("\u212A" + gap + first + " " + second));
+                Slice cut = utf8Slice(first + gap + "\u212A");
+                sources.add(cut.slice(0, cut.length() - 1));
+            }
+            Regex oracle = joniPattern(pattern);
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+    }
+
     private static Map<String, Integer> joniNamedGroups(String description, Regex joni)
     {
         Map<String, Integer> namedGroups = new HashMap<>();

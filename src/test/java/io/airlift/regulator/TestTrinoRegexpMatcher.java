@@ -189,7 +189,10 @@ public class TestTrinoRegexpMatcher
         // More than 64 literals take the literal set, whose filler words never occur in the source.
         String largeSet = "foo|bar|" + IntStream.range(0, 63).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
         assertThat(TrinoRegexp.compile(utf8Slice(largeSet)).usesLiteralSetMatcherForDiagnostics()).isTrue();
-        for (String pattern : List.of("foo", "foo|bar", largeSet)) {
+        // A case-insensitive alternation's matcher finds on its folded literals until an escape
+        // could change a find, and on its engine after that.
+        assertThat(TrinoRegexp.compile(utf8Slice("(?i)foo|bar")).fullCaseFoldAlternationForDiagnostics() != null).isEqualTo(VectorSupport.isAvailable());
+        for (String pattern : List.of("foo", "foo|bar", largeSet, "(?i)foo|bar")) {
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
             Slice source = utf8Slice("foo");
             TrinoRegexpMatcher matcher = regexp.matcher(source);
