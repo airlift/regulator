@@ -7475,7 +7475,8 @@ final class Dfa
         // The many-match searches that skip the DFA after a streak of slow resets they judged.
         // Like a boolean search of a line, one search reads one short span, a match the tagged
         // alternation program picks a branch for, so the window is the boolean searches'.
-        private static final int MANY_MATCH_SEARCH_SKIPPED_SEARCHES = 1 << 16;
+        // Sweep leg: no many-match search skips the DFA after slow resets.
+        private static final int MANY_MATCH_SEARCH_SKIPPED_SEARCHES = 0;
         // The budget rule in `releaseAbsolutePointerTransitionsForBudget` gives the pointer table
         // back once the bytes of its rows in use reach the generation's retained Java state memory
         // divided by this. Object rows also pay for the state tables' growth, so what they gain
