@@ -31,12 +31,15 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 
 /// The public uap-core user-agent rules run the way an application runs them on Regulator, with
 /// [UapCoreParser]: each section's rules in one [FilteredRe2], its atoms in one [Re2Set], and the
@@ -64,6 +67,9 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 public class BenchmarkUapCore
 {
     private static final int CRAWLER_RULE_ID = 51;
+    private static final int ATOM_FRAGMENT_TEXT_COUNT = 20_000;
+    private static final long ATOM_FRAGMENT_SEED = 42;
+    private static final byte[] ATOM_FRAGMENT_ALPHABET = " /;()._-0123456789abcdefghijklmnopqrstuvwxyz".getBytes(US_ASCII);
 
     public enum Corpus
     {
@@ -73,6 +79,22 @@ public class BenchmarkUapCore
         OS_TESTS,
         /// The browser-test user agents in which rule 51 alone finds a match: the crawlers.
         CRAWLERS,
+        /// Diagnostic, kept out of the published report (`BenchmarkUapCore` is not in
+        /// `tools/re2-benchmark/baseline/rows.tsv`): synthetic texts that drive the atom sets' DFAs
+        /// into the many states diverse traffic reaches and the small test corpora never do. The
+        /// 20,000 texts of [UapCoreParser#MAX_USER_AGENT_BYTES] bytes each come from a
+        /// `java.util.Random` seeded with 42 and the atoms of both sections, browser then OS, each
+        /// section's in atom-set order. Each step picks a random atom, then one of four modes at
+        /// random, and writes:
+        ///
+        /// 0. one random byte of `" /;()._-0123456789abcdefghijklmnopqrstuvwxyz"`
+        /// 1. a random non-empty prefix of the atom
+        /// 2. a random non-empty suffix of the atom
+        /// 3. the whole atom
+        ///
+        /// A text ends when it is full, cutting the last write short. The atoms are canonical, so the
+        /// texts are too.
+        ATOM_FRAGMENTS,
     }
 
     @State(Scope.Thread)
@@ -235,6 +257,9 @@ public class BenchmarkUapCore
     /// agents in which `crawlerRule` finds a match.
     static Slice[] loadUserAgents(Corpus corpus, Re2 crawlerRule)
     {
+        if (corpus == Corpus.ATOM_FRAGMENTS) {
+            return atomFragments();
+        }
         List<Slice> userAgents = (corpus == Corpus.OS_TESTS ? Section.OS : Section.USER_AGENT).testCases().stream()
                 .map(testCase -> testCase.getString("user_agent_string"))
                 .map(Slices::utf8Slice)
@@ -245,6 +270,38 @@ public class BenchmarkUapCore
                     .toList();
         }
         return userAgents.toArray(Slice[]::new);
+    }
+
+    /// Returns the texts of [Corpus#ATOM_FRAGMENTS], generated as it describes.
+    static Slice[] atomFragments()
+    {
+        List<byte[]> atoms = new ArrayList<>();
+        for (Section section : List.of(Section.USER_AGENT, Section.OS)) {
+            for (Slice atom : UapCoreParser.atoms(section)) {
+                atoms.add(atom.getBytes());
+            }
+        }
+        Random random = new Random(ATOM_FRAGMENT_SEED);
+        Slice[] texts = new Slice[ATOM_FRAGMENT_TEXT_COUNT];
+        for (int textIndex = 0; textIndex < texts.length; textIndex++) {
+            byte[] text = new byte[UapCoreParser.MAX_USER_AGENT_BYTES];
+            int length = 0;
+            while (length < text.length) {
+                byte[] atom = atoms.get(random.nextInt(atoms.size()));
+                int mode = random.nextInt(4);
+                if (mode == 0) {
+                    text[length++] = ATOM_FRAGMENT_ALPHABET[random.nextInt(ATOM_FRAGMENT_ALPHABET.length)];
+                    continue;
+                }
+                int from = mode == 2 ? random.nextInt(atom.length) : 0;
+                int to = mode == 1 ? 1 + random.nextInt(atom.length) : atom.length;
+                int count = Math.min(to - from, text.length - length);
+                System.arraycopy(atom, from, text, length, count);
+                length += count;
+            }
+            texts[textIndex] = Slices.wrappedBuffer(text);
+        }
+        return texts;
     }
 
     private static Slice[] canonicalTexts(UapCoreParser parser, Slice[] userAgents)
