@@ -255,8 +255,8 @@ public final class RebarRunner
         Samples samples = switch (benchmark.model()) {
             case "compile" -> benchmarkCompile(benchmark);
             case "count" -> benchmarkCount(benchmark);
-            case "count-spans" -> benchmarkMatches(benchmark, MatchMeasurement.SPAN_LENGTH);
-            case "count-captures" -> benchmarkMatches(benchmark, MatchMeasurement.CAPTURES);
+            case "count-spans" -> benchmarkSpans(benchmark);
+            case "count-captures" -> benchmarkCaptures(benchmark);
             case "grep" -> benchmarkGrep(benchmark);
             case "grep-captures" -> benchmarkGrepCaptures(benchmark);
             default -> throw new IllegalArgumentException("unsupported Rebar model: " + benchmark.model());
@@ -297,11 +297,17 @@ public final class RebarRunner
         return benchmarkOperation(benchmark, () -> countMatches(pattern, benchmark.haystack()));
     }
 
-    private static Samples benchmarkMatches(Benchmark benchmark, MatchMeasurement measurement)
+    private static Samples benchmarkSpans(Benchmark benchmark)
     {
         Re2 pattern = benchmark.compile();
-        RegexpMatcher matcher = measurement.createMatcher(pattern, benchmark.haystack());
-        return benchmarkOperation(benchmark, () -> matchResult(benchmark.haystack(), matcher, measurement));
+        return benchmarkOperation(benchmark, () -> spanLengths(pattern, benchmark.haystack()));
+    }
+
+    private static Samples benchmarkCaptures(Benchmark benchmark)
+    {
+        Re2 pattern = benchmark.compile();
+        RegexpMatcher matcher = pattern.matcher(benchmark.haystack());
+        return benchmarkOperation(benchmark, () -> captureCount(benchmark.haystack(), matcher));
     }
 
     private static Samples benchmarkGrep(Benchmark benchmark)
@@ -329,14 +335,8 @@ public final class RebarRunner
     {
         return switch (benchmark.model()) {
             case "compile", "count" -> countMatches(pattern, benchmark.haystack());
-            case "count-spans" -> matchResult(
-                    benchmark.haystack(),
-                    MatchMeasurement.SPAN_LENGTH.createMatcher(pattern, benchmark.haystack()),
-                    MatchMeasurement.SPAN_LENGTH);
-            case "count-captures" -> matchResult(
-                    benchmark.haystack(),
-                    MatchMeasurement.CAPTURES.createMatcher(pattern, benchmark.haystack()),
-                    MatchMeasurement.CAPTURES);
+            case "count-spans" -> spanLengths(pattern, benchmark.haystack());
+            case "count-captures" -> captureCount(benchmark.haystack(), pattern.matcher(benchmark.haystack()));
             case "grep" -> {
                 Slice haystack = benchmark.haystack();
                 yield grepResult(pattern, haystack, haystack.byteArray(), haystack.byteArrayOffset());
@@ -349,16 +349,23 @@ public final class RebarRunner
         };
     }
 
-    static long matchResult(Slice haystack, RegexpMatcher matcher, MatchMeasurement measurement)
+    /// Returns the sum of the lengths of the matches in `haystack`, which the library's all-match
+    /// operation passes to [SpanLengths] rather than a find loop, as the Rust runners sum the
+    /// spans of `find_iter`.
+    static long spanLengths(CompiledPattern pattern, Slice haystack)
+    {
+        SpanLengths lengths = new SpanLengths();
+        pattern.forEachMatch(haystack, lengths);
+        return lengths.total();
+    }
+
+    // Counts the participating groups of every match, through a matcher that retains them all.
+    private static long captureCount(Slice haystack, RegexpMatcher matcher)
     {
         matcher.reset(haystack);
         long count = 0;
         while (matcher.find()) {
-            count += switch (measurement) {
-                case COUNT -> 1;
-                case SPAN_LENGTH -> matcher.end() - matcher.start();
-                case CAPTURES -> countParticipatingGroups(matcher);
-            };
+            count += countParticipatingGroups(matcher);
         }
         return count;
     }
@@ -531,22 +538,22 @@ public final class RebarRunner
         operation.run();
     }
 
-    enum MatchMeasurement
+    /// Sums the lengths of the matches it accepts, for the count-spans model.
+    static final class SpanLengths
+            implements MatchSpanConsumer
     {
-        COUNT(false),
-        SPAN_LENGTH(false),
-        CAPTURES(true);
+        private long total;
 
-        private final boolean includesCaptures;
-
-        MatchMeasurement(boolean includesCaptures)
+        @Override
+        public boolean accept(int start, int end)
         {
-            this.includesCaptures = includesCaptures;
+            total += end - start;
+            return true;
         }
 
-        RegexpMatcher createMatcher(Re2 pattern, Slice input)
+        long total()
         {
-            return includesCaptures ? pattern.matcher(input) : pattern.matcher(input, 0);
+            return total;
         }
     }
 

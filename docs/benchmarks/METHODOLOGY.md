@@ -103,9 +103,12 @@ running a new exporter must not upgrade old measurements to a new API contract.
 
 Current language comparisons use these work contracts:
 
-- Trino bulk span sums and capture counts visit match boundaries and capture
-  participation through matchers on both sides. Each side creates one matcher
-  per source inside timing and reuses it for that source's matches; neither
+- Bulk span sums in every language sum the spans that public `forEachMatch`
+  passes, which creates one matcher per source inside timing and may switch
+  dense matches to a match start set; they carry the `public-for-each-match-v1`
+  work contract. Trino bulk capture counts visit capture participation through
+  matchers on both sides. Each Trino or Joni side creates one matcher per
+  source inside timing and reuses it for that source's matches; neither
   constructs extraction lists or replacement output for these operations.
 - Trino extraction, split, and callback suites use Slice-based outputs on both
   sides. The comparator's `JoniSliceOperations` retains pinned Trino's Joni

@@ -23,6 +23,9 @@ count non-overlapping matches. Counting includes empty matches and
 advances exactly as `matcher.find()` does: one UTF-8 code point after an empty
 match, or one byte in Latin-1 mode. These operations avoid retrieving captures
 and can use more specialized paths than matcher iteration.
+`pattern.forEachMatch(input, consumer)` passes each match's boundaries, the
+ones `matcher.find()` finds, to a consumer; see
+[Matching APIs](../REGULATOR_API.md#matching-apis).
 
 Counting is not always allocation-free. The first call may initialize cached
 tables, and patterns without a specialized counting path create a matcher and

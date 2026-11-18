@@ -122,7 +122,7 @@ export function comparisonIssue(row: Row): ComparisonIssue | null {
     if (["searchSuccessRe2", "searchSuccess1Re2", "searchAltMatchRe2"].includes(row.operation)) return { label: "Needs remeasurement", reason: "Regulator requested a prefix match; native RE2 requested a full match. Corrected benchmarks request a full match on both sides." };
   }
   if (row.source === "language" && row.operation === "execute") {
-    if (row.language === "trino" && ["count-spans", "count-captures", "grep-captures"].includes(row.model) && row.workContract !== "trino-matcher-count-v3") return {
+    if (row.language === "trino" && ["count-spans", "count-captures", "grep-captures"].includes(row.model) && row.workContract !== "trino-matcher-count-v3" && row.workContract !== "public-for-each-match-v1") return {
       label: "Different API work", reason: row.model === "count-spans"
         ? "Regulator builds an extracted-value list before summing lengths; Joni sums match boundaries without that list. These timings do not isolate matching speed."
         : "Regulator constructs capture lists and replacement output to count captures; Joni counts capture regions without constructing replacement output. These timings do not isolate matching speed.",

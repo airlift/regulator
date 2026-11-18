@@ -3939,6 +3939,31 @@ abstract sealed class CompiledPattern
         return count;
     }
 
+    /// Passes the span of each match of `input` to `consumer`, until there are no more or
+    /// `consumer` returns `false`. The spans are the ones, in the same order, that a
+    /// [RegexpMatcher#find()] loop of `matcher(input, 0)` gives, as byte offsets relative to
+    /// `input`. `input` must not change during the call, so dense iteration can reuse one
+    /// reverse pass; see "Match Start Set for Dense All-Match Searches" in
+    /// REGULATOR_DECISIONS.md. An exception `consumer` throws propagates after the operation
+    /// releases its reservation.
+    public void forEachMatch(Slice input, MatchSpanConsumer consumer)
+    {
+        requireNonNull(input, "input is null");
+        requireNonNull(consumer, "consumer is null");
+        RegexpMatcher matcher = matcher(input, 0);
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                if (!consumer.accept(matcher.start(), matcher.end())) {
+                    break;
+                }
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
+    }
+
     /// Returns the number of matches; `-1` when only a matcher can count them; or
     /// [Dfa#COUNT_BAILED] when a DFA count gave up, or skipped the DFA after a streak of DFA counts
     /// that gave up, so the matcher that counts them should skip the forward DFA.
