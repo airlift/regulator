@@ -22,10 +22,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearchUnless;
 import static java.nio.charset.StandardCharsets.US_ASCII;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -424,6 +430,260 @@ public class TestRegexpMatcher
                 "nonzero Slice window",
                 Re2.compile(Slices.utf8Slice("(a+)")),
                 Slices.wrappedBuffer(Slices.utf8Slice("xxaaaxx").getBytes(), 2, 3));
+    }
+
+    @Test
+    public void testDenseFindsSwitchToMatchStartSet()
+    {
+        // The candidate cursor answers patterns without assertions, so these hold one.
+        // Leftmost-first priority from each start: alternation order, greedy and lazy, and an
+        // earlier branch that is shorter.
+        assertMatchStartSet("[a-z]|[a-z][a-z]|$", "aaaa ");
+        assertMatchStartSet("[a-z][a-z]|[a-z]|$", "aaaa ");
+        assertMatchStartSet("[a-z]+|$", "aaaa ");
+        assertMatchStartSet("[a-z]+?|$", "aaaa ");
+        assertMatchStartSet("[a-z]|[a-z]+|$", "aaaa ");
+        // Empty matches, and matches at the end of the input.
+        assertMatchStartSet("\\b[a-z]*", "ab cd ");
+        assertMatchStartSet("[a-z]+\\b", "ab cd ");
+        // Adjacent matches, each ending where the next starts.
+        assertMatchStartSet("[a-z]{1,2}|$", "abab");
+        // Empty matches beside non-ASCII text advance by a whole character.
+        assertMatchStartSet("[a-z]+|\\B", "ab \u00e9\u00e9 cd ");
+    }
+
+    @Test
+    public void testMatchStartSetReadsRegionContext()
+    {
+        // The region cuts words at both edges; its bounds are the text's edges for \\b.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        Slice input = denseText("ab1 cd ");
+        assertMatchStartSet(pattern, input, 1, input.length() - 2);
+        // A Slice that begins inside its byte array.
+        Slice view = Slices.wrappedBuffer(input.getBytes(), 3, input.length() - 3);
+        assertMatchStartSet(pattern, view, 0, view.length());
+    }
+
+    @Test
+    public void testFindsOutsideAnOperationReadEachEdit()
+    {
+        // A caller's find loop may change the input between finds, so only the library's own
+        // all-match operations switch: each find here reads the byte changed after the 64th.
+        String text = "ab...".repeat(3000);
+        Slice input = Slices.utf8Slice(text);
+        StringBuilder edited = new StringBuilder(text);
+        RegexpMatcher matcher = JavaRegexp.compile(Slices.utf8Slice("[a-z]+\\b")).matcher(input, 0);
+        Matcher jdk = Pattern.compile("[a-z]+\\b").matcher(edited);
+        for (int find = 0; find < RegexpMatcher.MATCH_START_SET_SWITCH_FINDS; find++) {
+            assertThat(matcher.find()).isTrue();
+            assertThat(jdk.find()).isTrue();
+        }
+        input.setByte(matcher.end(), 'z');
+        edited.setCharAt(jdk.end(), 'z');
+        while (jdk.find()) {
+            assertThat(matcher.find()).isTrue();
+            assertThat(List.of(matcher.start(), matcher.end())).isEqualTo(List.of(jdk.start(), jdk.end()));
+        }
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.matchStartSetSwitchCountForDiagnostics()).isZero();
+    }
+
+    @Test
+    public void testTightBudgetBorrowsNothingForStartSet()
+    {
+        // A reverse DFA that cannot spare the set's memory keeps every find on the cursor, and
+        // lends nothing to a start-set DFA the operation could not use.
+        Slice dense = Slices.utf8Slice("ab1 cd ".repeat(1024 * 1024 / 7));
+        Re2 tight = Re2.compile(Slices.utf8Slice("\\b[a-z]+\\b|[0-9]"), Re2.Options.defaults().setMaxMemory(256 << 10));
+        RegexpMatcher matcher = tight.groupZeroMatcher(dense, null);
+        assertThat(operationSpans(matcher)).isEqualTo(spans(tight.genericGroupZeroMatcherForDiagnostics(dense), 0));
+        assertThat(matcher.matchStartSetSwitchCountForDiagnostics()).isZero();
+        assertThat(tight.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH)).isNull();
+    }
+
+    @Test
+    public void testForwardCacheResetsAfterSwitch()
+    {
+        // The anchored searches after the switch reset the forward DFA's cache many times, and
+        // each one follows the search's own rules.
+        Slice abWords = Slices.utf8Slice(abWords(64 * 1024));
+        Re2 resetting = Re2.compile(Slices.utf8Slice("\\b[ab]*a[ab]{12}\\b"), Re2.Options.defaults().setMaxMemory(1 << 20));
+        RegexpMatcher matcher = resetting.groupZeroMatcher(abWords, null);
+        List<Long> expected = spans(resetting.genericGroupZeroMatcherForDiagnostics(abWords), 0);
+        Dfa.DfaInstance forward = resetting.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        matcher.beginAllMatchOperation();
+        try {
+            List<Long> found = spans(matcher, RegexpMatcher.MATCH_START_SET_SWITCH_FINDS);
+            assertThat(matcher.matchStartSetSwitchCountForDiagnostics()).isEqualTo(1);
+            int resetsAtSwitch = forward.resetCount();
+            found.addAll(spans(matcher, 0));
+            assertThat(forward.resetCount()).isGreaterThan(resetsAtSwitch);
+            assertThat(found).isEqualTo(expected);
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
+    }
+
+    @Test
+    public void testDenseOperationLeavesLaterSearchesTheirMemory()
+    {
+        // The start-set DFA's loan comes back before the reverse DFA would refuse a state, so the
+        // finds after a dense operation reset that DFA no more often than without the switch.
+        Slice dense = Slices.utf8Slice("aaaaabbbbbbaaaaabbbbbbaaaa ".repeat(1000));
+        String[] rows = abWords(100 * 1024).split(" ");
+        int[] resets = new int[2];
+        for (int switching = 0; switching < 2; switching++) {
+            Re2 pattern = Re2.compile(Slices.utf8Slice("\\b[ab]{12}a[ab]*\\b"), Re2.Options.defaults().setMaxMemory(8 << 20));
+            RegexpMatcher denseMatcher = switching == 1 ? pattern.groupZeroMatcher(dense, null) : pattern.genericGroupZeroMatcherForDiagnostics(dense);
+            operationSpans(denseMatcher);
+            assertThat(denseMatcher.matchStartSetSwitchCountForDiagnostics()).isEqualTo(switching);
+            Dfa.DfaInstance reverse = pattern.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            int resetsBefore = reverse.resetCount();
+            for (String row : rows) {
+                pattern.groupZeroMatcher(Slices.utf8Slice(row), null).find();
+            }
+            resets[switching] = reverse.resetCount() - resetsBefore;
+        }
+        assertThat(resets[1]).isEqualTo(resets[0]);
+    }
+
+    @Test
+    public void testSharedPatternSwitchesOnManyThreads()
+            throws Exception
+    {
+        Re2 pattern = Re2.compile(Slices.utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        Slice input = denseText("ab1 cd ");
+        List<Long> expected = spans(pattern.genericGroupZeroMatcherForDiagnostics(input), 0);
+        // One operation first builds the start-set DFA, so no worker loses a race to build it.
+        operationSpans(pattern.groupZeroMatcher(input, null));
+        List<Future<List<Long>>> results = new ArrayList<>();
+        try (ExecutorService executor = Executors.newFixedThreadPool(8)) {
+            for (int task = 0; task < 32; task++) {
+                results.add(executor.submit(() -> {
+                    RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+                    List<Long> spans = operationSpans(matcher);
+                    assertThat(matcher.matchStartSetSwitchCountForDiagnostics()).isEqualTo(1);
+                    return spans;
+                }));
+            }
+            for (Future<List<Long>> result : results) {
+                assertThat(result.get()).isEqualTo(expected);
+            }
+        }
+        // Every operation returned its memory.
+        assertThat(pattern.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchStartSetReservationForDiagnostics()).isZero();
+    }
+
+    @Test
+    public void testMatchStartSetIsChargedOnlyDuringItsOperation()
+    {
+        Re2 pattern = Re2.compile(Slices.utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        Slice input = denseText("ab1 cd ");
+        // The first operation builds the DFAs, the start-set DFA among them, which the pattern keeps.
+        operationSpans(pattern.groupZeroMatcher(input, null));
+        long retainedSize = pattern.retainedSizeInBytes();
+        Dfa.DfaInstance lender = pattern.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+
+        // The switch at the last of the first finds covers the rest of the input from its end.
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+        matcher.beginAllMatchOperation();
+        spans(matcher, RegexpMatcher.MATCH_START_SET_SWITCH_FINDS);
+        assertThat(matcher.holdsMatchStartSetForDiagnostics()).isTrue();
+        long charge = lender.matchStartSetReservationForDiagnostics();
+        assertThat(charge).isEqualTo(Dfa.matchStartSetBytes(input.length() - matcher.end()));
+        assertThat(pattern.retainedSizeInBytes()).isEqualTo(retainedSize + charge);
+
+        matcher.endAllMatchOperation();
+        assertThat(matcher.holdsMatchStartSetForDiagnostics()).isFalse();
+        assertThat(lender.matchStartSetReservationForDiagnostics()).isZero();
+        assertThat(pattern.retainedSizeInBytes()).isEqualTo(retainedSize);
+    }
+
+    // The spans of the next `limit` finds, or of every find when `limit` is 0, each packed as
+    // start and end.
+    private static List<Long> spans(RegexpMatcher matcher, int limit)
+    {
+        List<Long> spans = new ArrayList<>();
+        while ((limit == 0 || spans.size() < limit) && matcher.find()) {
+            spans.add(((long) matcher.start() << 32) | matcher.end());
+        }
+        return spans;
+    }
+
+    // The spans of one all-match operation over the matcher's region, as the library's loops run it.
+    private static List<Long> operationSpans(RegexpMatcher matcher)
+    {
+        matcher.beginAllMatchOperation();
+        try {
+            return spans(matcher, 0);
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
+    }
+
+    // About `length` bytes of random words of 14 to 23 letters a and b, each followed by a space.
+    private static String abWords(int length)
+    {
+        Random random = new Random(7);
+        StringBuilder words = new StringBuilder();
+        while (words.length() < length) {
+            int wordLength = 14 + random.nextInt(10);
+            for (int i = 0; i < wordLength; i++) {
+                words.append(random.nextBoolean() ? 'a' : 'b');
+            }
+            words.append(' ');
+        }
+        return words.toString();
+    }
+
+    private static void assertMatchStartSet(String expression, String unit)
+    {
+        Slice input = denseText(unit);
+        assertMatchStartSet(Re2.compile(Slices.utf8Slice(expression)), input, 0, input.length());
+    }
+
+    // About 16 KiB of `unit` repeated, ending without the unit's trailing space.
+    private static Slice denseText(String unit)
+    {
+        return Slices.utf8Slice(unit.repeat(16 * 1024 / unit.length()).strip());
+    }
+
+    private static void assertMatchStartSet(CompiledPattern pattern, Slice input, int regionStart, int regionEnd)
+    {
+        assertMatchStartSet(pattern, input, regionStart, regionEnd, 1);
+    }
+
+    /// Checks that an all-match operation over the region switches to a match start set
+    /// `switches` times, once or never, and finds the matches the generic matcher finds without
+    /// one, and so does a find after the loop's failed one, which searches again from the last
+    /// match end. The failed find releases the set. The language twins share it.
+    static void assertMatchStartSet(CompiledPattern pattern, Slice input, int regionStart, int regionEnd, long switches)
+    {
+        RegexpMatcher matcher = pattern.matcher(input, 0).reset(input, regionStart, regionEnd);
+        RegexpMatcher expected = pattern.genericGroupZeroMatcherForDiagnostics(input).reset(input, regionStart, regionEnd);
+        String description = new String(pattern.pattern().getBytes(), UTF_8);
+        matcher.beginAllMatchOperation();
+        try {
+            while (expected.find()) {
+                assertThat(matcher.find()).as("find of %s", description).isTrue();
+                assertThat(matcher.start()).as("match start of %s", description).isEqualTo(expected.start());
+                assertThat(matcher.end()).as("match end of %s", description).isEqualTo(expected.end());
+            }
+            assertThat(matcher.find()).as("find after the last match of %s", description).isFalse();
+            assertThat(matcher.matchStartSetSwitchCountForDiagnostics()).as("start set switches of %s", description).isEqualTo(switches);
+            assertThat(matcher.holdsMatchStartSetForDiagnostics()).isFalse();
+            boolean expectedRetry = expected.find();
+            assertThat(matcher.find()).isEqualTo(expectedRetry);
+            if (expectedRetry) {
+                assertThat(matcher.start()).isEqualTo(expected.start());
+                assertThat(matcher.end()).isEqualTo(expected.end());
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
     }
 
     private static void assertGroupZeroMatchesFull(String expression, String input)

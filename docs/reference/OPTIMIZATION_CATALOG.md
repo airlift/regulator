@@ -283,6 +283,34 @@ answer, or reject the input before any engine runs.
   rows take 0.55 to 0.61 of their earlier time, and `.*` rows with native
   access 0.27 to 0.62 ([#77]).
 
+### Match start set for dense all-match searches
+
+- **Origin:** Adapted from resharp 0.8.0's `find_all_dfa` ([resharp]), which
+  collects every match start in one reverse pass and then scans forward from
+  the known starts. Its longest-end rule is not used: ends come from an
+  anchored leftmost-first forward search. Regulator: the switch after dense
+  finds, the eligibility rule, and the bitset charged to the reverse budget
+  for one operation ([design][d-match-start-set]).
+- **Where:** `RegexpMatcher.switchToMatchStartSet`,
+  `CompiledPattern.switchesToMatchStartSet`, `Dfa.collectMatchStarts`,
+  `Prog.matchStartSetDfa`
+- **Applies when:** The library's all-match operations (count, and Trino's
+  extract-all, split, and replacements) of group zero on the group-zero
+  forward cursor, whose first 64 finds advanced at most 64 bytes each on
+  average with at least 4 KiB of the region left, for a pattern whose finds
+  run both a forward and a reverse search, that has no literal route or
+  byte scan estimated selective on English text, and whose forward density
+  sample would turn no byte scan on in the rest of the region
+- **What it does:** One unanchored reverse many-match pass over the rest of
+  the region marks every position where a match starts, in a bitset of at most
+  1 MiB. Each later find takes the first marked start at or after its position
+  and runs one anchored first-match search there for the end, in place of an
+  unanchored forward search and a reverse search for the start. The switch is
+  final for the operation; a pass that quits, fills its cache, or does not fit
+  leaves the operation on its find-by-find search. On `03-date` it takes the
+  forward DFA from 8.1 steps a find to 4.6, with one reverse step a byte in
+  place of 4.2 a find; its time is pending measurement.
+
 ## Literal and prefix search
 
 Many patterns begin with or contain a literal. These scans find its candidates,
@@ -2661,6 +2689,7 @@ change is described.
 [d-gen-re2]: ../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels
 [d-large-alternations]: ../../REGULATOR_DECISIONS.md#large-literal-alternations
 [d-like]: ../../REGULATOR_DECISIONS.md#trino-like-frontend
+[d-match-start-set]: ../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches
 [d-match-every-byte]: ../../REGULATOR_DECISIONS.md#match-every-byte-shortcut
 [d-min-inner-window]: ../../REGULATOR_DECISIONS.md#minimum-inner-literal-search-window
 [d-native]: ../../REGULATOR_DECISIONS.md#bounded-dfa-pointer-transition-table
@@ -2904,6 +2933,7 @@ change is described.
 [re2-re2]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/re2.cc
 [re2-set]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/set.cc
 [re2-simplify]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/simplify.cc
+[resharp]: https://crates.io/crates/resharp/0.8.0
 [rs-interval]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/interval.rs
 [rs-literal]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/literal.rs
 [spark-codegen-limit]: https://github.com/apache/spark/blob/v2.3.0/sql/core/src/main/scala/org/apache/spark/sql/execution/WholeStageCodegenExec.scala#L587-L599

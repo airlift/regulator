@@ -613,6 +613,9 @@ final class Prog
     private final AtomicReference<Dfa.DfaInstance> dfaFirstMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaLongestMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaManyMatch = new AtomicReference<>();
+    // Set once a reversed program's start-set DFA failed to initialize, or a pass on it ran out of
+    // cache memory; see matchStartSetDfa.
+    private volatile boolean matchStartSetDfaUnavailable;
     // The budget with which each kind's DFA failed to initialize, or 0. A failed DFA is not
     // cached, so without this every search at that budget would build it again. Searches share
     // it without locking, and the race is benign: a search that has not yet seen a recorded
@@ -3198,6 +3201,58 @@ final class Prog
         }
         // Lost race - use winner's DFA
         return ref.get();
+    }
+
+    /// Returns the many-match DFA that collects a reversed program's match start sets, building
+    /// it on first use, or `null` where none can be built. An unanchored many-match reverse
+    /// search keeps every thread, so its match flag at each position says whether some match
+    /// starts there; the longest-match DFA's searches drop later threads after a match. The
+    /// DFA's budget is a loan of half of the longest-match DFA's free state memory, so the two
+    /// together stay within the reverse share. The lender publishes the DFA as it lends, and
+    /// takes the loan back, retiring the DFA, before it would refuse one of its own states, so a
+    /// dense operation leaves later searches the memory they had; the next switch builds a fresh
+    /// DFA. A loan too small to initialize the DFA, or for a pass to finish in, builds none, and
+    /// later calls return `null` without trying again.
+    Dfa.DfaInstance matchStartSetDfa()
+    {
+        Dfa.DfaInstance cached = dfaManyMatch.get();
+        if (cached != null || !reversed || matchStartSetDfaUnavailable) {
+            return cached;
+        }
+        Dfa.DfaInstance lender = getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        if (lender == null) {
+            return null;
+        }
+        long loan = lender.matchStartSetDfaLoanSize();
+        if (loan < 0) {
+            return null;
+        }
+        boolean budgeted = lender.stateBudget() != Long.MAX_VALUE;
+        if (budgeted && !Dfa.DfaInstance.initializes(this, Dfa.DfaInstance.Kind.MANY_MATCH, loan)) {
+            matchStartSetDfaUnavailable = true;
+            return null;
+        }
+        // A budget of 0 builds a DFA without a budget, as the lender's.
+        Dfa.DfaInstance dfa = new Dfa.DfaInstance(this, Dfa.DfaInstance.Kind.MANY_MATCH, budgeted ? loan : 0);
+        if (!dfa.ok()) {
+            matchStartSetDfaUnavailable = true;
+            return null;
+        }
+        return lender.lendToMatchStartSetDfa(dfaManyMatch, dfa, loan) ? dfa : dfaManyMatch.get();
+    }
+
+    /// Stops later calls of [#matchStartSetDfa] from building a start-set DFA, after a pass ran
+    /// out of the memory a loan gives it.
+    void markMatchStartSetDfaUnavailable()
+    {
+        matchStartSetDfaUnavailable = true;
+    }
+
+    /// Unpublishes the start-set DFA for its lender's recall, under the lender's cache mutation
+    /// lock, and returns it; see [Dfa.DfaInstance#lendToMatchStartSetDfa].
+    Dfa.DfaInstance retireMatchStartSetDfa()
+    {
+        return dfaManyMatch.getAndSet(null);
     }
 
     /// Whether taking `reservation` bytes from the DFA memory budget leaves the first-match and
