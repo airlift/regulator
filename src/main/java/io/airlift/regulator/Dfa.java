@@ -3466,6 +3466,19 @@ final class Dfa
                     (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
             Object nextRef = getStateReference(stateRefs, pairedClass);
             if (nextRef == null) {
+                // Decoded here rather than in the miss method: once this method compiles, the miss
+                // method runs only inlined into it, so its own profile stops short of the maturity
+                // C2 needs to inline the decode, and the call left in the loop's exit spills the
+                // loop's position on x86.
+                int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
+                long pairedTransition = PAIR_UNCOMPUTED;
+                if (dfa.kind == DfaInstance.Kind.FIRST_MATCH && !endMatch && !wantEarliestMatch) {
+                    pairedTransition = decodePairedTransition(
+                            tables,
+                            stateOffset,
+                            byteMap[bytes[position] & 0xFF] & 0xFF,
+                            byteMap[bytes[position + 1] & 0xFF] & 0xFF);
+                }
                 return searchForwardPairsAfterMiss(
                         dfa,
                         tables,
@@ -3474,7 +3487,8 @@ final class Dfa
                         position,
                         textEnd,
                         ctxEnd,
-                        stateRefs,
+                        stateOffset,
+                        pairedTransition,
                         endMatch,
                         wantEarliestMatch,
                         countRecordsPairedMatch,
@@ -3502,50 +3516,37 @@ final class Dfa
             int position,
             int textEnd,
             int ctxEnd,
-            Object[] stateRefs,
+            int stateOffset,
+            long pairedTransition,
             boolean endMatch,
             boolean wantEarliestMatch,
             boolean countRecordsPairedMatch,
             int ctxBegin)
     {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        if (dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
-                !endMatch &&
-                !wantEarliestMatch) {
-            int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-            byte[] byteMap = dfa.bytemap;
-            long pairedTransition = decodePairedTransition(
+        int outcome = (int) pairedTransition;
+        if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
+            long result = searchForwardPairsAfterMatch(
+                    dfa,
                     tables,
-                    stateOffset,
-                    byteMap[bytes[position] & 0xFF] & 0xFF,
-                    byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            int outcome = (int) pairedTransition;
-            if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
-                long result = searchForwardPairsAfterMatch(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        pairedTransition,
-                        endMatch,
-                        wantEarliestMatch,
-                        ctxBegin);
-                if (result >= 0) {
-                    // A count records the match in its own streak; the flag needs a nonempty match.
-                    if (countRecordsPairedMatch && result > 0) {
-                        return result | COUNT_PAIRED_MATCH_FLAG;
-                    }
-                    dfa.recordPairedSearch((int) result);
+                    bytes,
+                    resultBegin,
+                    position,
+                    textEnd,
+                    ctxEnd,
+                    pairedTransition,
+                    endMatch,
+                    wantEarliestMatch,
+                    ctxBegin);
+            if (result >= 0) {
+                // A count records the match in its own streak; the flag needs a nonempty match.
+                if (countRecordsPairedMatch && result > 0) {
+                    return result | COUNT_PAIRED_MATCH_FLAG;
                 }
-                return result;
+                dfa.recordPairedSearch((int) result);
             }
+            return result;
         }
 
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);
         if (result >= 0) {
             return result + (position - resultBegin);
@@ -3754,6 +3755,19 @@ final class Dfa
                     (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
             int nextRowOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClass * Integer.BYTES));
             if (nextRowOffset < 0) {
+                // Decoded here rather than in the miss method: once this method compiles, the miss
+                // method runs only inlined into it, so its own profile stops short of the maturity
+                // C2 needs to inline the decode, and the call left in the loop's exit spills the
+                // loop's position on x86.
+                int stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
+                long pairedTransition = PAIR_UNCOMPUTED;
+                if (dfa.kind == DfaInstance.Kind.FIRST_MATCH && !endMatch && !wantEarliestMatch) {
+                    pairedTransition = decodePairedTransition(
+                            tables,
+                            stateOffset,
+                            byteMap[bytes[position] & 0xFF] & 0xFF,
+                            byteMap[bytes[position + 1] & 0xFF] & 0xFF);
+                }
                 return searchForwardPairsFlatAfterMiss(
                         dfa,
                         tables,
@@ -3762,7 +3776,8 @@ final class Dfa
                         position,
                         textEnd,
                         ctxEnd,
-                        rowOffset,
+                        stateOffset,
+                        pairedTransition,
                         endMatch,
                         wantEarliestMatch,
                         countRecordsPairedMatch,
@@ -3790,46 +3805,35 @@ final class Dfa
             int position,
             int textEnd,
             int ctxEnd,
-            int rowOffset,
+            int stateOffset,
+            long pairedTransition,
             boolean endMatch,
             boolean wantEarliestMatch,
             boolean countRecordsPairedMatch,
             int ctxBegin)
     {
-        int nextSize = dfa.nextSize;
-        int stateOffset = getPairedSlot(tables.flatPairedRows, rowOffset + (nextSize * nextSize * Integer.BYTES));
-        if (dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
-                !endMatch &&
-                !wantEarliestMatch) {
-            byte[] byteMap = dfa.bytemap;
-            long pairedTransition = decodePairedTransition(
+        int outcome = (int) pairedTransition;
+        if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
+            long result = searchForwardPairsFlatAfterMatch(
+                    dfa,
                     tables,
-                    stateOffset,
-                    byteMap[bytes[position] & 0xFF] & 0xFF,
-                    byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            int outcome = (int) pairedTransition;
-            if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
-                long result = searchForwardPairsFlatAfterMatch(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        pairedTransition,
-                        endMatch,
-                        wantEarliestMatch,
-                        ctxBegin);
-                if (result >= 0) {
-                    // A count records the match in its own streak; the flag needs a nonempty match.
-                    if (countRecordsPairedMatch && result > 0) {
-                        return result | COUNT_PAIRED_MATCH_FLAG;
-                    }
-                    dfa.recordPairedSearch((int) result);
+                    bytes,
+                    resultBegin,
+                    position,
+                    textEnd,
+                    ctxEnd,
+                    pairedTransition,
+                    endMatch,
+                    wantEarliestMatch,
+                    ctxBegin);
+            if (result >= 0) {
+                // A count records the match in its own streak; the flag needs a nonempty match.
+                if (countRecordsPairedMatch && result > 0) {
+                    return result | COUNT_PAIRED_MATCH_FLAG;
                 }
-                return result;
+                dfa.recordPairedSearch((int) result);
             }
+            return result;
         }
 
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);

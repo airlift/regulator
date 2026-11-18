@@ -579,11 +579,11 @@ public class TestHotMethodSize
                 Map.entry("searchForwardAnchoredLongPrefixInt", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardSampledSelfLoops", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairs", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, Object[] stateRefs, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
                 Map.entry("searchForwardPairsAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFlat", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int rowOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
+                Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
                 Map.entry("searchForwardPairsFlatAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFlatFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardCountSelfLoopScan", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int contextEnd, int startOffset"),
@@ -599,6 +599,23 @@ public class TestHotMethodSize
                     .singleElement()
                     .asString()
                     .startsWith(method.getValue());
+        }
+    }
+
+    /// Keeps the pair loops decoding their own misses. A miss method runs once per search, and
+    /// once its loop compiles it runs only inlined there, so its own profile stays immature; C2
+    /// then left `decodePairedTransition` out of line in it, and on x86 that call kept the loop's
+    /// position in a stack slot.
+    @Test
+    public void testPairLoopsDecodeTheirOwnMisses()
+    {
+        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+            assertThat(calledMethods(Dfa.class, loop, Dfa.class))
+                    .as("Dfa methods Dfa.%s calls", loop)
+                    .contains("decodePairedTransition");
+            assertThat(calledMethods(Dfa.class, loop + "AfterMiss", Dfa.class))
+                    .as("Dfa methods Dfa.%sAfterMiss calls", loop)
+                    .doesNotContain("decodePairedTransition");
         }
     }
 
