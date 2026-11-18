@@ -26,8 +26,10 @@ if (matcher.find()) {
 Use `regexp.find(input)` to check for a match, and `regexp.count(input)` to
 count non-overlapping matches. Counting includes empty matches and
 uses the same UTF-8 code-point advancement as this library's `matcher.find()`.
-These operations do not retrieve capture values. Use a matcher when boundaries
-or captures are required.
+These operations do not retrieve capture values. Use a matcher when captures
+are required, or `regexp.forEachMatch(input, consumer)`, which passes each
+match's boundaries to a consumer, when only boundaries are; see
+[Matching APIs](../REGULATOR_API.md#matching-apis).
 
 Counting is not always allocation-free. The first call may initialize cached
 tables, and patterns without a specialized counting path create a matcher and

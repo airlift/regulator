@@ -49,8 +49,13 @@ class TestCollection(unittest.TestCase):
                 self.assertEqual(collection.work_contract(manifest, {"model": model}, language, "execute"), "public-find-count-v2")
         for model in ("count-spans", "count-captures", "grep-captures"):
             self.assertEqual(collection.work_contract(manifest, {"model": model}, "trino", "execute", version=2), "trino-output-assisted-count-v1")
-            self.assertEqual(collection.work_contract(manifest, {"model": model}, "trino", "execute"), "trino-matcher-count-v3")
-            self.assertEqual(collection.work_contract(manifest, {"model": model}, "re2", "execute"), "bulk-matched-outputs-v1")
+            self.assertEqual(collection.work_contract(manifest, {"model": model}, "trino", "execute", version=4), "trino-matcher-count-v3")
+            self.assertEqual(collection.work_contract(manifest, {"model": model}, "re2", "execute", version=4), "bulk-matched-outputs-v1")
+        # From version 5, every language sums spans through public forEachMatch; captures keep their contracts.
+        for language in ("re2", "java", "rust", "trino"):
+            self.assertEqual(collection.work_contract(manifest, {"model": "count-spans"}, language, "execute"), "public-for-each-match-v1")
+        self.assertEqual(collection.work_contract(manifest, {"model": "count-captures"}, "trino", "execute"), "trino-matcher-count-v3")
+        self.assertEqual(collection.work_contract(manifest, {"model": "count-captures"}, "re2", "execute"), "bulk-matched-outputs-v1")
         self.assertEqual(collection.work_contract(manifest, {"model": "count"}, "trino", "execute"), "bulk-matched-outputs-v1")
         self.assertEqual(collection.work_contract(manifest, {"model": "compile"}, "java", "compile"), "public-pattern-lifecycle-v1")
 
@@ -382,7 +387,7 @@ class TestCollection(unittest.TestCase):
         collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 4})
         with self.assertRaisesRegex(ValueError, "do not pass over the protocol's inputs"):
             collection.export(self.directory, results, write=False)
-        collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 5})
+        collection.save(results / "provenance.json", {**provenance, "benchmark_contract_version": 6})
         with self.assertRaisesRegex(ValueError, "unsupported benchmark contract version"):
             collection.export(self.directory, results, write=False)
         collection.save(results / "provenance.json", provenance)

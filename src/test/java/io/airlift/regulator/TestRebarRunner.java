@@ -100,6 +100,8 @@ class TestRebarRunner
     void testCountCaptures()
             throws Exception
     {
+        // Two groups for "a" and three for "ab": the runner retains every group, and counts only
+        // those that participate.
         assertCounts(run("count-captures", bytes("(a)(b)?"), true, bytes("a ab")), 5, 5);
     }
 
@@ -190,17 +192,6 @@ class TestRebarRunner
             throws Exception
     {
         assertCounts(run("count", bytes("\\xFF"), false, new byte[] {(byte) 0xFF}), 1, 1);
-    }
-
-    @Test
-    void testMatchModelsRequestOnlyRequiredCaptures()
-    {
-        Re2 pattern = Re2.compile(Slices.utf8Slice("(a)(b)?"));
-        Slice haystack = Slices.utf8Slice("a ab");
-
-        assertThat(RebarRunner.MatchMeasurement.COUNT.createMatcher(pattern, haystack).groupCount()).isZero();
-        assertThat(RebarRunner.MatchMeasurement.SPAN_LENGTH.createMatcher(pattern, haystack).groupCount()).isZero();
-        assertThat(RebarRunner.MatchMeasurement.CAPTURES.createMatcher(pattern, haystack).groupCount()).isEqualTo(2);
     }
 
     @Test

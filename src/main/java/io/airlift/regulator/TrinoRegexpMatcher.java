@@ -125,6 +125,25 @@ public sealed class TrinoRegexpMatcher
         return true;
     }
 
+    /// Starts an all-match operation of the [RegexpMatcher] this matcher runs, as
+    /// [RegexpMatcher#beginAllMatchOperation] describes, for [TrinoRegexp#forEachMatch], which
+    /// ends it with [#endAllMatchOperation] in a `finally`. A matcher of a span kernel and the
+    /// subclasses, which keep their own state, ignore both, so their finds never switch.
+    void beginAllMatchOperation()
+    {
+        if (matcher != null) {
+            matcher.beginAllMatchOperation();
+        }
+    }
+
+    /// Ends the operation [#beginAllMatchOperation] started, and releases what it holds.
+    void endAllMatchOperation()
+    {
+        if (matcher != null) {
+            matcher.endAllMatchOperation();
+        }
+    }
+
     /// Returns the retained capturing-group count, excluding group zero.
     public int groupCount()
     {

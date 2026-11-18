@@ -597,6 +597,30 @@ public sealed class TrinoRegexp
         return count;
     }
 
+    /// Passes the span of each match of `source` to `consumer`, until there are no more or
+    /// `consumer` returns `false`. The spans are the ones, in the same order, that a
+    /// [TrinoRegexpMatcher#find()] loop of `matcher(source, 0)` gives, as byte offsets relative
+    /// to `source`. `source` must not change during the call, so dense iteration can reuse one
+    /// reverse pass, as an [#extractAll(Slice)] does. An exception `consumer` throws propagates
+    /// after the operation releases its reservation.
+    public void forEachMatch(Slice source, MatchSpanConsumer consumer)
+    {
+        requireNonNull(source, "source is null");
+        requireNonNull(consumer, "consumer is null");
+        TrinoRegexpMatcher matcher = matcher(source, 0);
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                if (!consumer.accept(matcher.start(), matcher.end())) {
+                    break;
+                }
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
+    }
+
     /// Returns the one-based code-point position of the first match, or `-1`.
     public long position(Slice source)
     {

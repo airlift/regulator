@@ -40,7 +40,8 @@ mode and the nest limit can change the result.
 ## Matching
 
 The compiled-pattern operations have the same signatures as `JavaRegexp`:
-boolean `find`, `lookingAt`, and `matches`; `count`; caller-owned capture
+boolean `find`, `lookingAt`, and `matches`; `count`; `forEachMatch`, which
+passes each match's boundaries to a consumer; caller-owned capture
 arrays through `findInto`, `lookingAtInto`, and `matchesInto`; immutable
 `MatchResult` values; and reusable `RegexpMatcher` instances with an optional
 retained prefix of capturing groups. Matching is leftmost-first, as the crate
@@ -57,7 +58,7 @@ search rules to Rust patterns:
   at byte offsets 0 and 2.
 - Successive `find()` calls skip an empty match that ends where the previous
   match ended, as the crate's `find_iter` does. `a*` on `a` yields only `a`.
-  `count` follows the same rules.
+  `count` and `forEachMatch` follow the same rules.
 - Outside byte mode, `lookingAt` and `matches` anchored at an offset that
   splits a character fail, because an anchored search cannot move past it.
 
