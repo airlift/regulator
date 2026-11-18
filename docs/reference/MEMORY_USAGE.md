@@ -57,7 +57,8 @@ the budget the pattern needs, the message reports it; a larger budget may still
 be needed. During matching, a full DFA cache resets, and repeated resets fall
 back to the NFA, so ordinary matching never throws a memory-limit exception.
 `Re2Set` is the exception: it throws `RegexpMatchMemoryLimitException` rather
-than report no match. See [Compiled patterns](REGULATOR_API.md#compiled-patterns) and
+than report no match, and so do the `FilteredRe2` methods that run its atom
+search, an `Re2Set`. See [Compiled patterns](REGULATOR_API.md#compiled-patterns) and
 [Memory Budgets And DFA Caching](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching).
 
 ## How threads share a pattern's memory

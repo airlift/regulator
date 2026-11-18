@@ -185,8 +185,9 @@ of what its cache holds: a conservative over-report, not a leak.
 `maxMemoryBytes()` returns that budget: the value passed to `setMaxMemory`, or
 the default, and the `maxMemoryBytes()` a `RegexpCompileMemoryLimitException`
 or `RegexpMatchMemoryLimitException` for the same compile reports. Every
-compiled pattern, `TrinoRegexp`, and `Re2Set` provides it. A `FilteredRe2` has
-no budget of its own: each of its patterns keeps the budget of its options.
+compiled pattern, `TrinoRegexp`, and `Re2Set` provides it. Each pattern of a
+`FilteredRe2` keeps the budget of its options, and its atom search keeps the one
+`FilteredRe2.Builder.setAtomSearchMaxMemory` sets, 32 MiB by default.
 `TrinoLikePattern` has no budget.
 
 The estimate leaves out:
@@ -674,13 +675,41 @@ bounded many-match DFA exhausts the configured memory budget, either operation
 throws `RegexpMatchMemoryLimitException` instead of reporting no match;
 `matchingPatternIds` does not expose partial IDs.
 
-`FilteredRe2` is for much larger pattern collections paired with an external
-atom scanner. A collection has one encoding; its builder rejects patterns with
-mixed UTF-8 and Latin-1 options. The builder returns the distinct canonical
-atoms through `atoms()`. The caller must scan `filtered.canonicalizeText(input)`
-for those atoms, then pass the found atom IDs to `potentialPatternIds`,
-`matchingPatternIds`, or `firstMatchingPatternId`. RE2 verifies every candidate
-accepted by the prefilter.
+`FilteredRe2` is for much larger pattern collections, filtered by the literal
+atoms each pattern requires. A collection has one encoding; its builder rejects
+patterns with mixed UTF-8 and Latin-1 options. RE2 verifies every candidate
+accepted by the prefilter, against the original input.
+
+```java
+FilteredRe2.Builder builder = FilteredRe2.builder();
+builder.add(Slices.utf8Slice("(?i)firefox/(\\d+)"), Re2.Options.defaults());
+builder.add(Slices.utf8Slice("chrome/(\\d+)"), Re2.Options.defaults());
+FilteredRe2 rules = builder.build();
+
+int[] matches = rules.matchingPatternIds(input);
+FilteredRe2.PatternMatch first = rules.firstMatchResult(input);
+```
+
+`build()` compiles an atom search beside the patterns: an `Re2Set` in `FIND`
+mode with one quoted member for each atom, in the collection's encoding, whose
+member ID is the atom's index in `atoms()`. A collection without atoms has no
+atom search. Its budget is `setAtomSearchMaxMemory`, 32 MiB by default; a build
+whose atom search does not fit throws `RegexpCompileMemoryLimitException`, and
+the budget takes part in equality. `retainedSizeInBytes()` counts the atom
+search, including the many-match DFA cache its searches build.
+`matchingPatternIds(input)` and `firstMatchResult(input)` canonicalize a copy of
+the input, run the atom search on it, and verify the candidates.
+`matchingPatternIds` returns every matching pattern's ID, ascending.
+`firstMatchResult` searches candidates in ID order, each once, and returns the
+first pattern that matches with its `MatchResult`, or `null`. Like `Re2Set`'s
+operations, either throws `RegexpMatchMemoryLimitException` when the atom
+search exhausts its budget.
+
+A caller with its own atom scanner uses the two-step methods instead. The
+compiled collection exposes the distinct canonical atoms through `atoms()`. The
+caller scans `filtered.canonicalizeText(input)` for those atoms, then passes the
+found atom IDs to `potentialPatternIds`, `matchingPatternIds`, or
+`firstMatchingPatternId`.
 
 ## Trino SQL LIKE
 
