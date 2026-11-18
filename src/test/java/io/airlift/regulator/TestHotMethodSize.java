@@ -44,8 +44,12 @@ public class TestHotMethodSize
     // C2 inlines a hot callee only when its bytecode is at most FreqInlineSize, 325 bytes by
     // default on x86-64, AArch64 and RISC-V. PPC64 and s390x use 175 through JDK 26.
     private static final int FREQ_INLINE_SIZE = 325;
-    // C2 inlines any callee of at most MaxInlineSize, 35 bytecode bytes, even at a cold call site.
+    // C2 inlines a callee of at most MaxInlineSize, 35 bytecode bytes, at a call site that is not
+    // hot, unless it judges the site too rarely reached.
     private static final int MAX_INLINE_SIZE = 35;
+    // C2 inlines a callee of at most MaxTrivialSize, 6 bytecode bytes, even at a call site it
+    // judges too rarely reached to inline anything larger.
+    private static final int MAX_TRIVIAL_SIZE = 6;
 
     /// Keeps each full-Slice find, count, matches, and lookingAt route small enough for C2 to
     /// inline into the one-line override of the pattern's shape class, and that override into
@@ -400,7 +404,7 @@ public class TestHotMethodSize
     }
 
     /// Keeps the selectors that pick each folded pair kernel's candidate-mask form within
-    /// MaxInlineSize, which C2 inlines whatever the call site's profile, so a selector adds no call
+    /// MaxInlineSize, which C2 inlines at a call site that is not hot, so a selector adds no call
     /// between a folded pair scan and its kernel.
     @Test
     public void testFoldedPairSelectorsFitMaxInlineSize()
@@ -476,6 +480,32 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the literal kernel's helpers that the unmasked and reverse pair scans call within
+    /// MaxTrivialSize, so C2 inlines them however rarely a failed candidate reaches them. Where
+    /// failed candidates are rare, as on Russian text, C2 left the 11-byte budget test out of line
+    /// in findPair, and that one call in the scan made it rebuild the probe broadcasts at every
+    /// 16-byte step on r9g. The x86 masked scan's one larger call is that 11-byte budget test:
+    /// written in line, it made Russian Sherlock about 3% slower on r8i.
+    @Test
+    public void testPairScanKernelHelperSizes()
+    {
+        for (String method : List.of("findPair", "findLast")) {
+            for (String callee : calledMethods(VectorPrefixScanner.class, method, LiteralSearchKernel.class)) {
+                assertThat(codeLength(LiteralSearchKernel.class, callee))
+                        .as("LiteralSearchKernel.%s bytecode bytes, called by VectorPrefixScanner.%s", callee, method)
+                        .isPositive()
+                        .isLessThanOrEqualTo(MAX_TRIVIAL_SIZE);
+            }
+        }
+        assertThat(calledMethods(VectorPrefixScanner.class, "findPairMasked", LiteralSearchKernel.class).stream()
+                .filter(callee -> codeLength(LiteralSearchKernel.class, callee) > MAX_TRIVIAL_SIZE))
+                .as("LiteralSearchKernel methods over MaxTrivialSize that VectorPrefixScanner.findPairMasked calls")
+                .containsExactly("comparisonBudgetSpent");
+        assertThat(codeLength(LiteralSearchKernel.class, "comparisonBudgetSpent"))
+                .as("LiteralSearchKernel.comparisonBudgetSpent bytecode bytes")
+                .isLessThanOrEqualTo(11);
+    }
+
     /// Keeps the literal and folded prefix scans larger than FreqInlineSize, so every caller calls
     /// their compiled methods rather than inlined copies, as "Literal Prefix Vector Scan" in
     /// REGULATOR_DECISIONS.md records, and caps each at the size it was measured at: growing it
@@ -491,7 +521,7 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorPrefixScanner.class, "findPair"))
                 .as("VectorPrefixScanner.findPair bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(469);
+                .isLessThanOrEqualTo(466);
         assertThat(codeLength(VectorPrefixScanner.class, "findPairMasked"))
                 .as("VectorPrefixScanner.findPairMasked bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
@@ -509,7 +539,7 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
                 .as("VectorPrefixScanner.findLast bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(1004);
+                .isLessThanOrEqualTo(1001);
         // The literal set scan runs the same loop under the same rules, capped at the size it was
         // added at.
         assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
@@ -520,8 +550,8 @@ public class TestHotMethodSize
 
     /// Keeps the find loop's check of whether a search tries the inner or window literal first,
     /// and the dispatch helpers it calls, BooleanPlans.hasLiteralSearch included, within
-    /// MaxInlineSize, so that C2 inlines them into `RegexpMatcher.findGeneral` however often a
-    /// find reaches them, and keeps the whole-text count's check the same way. The search methods
+    /// MaxInlineSize, so that C2 inlines them into `RegexpMatcher.findGeneral` without needing a
+    /// hot call site, and keeps the whole-text count's check the same way. The search methods
     /// the helpers call, such as WindowLiteralSearch.fallsBackNearStart, are not held to it. Caps
     /// the DFA count dispatch at 84 bytes, within which an out-of-line call to the literal counts
     /// keeps it.
