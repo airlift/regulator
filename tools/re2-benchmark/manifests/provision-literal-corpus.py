@@ -38,6 +38,17 @@ def main():
     if actual_revision != expected_revision:
         raise SystemExit(f"expected Rebar {expected_revision}, found {actual_revision}")
 
+    # The hand-written notice beside the resources must name the revision they come from, as a
+    # code span, so a longer or different hash that merely contains it does not pass.
+    directories = {(root / row["resource_path"]).parent for row in rows}
+    if len(directories) != 1:
+        raise SystemExit(f"literal corpus resources span several directories: {sorted(directories)}")
+    notice = directories.pop() / "README.md"
+    if not notice.is_file():
+        raise SystemExit(f"literal corpus notice does not exist: {notice}")
+    if f"`{expected_revision}`" not in notice.read_text(encoding="utf-8"):
+        raise SystemExit(f"literal corpus notice does not name Rebar {expected_revision}: {notice}")
+
     for row in rows:
         source = arguments.rebar_root / row["source_path"]
         source_data = source.read_bytes()

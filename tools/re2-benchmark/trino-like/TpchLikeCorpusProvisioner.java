@@ -26,15 +26,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.ToLongFunction;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.toSet;
 
 public final class TpchLikeCorpusProvisioner
 {
@@ -57,7 +60,7 @@ public final class TpchLikeCorpusProvisioner
             throw new IllegalArgumentException("unexpected TPC-H LIKE corpus manifest header: " + lines.getFirst());
         }
 
-        int resources = 0;
+        List<String[]> rows = new ArrayList<>();
         for (String line : lines.subList(1, lines.size())) {
             String[] row = line.split("\t", -1);
             if (row.length != HEADER.size()) {
@@ -66,6 +69,12 @@ public final class TpchLikeCorpusProvisioner
             if (!row[1].equals("io.trino.tpch:tpch:1.4")) {
                 throw new IllegalArgumentException("unsupported TPC-H generator for " + row[0] + ": " + row[1]);
             }
+            rows.add(row);
+        }
+        checkNotice(root, rows);
+
+        int resources = 0;
+        for (String[] row : rows) {
             byte[] source = generate(
                     Double.parseDouble(row[3]),
                     row[4],
@@ -95,6 +104,29 @@ public final class TpchLikeCorpusProvisioner
         }
         String action = check ? "verified" : "provisioned";
         System.out.println(action + " " + resources + " TPC-H LIKE corpus resources");
+    }
+
+    // The hand-written notice beside the resources must name the generator that produced them, as a
+    // code span, so another version whose name merely contains it does not pass.
+    private static void checkNotice(Path root, List<String[]> rows)
+            throws IOException
+    {
+        Set<Path> directories = rows.stream()
+                .map(row -> root.resolve(row[8]).getParent())
+                .collect(toSet());
+        if (directories.size() != 1) {
+            throw new IllegalStateException("TPC-H LIKE corpus resources span several directories: " + directories);
+        }
+        Path notice = directories.iterator().next().resolve("README.md");
+        if (!Files.isRegularFile(notice)) {
+            throw new IllegalStateException("TPC-H LIKE corpus notice does not exist: " + notice);
+        }
+        String text = Files.readString(notice);
+        for (String[] row : rows) {
+            if (!text.contains("`" + row[1] + "`")) {
+                throw new IllegalStateException("TPC-H LIKE corpus notice does not name generator %s: %s".formatted(row[1], notice));
+            }
+        }
     }
 
     private static byte[] generate(double scaleFactor, String table, String field, long firstRow, int rowCount)

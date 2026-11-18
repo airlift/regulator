@@ -224,4 +224,6 @@ covers its port of the `aho-corasick` crate's automaton, is in
 [LICENSE-rust-regex.txt](LICENSE-rust-regex.txt). The notice for its Unicode
 data, including the Rust property names, is in
 [LICENSE-unicode.txt](LICENSE-unicode.txt). The jar carries these notices
-under `META-INF/`.
+under `META-INF/`. Test and benchmark data taken from other projects carries
+its notices beside it in `src/test/resources`; start with
+[THIRD-PARTY-NOTICES.md](src/test/resources/io/airlift/regulator/THIRD-PARTY-NOTICES.md).
