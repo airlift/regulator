@@ -44,6 +44,8 @@ public final class DfaAbsolutePointerProbe
     // The paired-row cases TestDfaPairedTransitions held when the probe began running them, so a
     // discovery that finds fewer fails instead of quietly testing one form.
     private static final int MINIMUM_PAIRED_TRANSITION_TESTS = 21;
+    // The characters of the random words the budget-release fixtures search for.
+    private static final String WORD_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     private DfaAbsolutePointerProbe() {}
 
@@ -209,6 +211,11 @@ public final class DfaAbsolutePointerProbe
 
         runPairedTransitionTests();
 
+        // The parent compares this line across forms.
+        System.out.println("budget-release word-list resets=" + exerciseBudgetBoundRelease(expectedNativeAccess) +
+                " input-shift states=" + exerciseInputShiftReleasesPointerTable() +
+                " split-budget " + exerciseSplitBudgetDecisions());
+
         // The parent forces the paired form each way and checks the one this JVM ran.
         System.out.println((expectedNativeAccess ? "OK enabled" : "OK disabled") + " flat-paired-rows=" + Dfa.FLAT_PAIRED_ROWS);
     }
@@ -322,6 +329,225 @@ public final class DfaAbsolutePointerProbe
         dfa.resetCacheExternal();
         awaitSupersededMemory(dfa, 0);
         assertReselected(program, input, dfa, "failed growth allocation");
+    }
+
+    // A program of about 8,000 instructions, one alternative for each of 1,000 random words,
+    // searched for each word's prefix, so nearly every searched byte adds a state. Its budget
+    // cannot hold them all beside the pointer table, whose rows in use cost more than a quarter
+    // of the generation's Java states, so the first state the budget cannot hold gives the table
+    // back, and the DFA resets on object rows from then on. The choice reads only the graph, so a
+    // native DFA that waits after each search for the collector to find its superseded segments
+    // resets as often as one that leaves collection to chance, and as often as a heap DFA.
+    // Returns the reset count.
+    private static int exerciseBudgetBoundRelease(boolean expectedNativeAccess)
+            throws InterruptedException
+    {
+        int resets = searchWordListOverBudget(false);
+        if (expectedNativeAccess) {
+            int collectedResets = searchWordListOverBudget(true);
+            check(collectedResets == resets, "collecting superseded sidecars changed the budget-bound resets from " + resets + " to " + collectedResets);
+        }
+        exerciseWithheldTableBudgetRelease();
+        // Without the slow-reset check, which gives the table back at the same reset, only the
+        // budget rule's second state in a row can give it back.
+        boolean bailWhenSlow = Dfa.dfaShouldBailWhenSlow;
+        Dfa.dfaShouldBailWhenSlow = false;
+        try {
+            exerciseWithheldTableBudgetRelease();
+        }
+        finally {
+            Dfa.dfaShouldBailWhenSlow = bailWhenSlow;
+        }
+        return resets;
+    }
+
+    private static int searchWordListOverBudget(boolean collectSuperseded)
+            throws InterruptedException
+    {
+        List<String> words = randomWords(WORD_ALPHABET);
+        Prog program = wordListProgram(words, 4L << 20);
+        searchWordPrefixes(program, words, 0, 1);
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        searchEveryWordPrefixTwice(program, words, dfa, collectSuperseded, 0);
+        return dfa.resetCount();
+    }
+
+    // A table that a failed growth allocation withholds is weighed as one held, but it has no
+    // charge to refund, so the DFA resets instead: one search through every word's prefix only
+    // records its first reset and gives the table back at its second, where it has reset too
+    // often but goes on, as it would had it given the table back itself. Its resets are not
+    // compared across forms; the fixture checks only where the release lands.
+    private static void exerciseWithheldTableBudgetRelease()
+            throws InterruptedException
+    {
+        List<String> words = randomWords(WORD_ALPHABET);
+        Prog program = wordListProgram(words, 4L << 20);
+        searchWordPrefixes(program, words, 0, 1);
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        // Enough short searches allocate the sidecar.
+        for (int word = 1; word < words.size() && !dfa.absolutePointerTransitionsAvailable(); word++) {
+            searchWordPrefixes(program, words, word, word + 1);
+        }
+        check(dfa.absolutePointerTransitionsAvailable(), "short word-prefix searches did not allocate a sidecar");
+        dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.POINTER_TABLE_GROWTH_ALLOCATION);
+        StringBuilder prefixes = new StringBuilder();
+        for (String word : words) {
+            prefixes.append(wordPrefix(word));
+        }
+        long result = Dfa.search(program, utf8Slice(prefixes.toString()), false, Prog.MatchKind.FIRST_MATCH, true);
+        check(result == Dfa.SEARCH_NO_MATCH, "search through every word's prefix returned " + result);
+        check(dfa.resetCount() == 2, "search through every word's prefix reset " + dfa.resetCount() + " times, expected 2");
+        check(dfa.releasedAbsolutePointerResetCount() == 2, "withheld sidecar was given back at reset " + dfa.releasedAbsolutePointerResetCount() + ", expected 2");
+        searchEveryWordPrefixTwice(program, words, dfa, false, 2);
+    }
+
+    // Searches every word's prefix twice, then checks that the DFA reset on object rows after
+    // giving the sidecar back at `releasedResetCount`.
+    private static void searchEveryWordPrefixTwice(Prog program, List<String> words, Dfa.DfaInstance dfa, boolean collectSuperseded, int releasedResetCount)
+            throws InterruptedException
+    {
+        for (int pass = 0; pass < 2; pass++) {
+            for (int word = 0; word < words.size(); word++) {
+                searchWordPrefixes(program, words, word, word + 1);
+                if (collectSuperseded && dfa.supersededAbsolutePointerMemory() > 0) {
+                    awaitSupersededMemory(dfa, 0);
+                }
+            }
+        }
+        check(dfa.resetCount() > 2, "budget-bound fixture reset " + dfa.resetCount() + " times, expected more than 2");
+        check(dfa.releasedAbsolutePointerResetCount() == releasedResetCount, "budget rule gave the sidecar back at reset " + dfa.releasedAbsolutePointerResetCount() + ", expected " + releasedResetCount);
+        check(!dfa.absolutePointerTransitionsAvailable(), "sidecar was published again after it was given back");
+        check(dfa.absolutePointerTransitionsUnavailable(), "sidecar given back can be allocated again");
+    }
+
+    // The same program at a budget where the first 500 words' prefixes fit beside the pointer
+    // table, but not the last 500's as well. Moving to the second half reaches a state the budget
+    // cannot hold, which gives the table back instead of resetting: its charge is refunded, every
+    // state is kept, and all 1,000 words' prefixes fit on object rows. Returns the state count,
+    // which the parent compares across forms.
+    private static int exerciseInputShiftReleasesPointerTable()
+    {
+        List<String> words = randomWords(WORD_ALPHABET);
+        Prog reference = wordListProgram(words, 2 * (16 << 20));
+        for (int pass = 0; pass < 2; pass++) {
+            searchWordPrefixes(reference, words, 0, 1_000);
+        }
+        Dfa.DfaInstance warm = reference.getCachedDfa(FIRST_MATCH);
+        check(warm.resetCount() == 0, "reference reset " + warm.resetCount() + " times over every word's prefixes");
+        check(warm.absolutePointerTransitionsAvailable(), "reference held every word's prefixes without a sidecar");
+        long fixedOverhead = (16 << 20) - warm.stateBudget();
+
+        // Java states take a different size in each object layout, so the budget holds the warm
+        // DFA's Java states, every word's prefixes on object rows, with an eighth to spare.
+        Prog program = wordListProgram(words, 2 * (warm.retainedStateMemory() * 9 / 8 + fixedOverhead));
+        for (int pass = 0; pass < 2; pass++) {
+            searchWordPrefixes(program, words, 0, 500);
+        }
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        check(dfa.resetCount() == 0, "first half of the words reset " + dfa.resetCount() + " times");
+        check(dfa.absolutePointerTransitionsAvailable(), "first half of the words did not fit beside the sidecar");
+        // The first pass reaches the state the budget cannot hold beside the table; the other
+        // three replay the second half on object rows, which hold it without resetting.
+        for (int pass = 0; pass < 4; pass++) {
+            searchWordPrefixes(program, words, 500, 1_000);
+        }
+        check(dfa.resetCount() == 0, "second half of the words reset " + dfa.resetCount() + " times instead of giving the sidecar back");
+        check(dfa.releasedAbsolutePointerResetCount() == 0, "state the budget could not hold gave the sidecar back at reset " + dfa.releasedAbsolutePointerResetCount() + ", expected 0");
+        check(!dfa.absolutePointerTransitionsAvailable(), "sidecar given back is still published");
+        check(dfa.absolutePointerTransitionsUnavailable(), "sidecar given back can be allocated again");
+        check(dfa.availableStateMemory() + dfa.retainedStateMemory() == dfa.stateBudget(), "giving the sidecar back kept its charge");
+        int stateCount = dfa.stateCount;
+        searchWordPrefixes(program, words, 0, 500);
+        check(dfa.stateCount == stateCount, "replaying the first half after the sidecar was given back added " + (dfa.stateCount - stateCount) + " states");
+
+        // The table was gone with the tables published at reset count 0, so a count that began
+        // there spends its allowance of two resets on the resets from then on.
+        for (int resets = 0; ; resets++) {
+            boolean resetsTooOften = dfa.countResetsTooOften(0, false);
+            check(resetsTooOften == (resets >= 2), "count that began at the release judged " + resets + " resets too often: " + resetsTooOften);
+            boolean handsResetsToLock = dfa.countHandsResetsToLock(0);
+            check(handsResetsToLock == (resets < 2), "count that began at the release handed " + resets + " resets to the lock: " + handsResetsToLock);
+            if (resets == 2) {
+                return stateCount;
+            }
+            dfa.resetCacheExternal();
+        }
+    }
+
+    // Public `Re2` finds of 1,000 random words, plus a branch that reads the whole line, at
+    // budgets that first run out at the same word, and so the same graph, in either form. The heap
+    // table's header makes its allocation larger than the native one's, and both are larger than
+    // the rows in use, which the rule weighs. Over 14 letters the rows in use sit just under the
+    // cutoff, at about 24% of the Java states with compressed object pointers and 20% without, so
+    // the DFA keeps the table and resets. Over 20 letters they sit above it, at about 30% and 28%,
+    // so the DFA gives the table back and does not reset. Returns each word and decision, which
+    // the parent compares across forms.
+    private static String exerciseSplitBudgetDecisions()
+    {
+        return "keep " + splitBudgetDecision(14, 3_070_000, false) + " give-back " + splitBudgetDecision(20, 4_000_000, true);
+    }
+
+    private static String splitBudgetDecision(int alphabetSize, long maxMemory, boolean releases)
+    {
+        List<String> words = randomWords(WORD_ALPHABET.substring(0, alphabetSize));
+        Re2 pattern = Re2.compile(utf8Slice(String.join("|", words) + "|[ -~]+z"), Re2.Options.defaults().setMaxMemory(maxMemory));
+        Prog program = pattern.forwardProgramForDiagnostics();
+        for (int word = 0; word < words.size(); word++) {
+            check(!pattern.matcher(utf8Slice(wordPrefix(words.get(word)))).find(), "word prefix matched");
+            Dfa.DfaInstance dfa = program.cachedDfaIfPresent(FIRST_MATCH);
+            if (dfa != null && (dfa.resetCount() > 0 || dfa.releasedAbsolutePointerResetCount() >= 0)) {
+                String fixture = alphabetSize + "-letter split-budget fixture";
+                if (releases) {
+                    check(dfa.resetCount() == 0, fixture + " reset " + dfa.resetCount() + " times at word " + word + " instead of giving the sidecar back");
+                    check(dfa.releasedAbsolutePointerResetCount() == 0, fixture + " gave the sidecar back at reset " + dfa.releasedAbsolutePointerResetCount() + ", expected 0");
+                }
+                else {
+                    check(dfa.resetCount() == 1, fixture + " reset " + dfa.resetCount() + " times at word " + word + ", expected 1");
+                    check(dfa.releasedAbsolutePointerResetCount() == -1, fixture + " gave back a sidecar whose rows cost under a quarter of the Java states, at reset " + dfa.releasedAbsolutePointerResetCount());
+                }
+                return "word=" + word + " resets=" + dfa.resetCount() + " released=" + dfa.releasedAbsolutePointerResetCount();
+            }
+        }
+        throw new AssertionError(alphabetSize + "-letter split-budget fixture did not exhaust its budget");
+    }
+
+    // 1,000 random eight-character words over the alphabet, from a fixed seed, so every run and
+    // form searches the same words.
+    private static List<String> randomWords(String alphabet)
+    {
+        Random random = new Random(1);
+        List<String> words = new ArrayList<>();
+        for (int wordIndex = 0; wordIndex < 1_000; wordIndex++) {
+            StringBuilder word = new StringBuilder();
+            for (int letter = 0; letter < 8; letter++) {
+                word.append(alphabet.charAt(random.nextInt(alphabet.length())));
+            }
+            words.add(word.toString());
+        }
+        return words;
+    }
+
+    // A program that matches any of the words, with a DFA budget of `dfaMemory`.
+    private static Prog wordListProgram(List<String> words, long dfaMemory)
+    {
+        Prog program = compileProg(String.join("|", words));
+        program.setDfaMemory(dfaMemory);
+        return program;
+    }
+
+    // A word without its last character, followed by a space, so no word matches it.
+    private static String wordPrefix(String word)
+    {
+        return word.substring(0, word.length() - 1) + " ";
+    }
+
+    // Searches the prefix of each word in [from, to).
+    private static void searchWordPrefixes(Prog program, List<String> words, int from, int to)
+    {
+        for (String word : words.subList(from, to)) {
+            long result = Dfa.search(program, utf8Slice(wordPrefix(word)), false, Prog.MatchKind.FIRST_MATCH, true);
+            check(result == Dfa.SEARCH_NO_MATCH, "search of word prefix " + wordPrefix(word) + " returned " + result);
+        }
     }
 
     // A program whose pointer table is sized for the warm-up's states, so a longer input grows it.

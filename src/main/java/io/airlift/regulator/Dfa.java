@@ -5726,8 +5726,9 @@ final class Dfa
             long[] classByteOffsets) {}
 
     // The enlarged pointer table a growth will allocate, and the charge it adds. An
-    // `allocatedBytes` of zero means the native superseded-segment cap is full: the table is
-    // withheld rather than enlarged, and `memoryDelta` refunds the current segment's charge.
+    // `allocatedBytes` of zero drops the table rather than enlarging it, and `memoryDelta`
+    // refunds the current segment's charge: the native superseded-segment cap is full and
+    // withholds the table, or the budget rule gives it back. The caller tells the two apart.
     private record AbsolutePointerGrowthSize(int entryCapacity, long allocatedBytes, long memoryDelta)
     {
         boolean withheld()
@@ -5736,20 +5737,21 @@ final class Dfa
         }
     }
 
-    // A growth whose transitions are null withholds the table instead: the enlarged segment was
-    // not allocated, and the delta refunds the current segment's charge. `allocationFailed` tells
-    // a failed allocation from a full native cap.
+    // A growth whose transitions are null drops the table instead: the enlarged segment was not
+    // allocated, and the delta refunds the current segment's charge. A full native cap or a
+    // failed allocation withholds the table, which `allocationFailed` tells apart, or the budget
+    // rule gives it back, which the caller knows.
     private record AbsolutePointerGrowth(
             AbsolutePointerTransitions transitions,
             int transitionCount,
             long memoryDelta,
             boolean allocationFailed) {}
 
-    // A reference to a native pointer table a reset or growth superseded. The collector enqueues
-    // this reference once the superseded native table is unreachable; the DFA links the reference
-    // until then, so it stays reachable, and releases the table's bytes from its count when it next
-    // checks the cap. The native memory itself is freed by the automatic arena's cleaner in the
-    // JDK; this reference releases only the DFA's count of it.
+    // A reference to a native pointer table that a reset, a growth, or the budget rule superseded.
+    // The collector enqueues this reference once the superseded native table is unreachable; the
+    // DFA links the reference until then, so it stays reachable, and releases the table's bytes
+    // from its count when it next checks the cap. The native memory itself is freed by the
+    // automatic arena's cleaner in the JDK; this reference releases only the DFA's count of it.
     private static final class SupersededAbsolutePointerReference
             extends PhantomReference<AbsolutePointerTransitions>
     {
@@ -6771,6 +6773,17 @@ final class Dfa
         // Like a boolean search of a line, one search reads one short span, a match the tagged
         // alternation program picks a branch for, so the window is the boolean searches'.
         private static final int MANY_MATCH_SEARCH_SKIPPED_SEARCHES = 1 << 16;
+        // The budget rule in `releaseAbsolutePointerTransitionsForBudget` gives the pointer table
+        // back once the bytes of its rows in use reach the generation's retained Java state memory
+        // divided by this. Object rows also pay for the state tables' growth, which doubles, so
+        // what they gain depends on where the doublings fall. In counter runs, object rows held
+        // 32-44% more states per generation than the table on either side of a quarter. Below it
+        // they held 8-14% more where the rows cost up to about an eighth of the Java states, and
+        // 11% to 40% more from about a sixth to a quarter, the most on word lists over alphabets
+        // of 12 to 14 byte classes. A lower cutoff would also give the table back where object
+        // rows gain little, such as a latin1 pattern whose rows cost 22% of its Java states and
+        // whose object rows held 11% more.
+        private static final int BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR = 4;
 
         private static final VarHandle TABLES;
         private static final VarHandle COUNT_BAIL_SKIPS_REMAINING;
@@ -6888,26 +6901,36 @@ final class Dfa
         private boolean absolutePointerTransitionsUnavailable;
         // The requested pointer table is absent from the current tables: superseded native segments
         // still await collection, or its memory could not be allocated. It stays requested, and
-        // paired rows stay disabled, until an exclusive search allocates it again or a search
-        // about to give up gives it back, so a warm cache may run on object rows until its next
-        // exclusive search or reset.
+        // paired rows stay disabled, until an exclusive search allocates it again or the DFA gives
+        // it back, for resetting too often or when the budget cannot hold a state, so a warm cache
+        // may run on object rows until its next exclusive search or reset.
         private boolean absolutePointerTransitionsWithheld;
         // A pointer table allocation has failed since the last reset; none is attempted again until
         // the next one.
         private boolean absolutePointerTransitionAllocationFailed;
-        // A search or count about to give up for resetting too often gave the pointer table back.
-        // The table may still grow until the next reset drops it; nothing allocates one after that,
-        // and paired transitions stay disabled.
+        // The pointer table was given back for the instance's life, by a search or count about to
+        // give up for resetting too often or by the budget rule, as
+        // `releaseAbsolutePointerTransitionsForSlowReset` and
+        // `releaseAbsolutePointerTransitionsForBudget` describe. A table the budget refunds leaves
+        // with the tables published with the state it could not hold. Any other stays in the
+        // current tables, and may still grow, until the next reset drops it, which need not follow
+        // at once: a search or count may give up first. No new table is allocated, and paired
+        // transitions stay disabled.
         private boolean absolutePointerTransitionsReleased;
-        // The reset count once the first reset after that release has run; from there the tables
-        // hold no pointer table.
-        private int releasedAbsolutePointerResetCount;
+        // The reset count from which the tables hold no pointer table, or -1 before the release:
+        // the count at the release when the budget publishes tables without it, otherwise the
+        // count once the next reset, which drops it, has run.
+        private int releasedAbsolutePointerResetCount = -1;
+        // When the budget rule held but could not refund the table, so the DFA reset instead: the
+        // reset count once that reset ran, or -1 until the first such reset; see
+        // `releaseAbsolutePointerTransitionsForBudget`.
+        private int budgetReleaseResetCount = -1;
         // The first pointer table allocation's one wait, for a search that computed no transition,
         // is spent; later allocations, including after a reset, do not wait.
         private boolean absolutePointerTransitionDeferralUsed;
-        // References to native pointer tables a reset or growth superseded, linked until the
-        // collector enqueues them, and their native bytes not yet released from the count.
-        // The list and count are guarded by the cache mutation lock.
+        // References to native pointer tables that a reset, a growth, or the budget rule
+        // superseded, linked until the collector enqueues them, and their native bytes not yet
+        // released from the count. The list and count are guarded by the cache mutation lock.
         private final ReferenceQueue<AbsolutePointerTransitions> unreachableAbsolutePointerTables = new ReferenceQueue<>();
         private SupersededAbsolutePointerReference supersededAbsolutePointerReferences;
         private long supersededAbsolutePointerMemory;
@@ -8085,20 +8108,27 @@ final class Dfa
             stateMemory += sizeOfObjectArray(Math.multiplyExact(newCacheTableCapacity, 2)) - cache.tableBytes();
 
             AbsolutePointerGrowthSize absolutePointerGrowthSize = null;
+            boolean absolutePointerGrowthUnfunded = false;
             AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers != null && nextFreeOffset + nextSize > existingPointers.entryCapacity()) {
                 absolutePointerGrowthSize = sizeAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory, newStateCapacity);
-                if (absolutePointerGrowthSize == null) {
-                    return null;
-                }
+                absolutePointerGrowthUnfunded = absolutePointerGrowthSize == null;
             }
             long absolutePointerMemory = absolutePointerGrowthSize == null ? 0 : absolutePointerGrowthSize.memoryDelta();
             boolean releasePairedTransitions = false;
-            if (availableStateMemory - absolutePointerMemory < stateMemory) {
+            boolean releaseAbsolutePointers = false;
+            if (absolutePointerGrowthUnfunded || availableStateMemory - absolutePointerMemory < stateMemory) {
+                // Paired rows and a pointer table exclude each other, so an unfunded pointer
+                // growth never releases paired rows.
                 releasePairedTransitions = tables.hasPairedRows() &&
                         availableStateMemory + pairedTransitionMemory - absolutePointerMemory >= stateMemory;
                 if (!releasePairedTransitions) {
-                    return null;
+                    if (!releaseAbsolutePointerTransitionsForBudget(stateMemory)) {
+                        return null;
+                    }
+                    // The table is dropped as a withheld growth drops it, with its charge refunded.
+                    absolutePointerGrowthSize = new AbsolutePointerGrowthSize(0, 0, -existingPointers.allocatedBytes());
+                    releaseAbsolutePointers = true;
                 }
             }
 
@@ -8165,7 +8195,10 @@ final class Dfa
             if (absolutePointerGrowth != null) {
                 absolutePointerTransitionCount = absolutePointerGrowth.transitionCount();
                 pointerMemoryDelta = absolutePointerGrowth.memoryDelta();
-                if (absolutePointerGrowth.transitions() == null) {
+                if (releaseAbsolutePointers) {
+                    releaseAbsolutePointerTransitions(resetCount);
+                }
+                else if (absolutePointerGrowth.transitions() == null) {
                     absolutePointerTransitionsWithheld = true;
                     absolutePointerTransitionAllocationFailed |= absolutePointerGrowth.allocationFailed();
                 }
@@ -8173,10 +8206,10 @@ final class Dfa
             // A lock-free size read pairs the tables it sees with the charge it reads, so the
             // charge must never be below that of any tables a reader can see. Growth, an enlarged
             // pointer table included, is charged before the volatile publish of the tables that
-            // hold it. A refund, of released paired rows or a withheld pointer table, belongs to
-            // the tables it replaces, so it follows the publish behind a store-store fence: a plain
-            // write after a volatile one may otherwise become visible before it. Every refund here
-            // comes with new tables.
+            // hold it. A refund, of released paired rows or of a pointer table withheld or given
+            // back, belongs to the tables it replaces, so it follows the publish behind a
+            // store-store fence: a plain write after a volatile one may otherwise become visible
+            // before it. Every refund here comes with new tables.
             availableStateMemory -= stateMemory + Math.max(pointerMemoryDelta, 0);
             retainedStateMemory += stateMemory;
             if (newTables != tables) {
@@ -8962,8 +8995,9 @@ final class Dfa
                 // Preserve enough budget for the minimum Java state behind every additional
                 // pointer row, and for the state tables' growth toward one row per instruction
                 // that the budget funds. A heap table's array header and class offsets are charged
-                // once, outside the per-row cost. Failure means ordinary DFA budget exhaustion, not
-                // an object-row representation change.
+                // once, outside the per-row cost. Failure means the budget is exhausted, and the
+                // caller then weighs the table, as `releaseAbsolutePointerTransitionsForBudget`
+                // describes.
                 rowCapacity = compatiblePointerRowCount(
                         Math.addExact(remainingMemory, existingRowMemory),
                         requiredRowCount,
@@ -8988,8 +9022,9 @@ final class Dfa
                     allocatedBytes - existingPointers.allocatedBytes());
         }
 
-        // Allocates and backfills the segment a growth was sized for, or withholds the table. A
-        // withheld table refunds the current segment's charge, which leaves more budget than the
+        // Allocates and backfills the segment a growth was sized for, or drops the table, which a
+        // full native cap or a failed allocation withholds or the budget rule gives back. A
+        // dropped table refunds the current segment's charge, which leaves no less budget than the
         // sized charge the growth was checked against. The enlarged table is rebased into a new
         // segment and published with new tables; a search reading older tables keeps the superseded
         // segment reachable until it returns.
@@ -10047,8 +10082,8 @@ final class Dfa
         // Publishes empty tables at the initial capacity. Searches still reading the superseded
         // tables keep them, unchanged, until they finish; the superseded tables are no longer
         // charged. A pointer table moves to a new segment of the same size, or is withheld when
-        // superseded native segments fill their cap or the segment cannot be allocated; a table a
-        // search gave back is dropped.
+        // superseded native segments fill their cap or the segment cannot be allocated; a table
+        // given back is dropped.
         private void resetCache()
         {
             // Every allocation precedes the first write to the DFA, so a failure that propagates
@@ -10125,22 +10160,89 @@ final class Dfa
         // Returns whether the search goes on.
         boolean releaseAbsolutePointerTransitionsForSlowReset()
         {
-            if (absolutePointerTransitionsReleased ||
-                    (tables.absolutePointerTransitions == null && !absolutePointerTransitionsWithheld)) {
+            if (absolutePointerTransitionsReleased) {
+                // A table given back lets the search go on only while the reset that drops it is
+                // still to come, as when the budget rule gave it back at the state this search
+                // could not hold, so the search goes on as it would had it given the table back
+                // itself.
+                return releasedAbsolutePointerResetCount > resetCount;
+            }
+            if (!holdsOrWithholdsAbsolutePointerTransitions()) {
                 return false;
             }
-            absolutePointerTransitionsReleased = true;
-            absolutePointerTransitionsUnavailable = true;
-            absolutePointerTransitionsWithheld = false;
-            releasedAbsolutePointerResetCount = resetCount + 1;
+            releaseAbsolutePointerTransitions(resetCount + 1);
             return true;
         }
 
+        // Whether the DFA holds a pointer table or has one withheld. A DFA that only requested one,
+        // such as one on paired rows, holds neither.
+        private boolean holdsOrWithholdsAbsolutePointerTransitions()
+        {
+            return tables.absolutePointerTransitions != null || absolutePointerTransitionsWithheld;
+        }
+
+        // Called under the cache mutation lock when the budget cannot hold a new state of
+        // `stateMemory` and no paired rows' refund holds it, whether the state tables or the
+        // pointer table would have to grow for it or the state alone does not fit. The budget rule
+        // gives the pointer table back once the bytes of its rows in use, reserved row zero
+        // included, reach the generation's retained Java state memory divided by
+        // `BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR`: the table's charge then takes room that
+        // object rows would fill with more states. The rows in use and the Java states are the
+        // same for a heap and a native table, so the same graph decides alike in either form. The
+        // rule weighs a table the superseded-segment cap or a failed allocation withholds as one
+        // held; a DFA that only requested a table, such as one on paired rows, has none to give
+        // back.
+        //
+        // Returns true when the current tables hold the table and its refunded charge holds the
+        // state: the caller publishes the state's tables without the table, refunds its charge,
+        // keeps every state, and goes on with object rows, so a pattern whose input shifts once
+        // runs on object rows for good. Otherwise, when a withheld table has no charge to refund or
+        // the refund cannot hold the state, the DFA resets: the first such state only records that
+        // reset, and when the next state the budget cannot hold follows before any other reset and
+        // is such a state too, it gives the table back for the next reset to drop. Any other reset
+        // invalidates the record.
+        private boolean releaseAbsolutePointerTransitionsForBudget(long stateMemory)
+        {
+            if (absolutePointerTransitionsReleased || !holdsOrWithholdsAbsolutePointerTransitions()) {
+                return false;
+            }
+            long rowMemory = (long) nextFreeOffset * Long.BYTES;
+            if (rowMemory * BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR < retainedStateMemory) {
+                return false;
+            }
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
+            if (absolutePointers != null && availableStateMemory + absolutePointers.allocatedBytes() >= stateMemory) {
+                return true;
+            }
+            if (budgetReleaseResetCount == resetCount) {
+                releaseAbsolutePointerTransitions(resetCount + 1);
+            }
+            else {
+                budgetReleaseResetCount = resetCount + 1;
+            }
+            return false;
+        }
+
+        // Gives the pointer table back for the instance's life: no new table is allocated after
+        // that, though one still in the current tables may grow until the reset that drops it.
+        // From `releasedResetCount` on, the tables hold no pointer table: the current count when
+        // the budget publishes tables without it, otherwise the next, once the reset that drops it
+        // has run.
+        private void releaseAbsolutePointerTransitions(int releasedResetCount)
+        {
+            absolutePointerTransitionsReleased = true;
+            absolutePointerTransitionsUnavailable = true;
+            absolutePointerTransitionsWithheld = false;
+            releasedAbsolutePointerResetCount = releasedResetCount;
+        }
+
         // Whether a count that began at `initialResetCount` has seen the DFA reset too often. The
-        // allowance counts only the resets after the one that drops a pointer table given back, by
-        // a search or a count: the table stays in the current tables until that reset, and resets
-        // with it come sooner because it fits fewer states. An exclusive count gives the table back
-        // instead, and gives up only when it has nothing to give back.
+        // allowance counts only the resets once a pointer table given back is gone, since resets
+        // with it come sooner because it fits fewer states. A table the budget refunds is gone
+        // with the tables published without it; one a search or count gave back, or the budget
+        // could not refund, stays in the current tables until the next reset drops it. An
+        // exclusive count gives the table back instead, and gives up only when it has nothing to
+        // give back.
         boolean countResetsTooOften(int initialResetCount, boolean exclusiveSearch)
         {
             return resetCount - Math.max(initialResetCount, releasedAbsolutePointerResetCount) >= 2 &&
@@ -10150,18 +10252,19 @@ final class Dfa
         // Whether a lock-free count that saw two resets hands them to the lock: while the DFA has
         // held a pointer table, now in its tables or withheld, and not given it back, or when
         // another search gave it back after the count judged its resets, leaving fewer than two
-        // resets after the one that drops it. It reads the release once, and only through that
-        // reset, so a release the count sees in part, or after its judgement, costs one locked
-        // count rather than a give-up for good.
+        // resets after the table was gone. It reads the release once, and only through the reset
+        // count from which the table is gone, so a release the count sees in part, or after its
+        // judgement, costs one locked count rather than a give-up for good.
         boolean countHandsResetsToLock(int initialResetCount)
         {
             int releasedResetCount = releasedAbsolutePointerResetCount;
-            return releasedResetCount == 0
+            return releasedResetCount < 0
                     ? absolutePointerTransitionsPublished
                     : resetCount - Math.max(initialResetCount, releasedResetCount) < 2;
         }
 
-        // Read after `resetCount()`, which publishes it with the reset that drops the table.
+        // Read after `resetCount()`, which publishes it with the reset that drops the table; a
+        // table the budget drops without a reset publishes it with the tables that drop it.
         int releasedAbsolutePointerResetCount()
         {
             return releasedAbsolutePointerResetCount;

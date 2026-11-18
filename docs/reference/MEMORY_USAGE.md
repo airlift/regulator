@@ -51,13 +51,14 @@ leaves out.
 
 ## When the budget runs out
 
-Compilation that exceeds the budget throws
-`RegexpCompileMemoryLimitException`. Where compilation proves a lower bound on
-the budget the pattern needs, the message reports it; a larger budget may still
-be needed. During matching, a full DFA cache resets, and repeated resets fall
-back to the NFA, so ordinary matching never throws a memory-limit exception.
-`Re2Set` is the exception: it throws `RegexpMatchMemoryLimitException` rather
-than report no match. See [Compiled patterns](REGULATOR_API.md#compiled-patterns) and
+Compilation that exceeds the budget throws `RegexpCompileMemoryLimitException`.
+Where compilation proves a lower bound on the budget the pattern needs, the
+message reports it; a larger budget may still be needed. During matching, a
+full DFA cache resets, or gives its pointer table back and goes on with Java
+object rows, and repeated resets fall back to the NFA, so ordinary matching
+never throws a memory-limit exception. `Re2Set` is the exception: it throws
+`RegexpMatchMemoryLimitException` rather than report no match. See [Compiled
+patterns](REGULATOR_API.md#compiled-patterns) and
 [Memory Budgets And DFA Caching](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching).
 
 ## How threads share a pattern's memory
@@ -90,8 +91,8 @@ reads, both engines finish that search without the DFA. The costs:
 - A search that needs a missing state finishes under the DFA's one lock, so
   many threads warming a cold cache take turns, and one long search can hold
   the lock for the rest of its input.
-- A full cache resets for every thread at once, and threads that search
-  unlike text compete for the same cache.
+- A full cache resets, or gives its pointer table back, for every thread at
+  once, and threads that search unlike text compete for the same cache.
 - RE2 takes a shared lock for each search, and a thread that resets holds the
   cache exclusively for the rest of its search, so other searches of that DFA
   wait. Regulator's searches of a warm cache take no lock.

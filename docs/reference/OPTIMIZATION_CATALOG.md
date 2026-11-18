@@ -1365,9 +1365,10 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   16 and at most what its budget's transitions hold, is above 256: a program
   of more than 256 instructions under a budget that holds 256 states. Other
   DFAs' tables start at that capacity. A growth that does not fit the state
-  budget resets the cache as a full cache does, and the pointer table reserves
-  the growth while the tables are smaller than one row per instruction, up to
-  the capacity whose rows the budget fills with the most states
+  budget is handled as a full cache is, by a reset or by giving the pointer
+  table back, and while the tables are smaller than one row per instruction,
+  the pointer table reserves their next growth when that growth funds more
+  rows
 - **What it does:** A DFA's state, transition, and self-loop exit tables start
   with room for at most 256 states and double as states arrive, stopping once
   at the one-row-per-instruction capacity before doubling on toward the
@@ -1396,12 +1397,13 @@ authoritative.
   sentinel pointers ([dfa.cc][re2-dfa]); First described by Hyperscan, whose
   McClellan state IDs carry accept and acceleration flags
   ([mcclellan_internal.h][hs-mcclellan-flags]), and by regex-automata, whose
-  lazy state IDs carry match, dead, and other tags ([hybrid/id.rs][ra-id])
-  and are premultiplied row offsets into one flat transition table
+  lazy state IDs carry match, dead, and other tags ([hybrid/id.rs][ra-id]) and
+  are premultiplied row offsets into one flat transition table
   ([hybrid/dfa.rs][ra-hybrid]). Regulator: absolute row addresses in native
   memory, tags in their low bits, a zero-based heap segment so one set of
   loops serves both forms, short-search promotion, the one-time wait for
-  pairing, and giving the table back before NFA fallback ([#162], [#165],
+  pairing, and giving the table back before NFA fallback or when its rows in
+  use cost a quarter of the Java states at budget exhaustion ([#162], [#165],
   [design][d-native]); base RE2 [O-DFA-001], [O-DFA-002], [O-DFA-013].
 - **Where:** `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.allocateAbsolutePointerTable`,
@@ -1412,16 +1414,22 @@ authoritative.
   `Dfa.searchBackwardAbsolutePointers`,
   `Dfa.DfaInstance.absolutePointerTableBytes`,
   `Dfa.DfaInstance.releaseAbsolutePointerTransitionsForSlowReset`,
+  `Dfa.DfaInstance.releaseAbsolutePointerTransitionsForBudget`,
   `Dfa.DfaInstance.countResetsTooOften`,
   `Dfa.DfaInstance.countHandsResetsToLock`
 - **Applies when:** DFAs with a finite budget, except many-match sets, in
   either memory mode, the heap form when the JVM runs without native access;
   long forward searches when pairing is unavailable, fused counts, and
-  eligible short searches; the reverse loop on unbounded longest-match
-  reverse searches from a non-matching start. A search or count about to give
-  up to the NFA for resetting too often gives the table back instead, since
-  its per-state charge fits fewer states per reset, and continues on object
-  rows; the table stays given back for the life of the pattern's DFA
+  eligible short searches; the reverse loop on unbounded longest-match reverse
+  searches from a non-matching start. A search or count about to give up to
+  the NFA for resetting too often gives the table back instead, since its
+  per-state charge fits fewer states per reset, and continues on object rows.
+  A state the budget cannot hold gives the table back, keeping every state
+  instead of resetting, when the rows in use cost at least a quarter of the
+  generation's Java states. When the table is withheld, or its refund cannot
+  hold the state, the DFA resets instead, and the second such state in a row
+  gives the table back. The table stays given back for the life of the
+  pattern's DFA
 - **What it does:** Each slot holds the next row's 64-bit address in native
   memory, or its byte offset in a heap `long[]` read through a segment whose
   base address is zero, so a step follows the next row without decoding an
