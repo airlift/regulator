@@ -57,6 +57,10 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
 /// - `parseBrowserShared` and `parseOsShared`: the same parses with one compiled section that every
 ///   JMH thread shares; run them with `-t 16`. The other rows compile the sections for each thread,
 ///   so with the same `-t` the parse rows are their per-thread controls.
+/// - `parseBrowserOneCall`, `parseOsOneCall`, `parseBrowserSharedOneCall`, and
+///   `parseOsSharedOneCall`: the same parses as the rows without `OneCall`, run through
+///   [FilteredRe2#firstMatchResult(Slice)], whose own atom search, of the atom set's budget, takes
+///   the place of the atom set; same checksum as their twins
 ///
 /// `ruleMemoryMiB` is every rule's memory budget, and `atomSetMemoryMiB` the atom set's.
 @BenchmarkMode(Mode.AverageTime)
@@ -209,6 +213,30 @@ public class BenchmarkUapCore
         return parse(parsers.osParser, parsers.userAgents);
     }
 
+    @Benchmark
+    public long parseBrowserOneCall(BenchmarkData data)
+    {
+        return parseOneCall(data.browserParser, data.userAgents);
+    }
+
+    @Benchmark
+    public long parseOsOneCall(BenchmarkData data)
+    {
+        return parseOneCall(data.osParser, data.userAgents);
+    }
+
+    @Benchmark
+    public long parseBrowserSharedOneCall(SharedParsers parsers)
+    {
+        return parseOneCall(parsers.browserParser, parsers.userAgents);
+    }
+
+    @Benchmark
+    public long parseOsSharedOneCall(SharedParsers parsers)
+    {
+        return parseOneCall(parsers.osParser, parsers.userAgents);
+    }
+
     private static long matchingAtomIds(UapCoreParser parser, Slice[] canonicalTexts)
     {
         long checksum = 0;
@@ -228,11 +256,25 @@ public class BenchmarkUapCore
     {
         long checksum = 0;
         for (Slice userAgent : userAgents) {
-            Parse parse = parser.parse(userAgent);
-            checksum = fold(checksum, parse.ruleId());
-            for (String field : parse.fields()) {
-                checksum = fold(checksum, Objects.hashCode(field));
-            }
+            checksum = fold(checksum, parser.parse(userAgent));
+        }
+        return checksum;
+    }
+
+    private static long parseOneCall(UapCoreParser parser, Slice[] userAgents)
+    {
+        long checksum = 0;
+        for (Slice userAgent : userAgents) {
+            checksum = fold(checksum, parser.parseOneCall(userAgent));
+        }
+        return checksum;
+    }
+
+    private static long fold(long checksum, Parse parse)
+    {
+        checksum = fold(checksum, parse.ruleId());
+        for (String field : parse.fields()) {
+            checksum = fold(checksum, Objects.hashCode(field));
         }
         return checksum;
     }
