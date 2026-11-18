@@ -1727,8 +1727,12 @@ final class ScanPlan
         // After a skipped leading run, the failure resume and scanned extent start where the run
         // would have left them.
         int resumeRunEnd = failureResumeOperation == 0 ? cursor : matchStart;
-        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        // The furthest byte any unbounded scan of this attempt reached, across retries. A run
+        // that fails on its first byte made a bounded check and does not count.
         int scanned = cursor;
+        // Whether the caller observes only whether the attempt matches, decided before the step
+        // loop so that the loop tests neither flag.
+        boolean booleanResult = groups == null && !fullMatch;
         long retryPositionsLow = 0;
         long retryPositionsHigh = 0;
         int retryOperations = 0;
@@ -1771,18 +1775,24 @@ final class ScanPlan
                         failed = true;
                     }
                     case RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.matchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1797,18 +1807,24 @@ final class ScanPlan
                         cursor = stop;
                     }
                     case RE2_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.re2MatchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1823,18 +1839,24 @@ final class ScanPlan
                         cursor = stop;
                     }
                     case RE2_SET_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.re2SetMatchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1901,8 +1923,12 @@ final class ScanPlan
         int operation = 0;
         int retries = 0;
         int resumeRunEnd = matchStart;
-        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        // The furthest byte any unbounded scan of this attempt reached, across retries. A run
+        // that fails on its first byte made a bounded check and does not count.
         int scanned = matchStart;
+        // Whether the caller observes only whether the attempt matches, decided before the step
+        // loop so that the loop tests neither flag.
+        boolean booleanResult = groups == null && !fullMatch;
         long retryPositionsLow = 0;
         long retryPositionsHigh = 0;
         int retryOperations = 0;
@@ -1962,18 +1988,24 @@ final class ScanPlan
                         failed = true;
                     }
                     case RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.matchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1988,18 +2020,24 @@ final class ScanPlan
                         cursor = stop;
                     }
                     case RE2_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.re2MatchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -2014,18 +2052,24 @@ final class ScanPlan
                         cursor = stop;
                     }
                     case RE2_SET_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                        if (booleanResult && booleanTails[stepIndex]) {
                             // The continuation cannot fail, so the run's minimum decides this path.
                             // Boolean callers observe only a nonnegative result, not its end.
                             int stop = step.run.re2SetMatchMinimum(bytes, cursor, end);
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
+                            if (stop != -1) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
