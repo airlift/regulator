@@ -518,6 +518,19 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(517);
     }
 
+    /// Keeps the many-match search's byte scan larger than FreqInlineSize, so C2 compiles it on its
+    /// own and allocates its registers from its own few live values rather than from the whole
+    /// search's graph, and caps it at the size it was measured at.
+    @Test
+    public void testManyMatchByteScanStaysOutOfLineAtMeasuredSize()
+    {
+        // Six bytes a step, stopping at matches, carry it past the inline size.
+        assertThat(codeLength(Dfa.class, "scanPlainManyBytes"))
+                .as("Dfa.scanPlainManyBytes bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(348);
+    }
+
     /// Keeps the find loop's check of whether a search tries the inner or window literal first,
     /// and the dispatch helpers it calls, BooleanPlans.hasLiteralSearch included, within
     /// MaxInlineSize, so that C2 inlines them into `RegexpMatcher.findGeneral` however often a

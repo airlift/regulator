@@ -2670,6 +2670,12 @@ final class Dfa
                 int position = textBegin;
                 int[] transitions = tables.transitions;
                 while (position < textEnd) {
+                    long scanned = scanPlainManyBytes(transitions, dfa.bytemap, bytes, position, textEnd, stateOffset);
+                    position = (int) (scanned >>> 32);
+                    stateOffset = (int) scanned;
+                    if (position == textEnd) {
+                        break;
+                    }
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
@@ -2758,6 +2764,53 @@ final class Dfa
                 dfa.endSearch(exclusiveSearch);
             }
         }
+    }
+
+    // Steps from position toward end through the many-match transition table, from stateOffset,
+    // stopping before a transition that is uncomputed, dead, full-match, a reset, or matching,
+    // which searchMany's own step handles. Six bytes a step keep it larger than FreqInlineSize, so
+    // C2 compiles it on its own and allocates its registers from its own few live values rather
+    // than from searchMany's whole graph. Returns the position and state reached as
+    // position << 32 | state.
+    private static long scanPlainManyBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int end, int stateOffset)
+    {
+        int unrolledEnd = end - 5;
+        while (position < unrolledEnd) {
+            int first = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
+            if ((first & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) position << 32) | stateOffset;
+            }
+            int second = getTransition(transitions, first + (byteMap[bytes[position + 1] & 0xFF] & 0xFF));
+            if ((second & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) (position + 1) << 32) | first;
+            }
+            int third = getTransition(transitions, second + (byteMap[bytes[position + 2] & 0xFF] & 0xFF));
+            if ((third & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) (position + 2) << 32) | second;
+            }
+            int fourth = getTransition(transitions, third + (byteMap[bytes[position + 3] & 0xFF] & 0xFF));
+            if ((fourth & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) (position + 3) << 32) | third;
+            }
+            int fifth = getTransition(transitions, fourth + (byteMap[bytes[position + 4] & 0xFF] & 0xFF));
+            if ((fifth & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) (position + 4) << 32) | fourth;
+            }
+            int sixth = getTransition(transitions, fifth + (byteMap[bytes[position + 5] & 0xFF] & 0xFF));
+            if ((sixth & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                return ((long) (position + 5) << 32) | fifth;
+            }
+            stateOffset = sixth;
+            position += 6;
+        }
+        for (; position < end; position++) {
+            int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
+            if ((nextState & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                break;
+            }
+            stateOffset = nextState;
+        }
+        return ((long) position << 32) | stateOffset;
     }
 
     @SuppressWarnings("UnusedException")
