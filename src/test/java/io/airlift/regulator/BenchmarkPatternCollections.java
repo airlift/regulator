@@ -78,6 +78,38 @@ public class BenchmarkPatternCollections
         }
     }
 
+    @State(Scope.Thread)
+    public static class MatchDenseData
+    {
+        @Param({"16", "128"})
+        int patternCount;
+
+        @Param({"1024", "32768"})
+        int sourceLength;
+
+        private Re2Set re2Set;
+        private Slice source;
+
+        @Setup
+        public void setup()
+        {
+            Slice[] patterns = new Slice[patternCount];
+            for (int index = 0; index < patternCount; index++) {
+                patterns[index] = Slices.utf8Slice("prefix" + index + "-[0-9]+");
+            }
+
+            // A match of each pattern in turn, so the search keeps entering matching states.
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; text.length() < sourceLength; index = (index + 1) % patternCount) {
+                text.append("prefix").append(index).append("-123 ");
+            }
+            text.setLength(sourceLength);
+            source = Slices.utf8Slice(text.toString());
+
+            re2Set = buildRe2Set(patterns);
+        }
+    }
+
     @Benchmark
     public Re2Set compileRe2Set(BenchmarkData data)
     {
@@ -92,6 +124,12 @@ public class BenchmarkPatternCollections
 
     @Benchmark
     public int[] matchingSetPatternIds(BenchmarkData data)
+    {
+        return data.re2Set.matchingPatternIds(data.source);
+    }
+
+    @Benchmark
+    public int[] matchingSetPatternIdsMatchDense(MatchDenseData data)
     {
         return data.re2Set.matchingPatternIds(data.source);
     }
