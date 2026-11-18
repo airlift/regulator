@@ -43,6 +43,8 @@ public class TestDfaFailureAtomicity
     // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
     // answer it without the DFA.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
+    // The budget of the state-growth cases, unless a case needs a smaller one.
+    private static final long STATE_GROWTH_MAX_MEMORY = 4L << 20;
 
     @Test
     public void testFailedExclusiveAdmissionReleasesCacheMutationLock()
@@ -103,31 +105,40 @@ public class TestDfaFailureAtomicity
                 STATE_REFERENCE_ARRAY_GROWTH,
                 SELF_LOOP_ARRAY_GROWTH,
         }) {
-            assertStateAllocationFailureIsAtomic(failurePoint);
+            assertStateAllocationFailureIsAtomic(failurePoint, STATE_GROWTH_MAX_MEMORY, false);
         }
+
+        // This budget funds fewer rows than doubling the tables would add. The failure strikes the
+        // growth from the starting capacity, and the retried find leaves tables grown past that
+        // capacity but short of twice it.
+        assertStateAllocationFailureIsAtomic(TRANSITION_ARRAY_GROWTH, 400_000, true);
     }
 
     @Test
     public void testFailedStateReferenceRowAllocationIsAtomic()
             throws Exception
     {
-        assertStateAllocationFailureIsAtomic(STATE_REFERENCE_ROW_ALLOCATION);
+        assertStateAllocationFailureIsAtomic(STATE_REFERENCE_ROW_ALLOCATION, STATE_GROWTH_MAX_MEMORY, false);
     }
 
     @Test
     public void testFailedStateCacheInsertionIsAtomic()
             throws Exception
     {
-        assertStateAllocationFailureIsAtomic(STATE_CACHE_INSERTION);
+        assertStateAllocationFailureIsAtomic(STATE_CACHE_INSERTION, STATE_GROWTH_MAX_MEMORY, false);
         assertWarmCacheInsertionFailureIsAtomic();
     }
 
-    private static void assertStateAllocationFailureIsAtomic(Dfa.DfaInstance.TestingFailurePoint failurePoint)
+    // The failure strikes the first state allocation that reaches `failurePoint`, while the
+    // tables are at their starting capacity. With `growthShortOfDoubling`, the tables the retried
+    // find leaves are larger than that capacity but less than twice it.
+    private static void assertStateAllocationFailureIsAtomic(Dfa.DfaInstance.TestingFailurePoint failurePoint, long maxMemory, boolean growthShortOfDoubling)
             throws Exception
     {
-        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(maxMemory));
         Slice input = wrappedBuffer(stateExplosionInput(16 * 1024));
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        int startingCapacity = dfa.cacheSnapshot().stateCapacity();
         dfa.failNextForTesting(failurePoint);
 
         assertThatThrownBy(() -> pattern.matcher(input).find())
@@ -138,16 +149,24 @@ public class TestDfaFailureAtomicity
                 .as(failurePoint.name())
                 .isNotNull()
                 .isEqualTo(dfa.failureAtomicitySnapshot());
+        assertThat(dfa.testingSnapshotBeforeFailure().stateCapacity())
+                .as("%s state capacity before the failure", failurePoint)
+                .isEqualTo(startingCapacity);
         assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
 
         assertCompletes(() -> assertThat(pattern.matcher(input).find()).isTrue());
+        if (growthShortOfDoubling) {
+            assertThat(dfa.cacheSnapshot().stateCapacity())
+                    .as("%s state capacity after the retry", failurePoint)
+                    .isBetween(startingCapacity + 1, 2 * startingCapacity - 1);
+        }
         assertCompletes(dfa::resetCacheExternal);
     }
 
     private static void assertWarmCacheInsertionFailureIsAtomic()
             throws Exception
     {
-        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(STATE_GROWTH_MAX_MEMORY));
         Slice warmupInput = wrappedBuffer(stateExplosionInput(1_538));
         Slice input = wrappedBuffer(stateExplosionInput(16 * 1024));
         pattern.matcher(warmupInput).find();

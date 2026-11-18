@@ -213,8 +213,10 @@ public final class DfaAbsolutePointerProbe
 
         // The parent compares this line across forms.
         System.out.println("budget-release word-list resets=" + exerciseBudgetBoundRelease(expectedNativeAccess) +
-                " input-shift states=" + exerciseInputShiftReleasesPointerTable() +
-                " split-budget " + exerciseSplitBudgetDecisions());
+                " input-shift states=" + exerciseInputShiftReleasesPointerTable());
+        // The split budgets check their decisions here, since the word at which each runs out can
+        // differ by form; the line is a diagnostic.
+        System.out.println("split-budget " + exerciseSplitBudgetDecisions());
 
         // The parent forces the paired form each way and checks the one this JVM ran.
         System.out.println((expectedNativeAccess ? "OK enabled" : "OK disabled") + " flat-paired-rows=" + Dfa.FLAT_PAIRED_ROWS);
@@ -474,17 +476,19 @@ public final class DfaAbsolutePointerProbe
         }
     }
 
-    // Public `Re2` finds of 1,000 random words, plus a branch that reads the whole line, at
-    // budgets that first run out at the same word, and so the same graph, in either form. The heap
+    // Public `Re2` finds of 1,000 random words, plus a branch that reads the whole line. The heap
     // table's header makes its allocation larger than the native one's, and both are larger than
-    // the rows in use, which the rule weighs. Over 14 letters the rows in use sit just under the
-    // cutoff, at about 24% of the Java states with compressed object pointers and 20% without, so
-    // the DFA keeps the table and resets. Over 20 letters they sit above it, at about 30% and 28%,
-    // so the DFA gives the table back and does not reset. Returns each word and decision, which
-    // the parent compares across forms.
+    // the rows in use, which the rule weighs. The header moves where the budget runs out, so the
+    // forms can run out a word apart, and the rule decides alike on the two nearly equal graphs.
+    // Over 14 letters the rows in use sit just under the cutoff, at about 24.9% of the Java
+    // states with compressed object pointers and 21% without, so the DFA keeps the table and
+    // resets; with compressed object pointers, both forms do so at budgets from about 3,050,000
+    // to 3,140,000 bytes. Over 20 letters the rows in use sit above the cutoff, at about 36% and
+    // 29%, so the DFA gives the table back and does not reset, in both forms at every budget from
+    // 3,300,000 to 4,500,000 bytes. Returns each fixture's word and decision.
     private static String exerciseSplitBudgetDecisions()
     {
-        return "keep " + splitBudgetDecision(14, 3_070_000, false) + " give-back " + splitBudgetDecision(20, 4_000_000, true);
+        return "keep " + splitBudgetDecision(14, 3_100_000, false) + " give-back " + splitBudgetDecision(20, 3_900_000, true);
     }
 
     private static String splitBudgetDecision(int alphabetSize, long maxMemory, boolean releases)
