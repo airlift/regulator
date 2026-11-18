@@ -466,8 +466,9 @@ public class TestDfaCountMatches
     {
         // A count over cached states runs without the lock, and between two of its matches finds
         // on another text reset the DFA twice while it holds the pointer table; neither find
-        // resets often enough itself to give the table back. With the table the count goes on
-        // under the lock, which gives the table back, and reports each match end once.
+        // resets often enough itself to give the table back, and the budget rule keeps it, since
+        // its rows in use cost under a quarter of its Java states. With the table the count goes
+        // on under the lock, which gives the table back, and reports each match end once.
         Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
         Prog program = pattern.forwardProgramForDiagnostics();
         Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
@@ -480,7 +481,7 @@ public class TestDfaCountMatches
             if (matchEnds[0]++ == 0) {
                 assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
                 resetTwice(dfa, growth);
-                assertThat(dfa.releasedAbsolutePointerResetCount()).isZero();
+                assertThat(dfa.releasedAbsolutePointerResetCount()).isEqualTo(-1);
             }
             return true;
         }, null);
@@ -1948,8 +1949,8 @@ public class TestDfaCountMatches
         return text.toString();
     }
 
-    // Resets the DFA twice with finds on another text, counting only the resets after the one
-    // that drops a pointer table given back, as the count rule does.
+    // Resets the DFA twice with finds on another text, counting only the resets once a pointer
+    // table given back is gone, as the count rule does.
     private static void resetTwice(Dfa.DfaInstance dfa, RegexpMatcher growth)
     {
         int resetCount = dfa.resetCount();

@@ -414,6 +414,46 @@ public class TestDfaPairedTransitions
                 .isEqualTo(dfa.stateBudget());
     }
 
+    // A DFA on paired rows that requested a pointer table but holds none has no table to give
+    // back when its budget cannot hold a state, though its rows in use cost enough beside its
+    // Java states that the budget rule would give a held table back, so the resets that follow
+    // never record a release.
+    @Test
+    public void testBudgetResetsReleaseNoRequestedPointerTable()
+    {
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        List<String> rotations = new ArrayList<>();
+        for (int rotation = 0; rotation < 8; rotation++) {
+            rotations.add(alphabet.substring(rotation) + alphabet.substring(0, rotation));
+        }
+        Prog program = compileProg("[ -~]*(" + String.join("|", rotations) + ")$");
+        // Forward programs divide their DFA memory equally between first- and
+        // longest-match instances.
+        program.setDfaMemory(80_000 * 2);
+        StringBuilder text = new StringBuilder();
+        int warmupLength = 0;
+        for (int segment = 0; segment < 200; segment++) {
+            text.append("x".repeat(200)).append(rotations.get(segment % rotations.size()), 0, 1 + (segment * 7) % 25);
+            if (segment == 1) {
+                warmupLength = text.length();
+            }
+        }
+
+        // The first two segments build paired rows without a reset.
+        assertThat(Dfa.search(program, utf8Slice(text.substring(0, warmupLength)), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        assertThat(dfa.resetCount()).isZero();
+        assertThat(dfa.absolutePointerTransitionsRequested()).isTrue();
+        assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+        assertThat(dfa.pairedTransitionMemory()).isPositive();
+
+        // Where the search ends in the cycle of resets decides whether it holds paired rows or
+        // a table allocated after the last reset, and that differs between object layouts.
+        assertThat(Dfa.search(program, utf8Slice(text.toString()), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(dfa.resetCount()).isGreaterThan(2);
+        assertThat(dfa.releasedAbsolutePointerResetCount()).isEqualTo(-1);
+    }
+
     @Test
     public void testPairedTransitionMemoryIsChargedExactly()
     {

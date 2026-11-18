@@ -44,6 +44,13 @@ public class TestDfaAbsolutePointerTransitions
             assertThat(enabled.exitCode()).as("flat-paired-rows=%s: %s", flatPairedRows, enabled.output()).isZero();
             assertThat(enabled.output()).contains("OK enabled flat-paired-rows=" + flatPairedRows);
             assertThat(enabled.output()).doesNotContain("restricted method");
+
+            // The budget rule makes the same decision for the same graph in either form, so the
+            // word list resets as often, the input shift keeps as many states, and each split
+            // budget runs out at the same word and decides alike.
+            assertThat(budgetReleaseRecord(enabled.output()))
+                    .as("budget release with native access, flat-paired-rows=%s", flatPairedRows)
+                    .isEqualTo(budgetReleaseRecord(disabled.output()));
         }
     }
 
@@ -53,6 +60,11 @@ public class TestDfaAbsolutePointerTransitions
         assertThatThrownBy(() -> runProbe(false, false, Duration.ofNanos(1)))
                 .isInstanceOf(AssertionError.class)
                 .hasMessageContaining("pointer probe timed out");
+    }
+
+    private static String budgetReleaseRecord(String output)
+    {
+        return output.lines().filter(line -> line.startsWith("budget-release ")).findFirst().orElseThrow(() -> new AssertionError("no budget-release line in: " + output));
     }
 
     private static ProbeResult runProbe(boolean enableNativeAccess, boolean flatPairedRows)

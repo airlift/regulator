@@ -878,7 +878,9 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - DFA construction derives retained array and object sizes from the running VM.
   A reset publishes Java state and transition arrays at their initial capacity,
   so expanded tables and per-state objects return to the budget; the state hash table keeps its
-  capacity and its charge. A full cache resets, and repeated reset thrashing
+  capacity and its charge. A full cache resets, unless the budget rule in
+  [Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
+  gives the DFA's pointer table back instead, and repeated reset thrashing
   falls back to the NFA, or, for a group-zero search of a program with bounded,
   assertion-free matches, to the position automaton (see
   [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)).
@@ -889,7 +891,8 @@ text, so the pair scan rejects little that a first-byte scan would not.
   stopping once at the one-row-per-instruction capacity before doubling on, so
   at any state count they are no larger than tables that started there. Each
   growth is charged to the state budget before it is allocated, and a growth
-  that does not fit resets the cache as a full cache does. Most large
+  that does not fit is handled as a full cache is: the cache resets, or the
+  budget rule gives the pointer table back. Most large
   programs' DFAs never fill a row per instruction: 120 of the 146
   larger-program DFAs among the published benchmark rows never pass 256
   states. The initial tables are charged after the initialization gate passes,
@@ -1034,12 +1037,13 @@ Readers need no cache-generation validation, for these reasons:
   fence holds it for the pointer loop; a heap table's array is reachable from
   the same root.
 
-A reset or a growth leaves the superseded generation reachable only from the
-roots of searches still in flight, and that generation is not charged against
-the DFA's allowance. A reader holds the one root it began with. An exclusive
-search reloads the root after each step that can publish one, but each frame of
-its call chain keeps the root it passed down until that step returns, and a
-fused count keeps the root it began with for the whole current attempt.
+A reset, a growth, or a release by the budget rule leaves the superseded
+generation reachable only from the roots of searches still in flight, and that
+generation is not charged against the DFA's allowance. A reader holds the one
+root it began with. An exclusive search reloads the root after each step that
+can publish one, but each frame of its call chain keeps the root it passed down
+until that step returns, and a fused count keeps the root it began with for the
+whole current attempt.
 
 - The call depth is fixed: the roots one search holds are those of its active
   frames, and the code fixes the depth of the search call chain.
@@ -1048,27 +1052,31 @@ fused count keeps the root it began with for the whole current attempt.
   pass reads the reverse prefix DFA and the forward confirmation DFA, never a
   number proportional to its matches or resets.
 
-Each root reaches at most one allowance of Java memory plus the paired rows it
-carried. Releasing paired rows refunds their charge, and states built afterward
-fill arrays an older root still shares, so a root that carried paired rows can
-reach one allowance plus those rows, at most the paired cap: 64 KiB for object
-rows, or 32 KiB for the flat table plus its uncharged segment view of about 72
-bytes with compressed oops. A superseded root becomes eligible for collection
-once no search retains it. A charge would require knowing when the last reader
-of a generation finishes, which is the reader registration this design removes;
-as with the member table under
-[Trino Specialized Byte Scans](#trino-specialized-byte-scans), bounded memory
-the DFA does not retain needs no charge of its own.
+Each root reaches at most one allowance of Java memory plus the paired rows or
+heap pointer table it carried, so at most two allowances. Releasing paired rows
+refunds their charge, and states built afterward fill arrays an older root
+still shares, so a root that carried paired rows can reach one allowance plus
+those rows, at most the paired cap: 64 KiB for object rows, or 32 KiB for the
+flat table plus its uncharged segment view of about 72 bytes with compressed
+oops. A heap pointer table that the budget rule gives back, or that a failed
+allocation withholds, refunds its charge the same way, so a root that carried
+it can reach one allowance plus the table, which was itself charged within an
+allowance. A superseded root becomes eligible for collection once no search
+retains it. A charge would require knowing when the last reader of a generation
+finishes, which is the reader registration this design removes; as with the
+member table under [Trino Specialized Byte
+Scans](#trino-specialized-byte-scans), bounded memory the DFA does not retain
+needs no charge of its own.
 
-A heap pointer table that a reset or growth supersedes is ordinary garbage, like
-the superseded Java tables, and is neither counted nor capped. Native pointer
-segments that a reset or growth supersedes are likewise no longer published,
-though in-flight searches may still hold them. The DFA counts each
-one until the collector finds it unreachable, and the JDK frees it later on its
-common cleaner. The DFA allocates a new segment only while the counted
-superseded segments, with the one it replaces, total at most twice the new one.
-Its counted native memory, live and superseded, therefore stays within three
-times its newest segment, as
+A heap pointer table that a reset, a growth, or the budget rule supersedes is
+ordinary garbage, like the superseded Java tables, and is neither counted nor
+capped. Native pointer segments that a reset, a growth, or the budget rule
+supersedes are likewise no longer published, though in-flight searches may
+still hold them. The DFA counts each one until the collector finds it
+unreachable, and the JDK frees it later on its common cleaner. The DFA
+allocates a new segment only while the counted superseded segments, with the
+one it replaces, total at most twice the new one. Its counted native memory,
+live and superseded, therefore stays within three times its newest segment, as
 [Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
 describes; the memory actually held exceeds that only by segments the common
 cleaner has not yet freed. The superseded part is native memory no longer
@@ -1608,28 +1616,28 @@ existing exclusive DFA cache mutation protocol.
 The current allocation is charged to the `DfaInstance` budget: a native table
 its bytes, a heap table the real size of its array, header included, and of its
 class offsets array, described below. Growth copies and rebases the table into
-a new one and publishes it with a new cache
-generation, as [Shared DFA Concurrency](#shared-dfa-concurrency) describes; a
-reader still using the old generation keeps the superseded table reachable
-until it returns. A reset publishes an empty table of the same size and keeps
-its charge, unless the cap below or a failed allocation withholds it. A
-superseded heap table is ordinary garbage, like the superseded Java tables, and
-is neither counted nor capped. The DFA counts each superseded native segment's
-bytes until the collector finds it unreachable; the JDK frees the segment later,
-on its common cleaner. The count is released when the cap check next runs, so it
-may briefly over-count. A growth at most doubles the segment, and the budget can
-clamp it to less; a reset adds a whole segment; so without a cap, superseded
-segments could accumulate without bound within one collection cycle. A reset
-or growth therefore allocates a new native segment only while the counted
-superseded segments, including the one it replaces, total at most twice the new
-one. This cap, not the growth factor, keeps a DFA's counted native memory, live
-and superseded, within three times its newest segment, which its allowance
-bounds; the native memory actually held exceeds that only by segments the
-common cleaner has not yet freed. A growth allocates its table after its Java
-arrays and state, and a reset after its Java tables, so only small objects
-follow the table. If allocating one of those objects throws
-`OutOfMemoryError`, the new table is abandoned uncounted; the collection that
-precedes that error makes any earlier abandoned segment collectable.
+a new one and publishes it with a new cache generation, as [Shared DFA
+Concurrency](#shared-dfa-concurrency) describes; a reader still using the old
+generation keeps the superseded table reachable until it returns. A reset
+publishes an empty table of the same size and keeps its charge, unless the
+table was given back, as below, or the cap below or a failed allocation
+withholds it. A superseded heap table is ordinary garbage, like the superseded
+Java tables, and is neither counted nor capped. The DFA counts each superseded
+native segment's bytes until the collector finds it unreachable; the JDK frees
+the segment later, on its common cleaner. The count is released when the cap
+check next runs, so it may briefly over-count. A growth at most doubles the
+segment, and the budget can clamp it to less; a reset adds a whole segment; so
+without a cap, superseded segments could accumulate without bound within one
+collection cycle. A reset or growth therefore allocates a new native segment
+only while the counted superseded segments, including the one it replaces,
+total at most twice the new one. This cap, not the growth factor, keeps a DFA's
+counted native memory, live and superseded, within three times its newest
+segment, which its allowance bounds; the native memory actually held exceeds
+that only by segments the common cleaner has not yet freed. A growth allocates
+its table after its Java arrays and state, and a reset after its Java tables,
+so only small objects follow the table. If allocating one of those objects
+throws `OutOfMemoryError`, the new table is abandoned uncounted; the collection
+that precedes that error makes any earlier abandoned segment collectable.
 
 When a new table cannot be allocated, because superseded native segments fill
 the cap or the allocation fails, the tables are published without the pointer
@@ -1643,72 +1651,142 @@ again, sized for the current graph, once collection brings the superseded
 segments under the cap. After a failed allocation, none is attempted again until
 the next reset, so a memory shortage costs at most one failed allocation, and
 the JDK's forced collection and retries, per reset. Failure to fund the next
-geometric expansion from the budget remains ordinary DFA budget exhaustion and
-follows the existing reset and matcher-fallback policy. Apart from a withheld
-table, once an instance selects this pointer table, it does not switch to object
-rows as the DFA grows, with one exception.
+geometric expansion from the budget remains ordinary DFA budget exhaustion,
+which the budget rule below weighs before the existing reset and
+matcher-fallback policy applies. Apart from a withheld table, once an instance
+selects this pointer table, it does not switch to object rows as the DFA grows;
+it can only give the table back, below.
 
-The table's per-state charge leaves room for fewer states per reset than object
-rows, and whether a reset keeps or withholds a native table depends on whether
-a collection has already found the superseded segments, so the same search
-could reset often enough to fall back with the table and keep going without it.
-Two rules give up for resetting too often: a search whose reset follows the
-previous one too closely, and a count that resets twice during a rejected byte
-scan. While the DFA holds the table or has it withheld, either rule gives the
-table back instead and the search or count goes on. The next reset publishes
-tables without it, and the count's two resets are counted after that reset. So
-the table's charge never causes a fallback by itself: a DFA gives up for
-resetting too often only by counting resets that ran on object rows. The first
-rule bounds each search, and a find that gives up falls back for that search
-only, as upstream RE2 does. The second counts resets over the count's attempt,
-which runs a search for each match, so a count that gives up has paid the
-resets its searches made before it gave up, and no fixed number of resets per
-public count is promised.
-[Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
-describes how a count that gives up falls back.
+A state the budget cannot hold weighs the table, whether the state tables or
+the pointer table would have to grow for it or the state alone does not fit.
+This budget rule compares the bytes of the pointer rows in use, reserved row
+zero included, with a quarter of the generation's retained Java state memory,
+which leaves out the pointer, paired-row and fixed-distance charges. When the
+rows reach that cutoff and the table's refunded charge can hold the state, the
+DFA gives the table back instead of resetting: it publishes the tables without
+the table, as a withheld growth does, refunds its charge, keeps every state,
+and adds the state on object rows. A withheld table has no charge left to
+refund, and a held one's refund may not hold the state; then the DFA resets and
+records that the rule held. If the next state the budget cannot hold comes
+before any other reset and meets the same case, the DFA gives the table back
+and the next reset drops it; any other reset invalidates the record. Below the
+cutoff, the budget is exhausted as before and the DFA resets with its table.
+The table stays given back, as for a search that resets too often, below.
 
-Giving the table back records the release on the instance under the cache
-mutation lock and changes no published generation or table. A search reads the
-table only through the generation it captured, checks that generation's table
-before any flag, and leaves the table for object rows of the same generation,
-so a reader still on an older generation keeps using that generation's table,
-and a stale flag costs at most one exclusive retry. A count counts its two
-resets from the start of its current attempt or, once the table is given back,
-from the reset that drops it; a retry for any other reason starts a new
-attempt, as before. A count that does not hold the lock cannot reset or give
-the table back, so the resets it sees are other searches'. When two of them
-come, a count on a DFA that has held the table and not given it back, or gave
-it back after the count judged those resets and before two resets followed the
-one that drops it, hands the decision to the lock, keeping the matches it
-counted and its start: under the lock it judges the same resets, gives the
-table back if it still holds it, and searches again from the match where it
-stopped. A count without the lock on a DFA that never held the table, or gave
-it back before those resets, gives up as before.
+The rule reads only the graph, the rows in use and the generation's Java
+states, and weighs a table the cap or a failed allocation withholds as one
+held, so the heap and native forms make the same decision for the same graph.
+They need not reach the same graphs, below. A DFA that only requested a table,
+such as one on paired rows, has none to weigh and keeps pairing. Every reset
+the budget forces follows a state it cannot hold, so no rule weighs the table
+at the reset itself. A DFA whose state tables already hold the most states its
+budget can address resets without weighing the table, since giving the table
+back would make no room for another state.
+
+The trade is plain: a pattern whose input shifts once, to states the generation
+cannot hold beside its table, now runs on object rows for good where it used to
+pay one reset and keep the table, unless the refund cannot hold the state, when
+it still does, and a pattern that thrashes resets less. Counter runs, which
+count resets and states and time nothing, show both. Trino's URL search over
+its benchmark text at 24 MiB, a program of 9,515 instructions whose generation
+holds about 4,100 states beside the table but all 4,186 it needs on object
+rows, reset 12 times in 9 counts with a heap table and once or twice with a
+native one, when the cap happened to withhold the table; both forms now give
+the table back at state 4,096 and never reset. At 16 MiB both reset 9 times,
+where they had reset 44 and 13 times. uap-core, the user-agent patterns shared
+by the ua-parser projects, has a crawler rule that no longer resets at 16 MiB
+over its user-agent tests.
+
+Object rows also pay for the state tables' growth, which doubles, so what
+giving the table back gains depends on where the doublings fall. On either side
+of the cutoff, object rows from the start held 32-44% more states per
+generation than the table did. A DFA whose rows cost less keeps the table,
+though object rows would hold more of its states. Where the rows cost up to
+about an eighth of its Java states, as over a few byte classes, object rows
+held 8-14% more states per generation. From about a sixth to a quarter, they
+held 11% to 40% more, the most on word lists over alphabets of 12 to 14 byte
+classes, and no lower cutoff parts the small gains from the large: a latin1
+pattern whose rows cost 22% of its Java states gained 11%, while a word list
+whose rows cost the same gained 40%.
+
+A table the budget rule keeps still leaves room for fewer states per reset than
+object rows, and whether a reset keeps or withholds a native table depends on
+whether a collection has already found the superseded segments, so the same
+search could reset often enough to fall back with the table and keep going
+without it. Two rules give up for resetting too often: a search whose reset
+follows the previous one too closely, and a count that resets twice during a
+rejected byte scan. While the DFA holds the table or has it withheld, either
+rule gives the table back instead and the search or count goes on. The next
+reset publishes tables without it, and the count's two resets are counted after
+that reset. A search whose state the budget rule has just given the table back
+for, with the reset that drops it still to come, goes on as well, as it would
+had it given the table back itself. So the table's charge never causes a
+fallback by itself: a DFA gives up for resetting too often only by counting
+resets that ran on object rows. The first rule bounds each search, and a find
+that gives up falls back for that search only, as upstream RE2 does. The second
+counts resets over the count's attempt, which runs a search for each match, so
+a count that gives up has paid the resets its searches made before it gave up,
+and no fixed number of resets per public count is promised. [Count Fallback
+After Repeated Bails](#count-fallback-after-repeated-bails) describes how a
+count that gives up falls back.
+
+A search or count that gives the table back records the release on the instance
+under the cache mutation lock and changes no published generation or table, nor
+does the budget rule when the next reset drops the table. When the table's
+refund holds the state, the budget rule publishes tables without the table at
+once, with that state, as a withheld growth does. A search reads the table only
+through the generation it captured, checks that generation's table before any
+flag, and leaves the table for object rows of the same generation, so a reader
+still on an older generation keeps using that generation's table, and a stale
+flag costs at most one exclusive retry. A count counts its two resets from the
+start of its current attempt or, once the table is given back, from where the
+table is gone: the reset that drops it, or the tables the budget published
+without it; a retry for any other reason starts a new attempt, as before. A
+count that does not hold the lock cannot reset or give the table back, so the
+resets it sees are other searches'. When two of them come, a count on a DFA
+that has held the table and not given it back, or gave it back after the count
+judged those resets and before two resets followed once it was gone, hands the
+decision to the lock, keeping the matches it counted and its start: under the
+lock it judges the same resets, gives the table back if it still holds it, and
+searches again from the match where it stopped. A count without the lock on a
+DFA that never held the table, or gave it back before those resets, gives up as
+before.
 
 The table stays given back for the instance's life, which is the compiled
 pattern's: each program has one DFA instance per match kind, shared by every
 matcher and thread that uses the pattern. Later searches on that DFA run on
 object rows with paired transitions disabled, including searches the table
 would have made faster, and the table stays given back even when the search
-that gave it back falls back anyway. That later slowdown is accepted in place
-of an NFA fallback now.
+that gave it back falls back anyway, or when the input of a DFA whose budget
+gave it back shifts back to states that would have fit beside it. That later
+slowdown is accepted in place of an NFA fallback now.
 
-Where those object-row resets begin still follows the history before the
-release. A heap table is never capped, so unless a heap allocation fails, that
-history, and the release, are the same every run. With a native table that
-history depends on collection timing: the cap can withhold the table at one
-reset and keep it at the next, so the release, and the resets after it, land at
-different input positions. A search or count right at a threshold can therefore
-fall back in one run and not in another. Results are identical either way; the
-residual changes only which engine runs at a threshold. The
-`([a-q][^u-z]{23}x)` sequence at a 16 MiB budget is the known example: whether
-the collector has run decides whether the count's next two-reset check finds
-more or less than the byte scan's 64 KiB minimum remaining, so that count gives
-up and counts on the position automaton and BitState in one run and keeps the DFA
-in the other.
-Removing the residual means making states per reset independent of collection
-timing, which changes the superseded cap that copy-on-reset's native memory
-bound rests on; that is left to a separate change.
+For a table the budget rule keeps, where those object-row resets begin still
+follows the history before the release. A heap table is never capped, so unless
+a heap allocation fails, that history, and the release, are the same every run.
+With a native table that history depends on collection timing: the cap can
+withhold the table at one reset and keep it at the next, so the release, and
+the resets after it, land at different input positions. A search or count
+right at a threshold can therefore fall back in one run and not in another.
+Results are identical either way. The `([a-q][^u-z]{23}x)` sequence at a 16 MiB
+budget, whose rows cost about a fifth of its Java states, is the known example:
+whether the collector has run decides whether the count's next two-reset check
+finds more or less than the byte scan's 64 KiB minimum remaining, so that count
+gives up and counts on the position automaton and BitState in one run and keeps
+the DFA in the other. Below the budget rule's cutoff, the reset counts
+themselves can still differ between the forms as they did before the rule: a
+heap DFA can reset on every search while it holds the table, while a native one
+whose table the cap withholds holds more states on object rows and stops
+resetting. A 4,928-instruction pattern at 2,320 KiB reset 24 times in 24
+searches with a heap table and twice with a native one. Above the cutoff, the
+budget rule promises only the same decision for the same graph. Collection
+history, and the heap table's header, which moves where the budget runs out,
+can still lead the forms to different graphs and so to give the table back at
+different states, or one form not at all; most such differences fall below the
+cutoff. A generation whose table the cap withholds holds more states on object
+rows until collection lets an exclusive search allocate the table again, so a
+native DFA can run out of budget later than a heap one. Removing that would
+change the superseded cap that copy-on-reset's native memory bound rests on.
 
 Explicitly unlimited DFAs remain object-based because they have no finite
 allocation budget. Paired transitions remain disabled across later

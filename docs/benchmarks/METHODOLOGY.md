@@ -470,10 +470,10 @@ equivalence gate.
 
 ## Retained memory
 
-Production accounting uses `SizeOf` and charges all DFA storage the DFA retains
-to the owning budget. Tables that a reset or growth superseded, held only by
-in-flight searches, are uncharged, as
-[Shared DFA Concurrency](../../REGULATOR_DECISIONS.md#shared-dfa-concurrency)
+Production accounting uses `SizeOf` and charges all DFA storage the DFA
+retains to the owning budget. Tables that a reset, a growth, or the DFA budget
+rule superseded, held only by in-flight searches, are uncharged, as [Shared
+DFA Concurrency](../../REGULATOR_DECISIONS.md#shared-dfa-concurrency)
 describes. Tests cover construction, growth, and reset in the compressed
 reference layout CI runs.
 
