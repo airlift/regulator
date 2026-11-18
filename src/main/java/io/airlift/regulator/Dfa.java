@@ -1446,22 +1446,20 @@ final class Dfa
         int stateOffset = startOffset;
         int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
-        int nextSize = dfa.nextSize;
-        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         while (position > textBegin) {
-            // Object rows hold no match transitions, so a match leaves this loop.
+            // Every computed transition stays in this loop; a match transition marks its position.
             for (; position > textBegin; position--) {
-                Object nextRef = getStateReference(stateRefs, byteMap[bytes[position - 1] & 0xFF] & 0xFF);
-                if (nextRef == null) {
+                int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position - 1] & 0xFF] & 0xFF));
+                if (nextState <= 0) {
                     break;
                 }
-                stateRefs = (Object[]) nextRef;
+                int index = position - textBegin;
+                starts[index >>> 6] |= (long) ((nextState >>> 30) & 1) << index;
+                stateOffset = nextState & ~T_MATCH_BIT;
             }
-            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             if (position == textBegin) {
                 break;
             }
-
             int inputByte = bytes[position - 1] & 0xFF;
             int nextState = getTransition(transitions, stateOffset + (byteMap[inputByte] & 0xFF));
             if (nextState == T_UNCOMPUTED) {
@@ -1484,7 +1482,6 @@ final class Dfa
             }
             stateOffset = nextState;
             position--;
-            stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
         int lastByte = textBegin == ctxBegin ? BYTE_END_TEXT : bytes[textBegin - 1] & 0xFF;
