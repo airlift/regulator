@@ -49,8 +49,20 @@ from repository resources, and the access-log entries equal those of
 generates the workload manifests; see the
 [workload guide](../trino-rows/README.md).
 
+`literal-corpus.tsv` pins the committed OpenSubtitles samples of the
+`literal-corpus` test resources by Rebar revision, path, size, and checksum.
+Their `README.md` names their sources and the pinned revision.
+`provision-literal-corpus.py` regenerates the samples from a checkout of that
+revision, and with `--check` verifies them; both fail unless the `README.md`
+exists and names the revision, so a revision change updates it first:
+
+```bash
+python3 tools/re2-benchmark/manifests/provision-literal-corpus.py --rebar-root <pinned-rebar-checkout> --check
+```
+
 `tpch-like-corpus.tsv` pins the committed TPC-H column samples used by the
 Trino LIKE TPC-H benchmark by generator, scale factor, row range, size, and
 checksum, and `tpch-like-workloads.tsv` lists its workloads with their source
-queries and expected match counts. See the
+queries and expected match counts. A `README.md` beside the samples carries
+their notices and names the generator. See the
 [LIKE guide](../trino-like/README.md#tpc-h-column-samples).

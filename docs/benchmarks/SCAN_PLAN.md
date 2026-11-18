@@ -933,10 +933,11 @@ classes, without waiting for background compilation.
 
 `BenchmarkSpecializedTrinoRegexp` measures the specialized-pattern workloads,
 whose variants the published language report sets beside Joni. Each workload
-has one Trino operation: the ClickBench q29 host replacement, a URL host
-extract, the extract-alls of query parameter names and of key-value values, and
-a quoted-field extract. The URL workloads share eight rotating URLs in
-`specialized-trino-workloads.tsv`, and the others reuse their everyday
+has one Trino operation: the
+[ClickBench](https://github.com/ClickHouse/ClickBench) q29 host replacement, a
+URL host extract, the extract-alls of query parameter names and of key-value
+values, and a quoted-field extract. The URL workloads share eight rotating URLs
+in `specialized-trino-workloads.tsv`, and the others reuse their everyday
 rotation.
 
 Each workload runs with three compiles of its pattern. The specialized engine,

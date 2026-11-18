@@ -31,7 +31,8 @@ hit rows before timing; `BenchmarkTrinoRows` also checks its matches.
 
 `../manifests/trino-row-corpus.tsv` pins every corpus by location, revision,
 size, SHA-256, and license. The OpenSubtitles English, Russian, and Chinese
-samples are the repository's `literal-corpus` test resources. The access logs
+samples are the repository's `literal-corpus` test resources, whose
+`README.md` names their sources. The access logs
 keep the pins of `literal-probe-corpus.tsv`, so one corpus directory serves
 both. The six loghub files and one GH Archive hour are fetched at run time and
 never committed; loghub's license allows research and academic use with

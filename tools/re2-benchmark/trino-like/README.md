@@ -104,7 +104,9 @@ tools/re2-benchmark/trino-like/provision-tpch-corpus.sh --check
 
 The script copies the pinned generator jar and Guava through Maven, without
 adding them to Regulator's dependencies. Provisioning fails unless every
-generated column matches the manifest. Changing a sample's rows changes the
+generated column matches the manifest. The hand-written `README.md` beside the
+samples carries their TPC notices, and both commands fail unless it exists and
+names the manifest's generator. Changing a sample's rows changes the
 expected counts as well, so review both manifests together.
 
 ## Target-host measurements
