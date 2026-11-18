@@ -587,8 +587,14 @@ public sealed class TrinoRegexp
             matcher.markSkipsForwardDfa();
         }
         long count = 0;
-        while (matcher.find()) {
-            count++;
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                count++;
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return count;
     }
@@ -760,8 +766,14 @@ public sealed class TrinoRegexp
         }
         RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         List<Slice> matches = new ArrayList<>();
-        while (matcher.find()) {
-            matches.add(matcher.group(group));
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                matches.add(matcher.group(group));
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return Collections.unmodifiableList(matches);
     }
@@ -786,9 +798,15 @@ public sealed class TrinoRegexp
         RegexpMatcher matcher = newGroupZeroMatcher(source);
         List<Slice> parts = new ArrayList<>();
         int previousEnd = 0;
-        while (matcher.find()) {
-            parts.add(source.slice(previousEnd, matcher.start() - previousEnd));
-            previousEnd = matcher.end();
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                parts.add(source.slice(previousEnd, matcher.start() - previousEnd));
+                previousEnd = matcher.end();
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         parts.add(source.slice(previousEnd, source.length() - previousEnd));
         return Collections.unmodifiableList(parts);
@@ -818,8 +836,14 @@ public sealed class TrinoRegexp
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : re2.matcher(source, maximumCapturingGroup);
-        while (matcher.find()) {
-            replacementPlan.addMatch(matcher);
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                replacementPlan.addMatch(matcher);
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return replacementPlan.build();
     }
@@ -860,8 +884,14 @@ public sealed class TrinoRegexp
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : re2.matcher(source, maximumCapturingGroup);
-        while (matcher.find()) {
-            replacementPlan.addMatch(matcher);
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                replacementPlan.addMatch(matcher);
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return replacementPlan.build();
     }
@@ -895,19 +925,25 @@ public sealed class TrinoRegexp
         DynamicSliceOutput output = new DynamicSliceOutput(source.length());
         int previousEnd = 0;
         boolean matched = false;
-        while (matcher.find()) {
-            matched = true;
-            output.writeBytes(source, previousEnd, matcher.start() - previousEnd);
-            List<Slice> groups = new ArrayList<>(matcher.groupCount());
-            for (int group = 1; group <= matcher.groupCount(); group++) {
-                groups.add(matcher.group(group));
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                matched = true;
+                output.writeBytes(source, previousEnd, matcher.start() - previousEnd);
+                List<Slice> groups = new ArrayList<>(matcher.groupCount());
+                for (int group = 1; group <= matcher.groupCount(); group++) {
+                    groups.add(matcher.group(group));
+                }
+                Slice replacementValue = replacement.apply(Collections.unmodifiableList(groups));
+                if (replacementValue == null) {
+                    return null;
+                }
+                output.appendBytes(replacementValue);
+                previousEnd = matcher.end();
             }
-            Slice replacementValue = replacement.apply(Collections.unmodifiableList(groups));
-            if (replacementValue == null) {
-                return null;
-            }
-            output.appendBytes(replacementValue);
-            previousEnd = matcher.end();
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         if (!matched) {
             return source;
