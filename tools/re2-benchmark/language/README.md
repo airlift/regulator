@@ -39,8 +39,9 @@ JMH divides by `@OperationsPerInvocation`; the native runners report
 operation on an input is a compiled call that the JIT may not inline into the
 pass, as each native engine is an out-of-line call, so every engine pays one
 call per input. Compilation is one compile per operation. Results under pass-v1
-carry benchmark contract version 4 and the `public-pattern-lifecycle-pass-v1`
-work contract, so they never mix with earlier per-call rotation results.
+carry benchmark contract version 4 or later and the
+`public-pattern-lifecycle-pass-v1` work contract, so they never mix with earlier
+per-call rotation results.
 
 Single use includes compilation and one public operation. Reused measurements
 retain the compiled pattern. RE2, Java, and Rust counts use their public
@@ -586,12 +587,15 @@ compilation for compile cases and execution for the other five models.
 All adapters split grep inputs before timing, trim a trailing carriage return,
 and avoid a phantom final line. This differs from official Rebar timing, which
 includes line splitting. Each runner reads the workload's model once per timed
-call, outside its per-line and per-match loops. Trino span/capture workloads use
-public `TrinoRegexp.matcher`, retaining group zero for spans and all groups for
-captures.
-Both Trino and Joni construct a matcher per source inside timing and reuse it
-for every match in that source. Neither constructs extracted-value lists or
-replacement output. Trino's other public operations keep their specialized
+call, outside its per-line and per-match loops. Span workloads in every
+language sum the spans that public `forEachMatch` passes, which builds one
+matcher per source inside timing. Capture workloads iterate a public matcher:
+RE2, Java, and Rust reset one matcher made outside timing, and Trino uses
+`TrinoRegexp.matcher`, retaining all groups. Joni constructs a matcher per
+source inside timing and reuses it for every match in that source. No adapter
+constructs extracted-value lists or replacement output. Span sums carry the
+`public-for-each-match-v1` work contract from benchmark contract version 5, so
+they never mix with earlier matcher-loop sums. Trino's other public operations keep their specialized
 routes. Historical replacement-assisted captures have a separate work contract
 and cannot qualify these matcher measurements. Correctness traces include
 ordered byte boundaries, unmatched markers, and captured bytes. The JDK

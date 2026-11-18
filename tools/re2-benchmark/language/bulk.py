@@ -70,8 +70,8 @@ def prepare(inventory_directory, destination):
                 "inventory_sha256": collection.digest((inventory_directory / "inventory.json").read_bytes()),
                 "representation": "Original byte inputs; JDK text and UTF-8 offset maps decoded before timing",
                 "line_policy": "CR-trimmed lines materialized before timing in every engine; no phantom final line",
-                "regulator_operation_policy": "Public find/contains for boolean lines; public count for counts; public matcher iteration for spans/captures",
-                "trino_capture_policy": "Trino and Joni construct a matcher per source inside timing and iterate spans/captures without output construction",
+                "regulator_operation_policy": "Public find/contains for boolean lines; public count for counts; public forEachMatch for spans, which builds a matcher per source inside timing; public matcher iteration for captures",
+                "trino_capture_policy": "Trino spans use public forEachMatch; Trino captures and Joni construct a matcher per source inside timing and iterate it; none construct output",
                 "scope": "Shared language comparison; official Rebar shard results remain separate"}
     validate_manifest(manifest, destination)
     collection.save(destination / "manifest.json", manifest)

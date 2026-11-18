@@ -34,6 +34,7 @@ import org.openjdk.jmh.annotations.Warmup;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.file.Files;
@@ -120,7 +121,8 @@ public class BenchmarkLanguageBulk
                 default -> throw new IllegalArgumentException("unknown model: " + input.model());
             };
             boolean captures = operation == Operation.CAPTURES;
-            sliceMatcher = operation == Operation.FIND ? null : switch (pattern) {
+            // Spans come from forEachMatch, which builds its own matcher.
+            sliceMatcher = operation == Operation.FIND || operation == Operation.SPANS ? null : switch (pattern) {
                 case Re2 re2 -> captures ? re2.matcher(EMPTY_SLICE) : re2.matcher(EMPTY_SLICE, 0);
                 case JavaRegexp java -> captures ? java.matcher(EMPTY_SLICE) : java.matcher(EMPTY_SLICE, 0);
                 case RustRegexp rust -> captures ? rust.matcher(EMPTY_SLICE) : rust.matcher(EMPTY_SLICE, 0);
@@ -203,7 +205,7 @@ public class BenchmarkLanguageBulk
                         }
                         yield result;
                     }
-                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case SPANS -> spans(re2, sources);
                     case CAPTURES -> matcherCaptures(sliceMatcher, sources);
                 };
                 case JavaRegexp java -> switch (operation) {
@@ -221,7 +223,7 @@ public class BenchmarkLanguageBulk
                         }
                         yield result;
                     }
-                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case SPANS -> spans(java, sources);
                     case CAPTURES -> matcherCaptures(sliceMatcher, sources);
                 };
                 case RustRegexp rust -> switch (operation) {
@@ -239,7 +241,7 @@ public class BenchmarkLanguageBulk
                         }
                         yield result;
                     }
-                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case SPANS -> spans(rust, sources);
                     case CAPTURES -> matcherCaptures(sliceMatcher, sources);
                 };
                 case TrinoRegexp trino -> switch (operation) {
@@ -294,6 +296,12 @@ public class BenchmarkLanguageBulk
                 }
                 else if (input.model().equals("grep") && pattern instanceof RustRegexp rust) {
                     writer.write(rust.find(source.bytes) ? "1\n" : "0\n");
+                }
+                else if (operation == Operation.SPANS && pattern instanceof CompiledPattern compiled) {
+                    compiled.forEachMatch(source.bytes, spanWriter(writer, source.bytes));
+                }
+                else if (operation == Operation.SPANS && pattern instanceof TrinoRegexp trino) {
+                    trino.forEachMatch(source.bytes, spanWriter(writer, source.bytes));
                 }
                 else if (pattern instanceof TrinoRegexp trino) {
                     if (input.model().equals("grep")) {
@@ -453,16 +461,15 @@ public class BenchmarkLanguageBulk
         return lines;
     }
 
-    private static long matcherSpans(RegexpMatcher matcher, Source[] sources)
+    // The library's all-match operation builds one matcher per source inside timing, and
+    // passes each match to the summing consumer.
+    private static long spans(CompiledPattern pattern, Source[] sources)
     {
-        long result = 0;
+        RebarRunner.SpanLengths lengths = new RebarRunner.SpanLengths();
         for (Source source : sources) {
-            matcher.reset(source.bytes);
-            while (matcher.find()) {
-                result += matcher.end() - matcher.start();
-            }
+            pattern.forEachMatch(source.bytes, lengths);
         }
-        return result;
+        return lengths.total();
     }
 
     private static long matcherCaptures(RegexpMatcher matcher, Source[] sources)
@@ -480,17 +487,15 @@ public class BenchmarkLanguageBulk
     }
 
     // Trino and Joni construct one matcher per source inside timing and reuse it for every
-    // match in that source. Trino retains explicit groups only for capture workloads.
+    // match in that source, Trino's inside its all-match operation for spans. Trino retains
+    // explicit groups only for capture workloads.
     private static long trinoSpans(TrinoRegexp pattern, Source[] sources)
     {
-        long result = 0;
+        RebarRunner.SpanLengths lengths = new RebarRunner.SpanLengths();
         for (Source source : sources) {
-            TrinoRegexpMatcher matcher = pattern.matcher(source.bytes, 0);
-            while (matcher.find()) {
-                result += matcher.end() - matcher.start();
-            }
+            pattern.forEachMatch(source.bytes, lengths);
         }
-        return result;
+        return lengths.total();
     }
 
     private static long trinoCaptures(TrinoRegexp pattern, Source[] sources)
@@ -637,6 +642,21 @@ public class BenchmarkLanguageBulk
         catch (CharacterCodingException e) {
             return false;
         }
+    }
+
+    // Writes each span the timed forEachMatch route passes, so the trace checks that route.
+    private static MatchSpanConsumer spanWriter(BufferedWriter writer, Slice source)
+    {
+        return (start, end) -> {
+            try {
+                writeGroup(writer, source, start, end);
+                writer.newLine();
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            return true;
+        };
     }
 
     private static void writeGroup(BufferedWriter writer, Slice source, int start, int end)
