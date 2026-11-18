@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.regulator.GoldenJsonl.JsonObject;
 import io.airlift.regulator.TestingUapCoreParser.Section;
+import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,10 +44,14 @@ class TestBenchmarkUapCore
 
     private static final Map<Section, SectionIdentity> SECTIONS = Map.of(Section.USER_AGENT, new SectionIdentity(433, 945), Section.OS, new SectionIdentity(204, 371));
 
+    // The SHA-256 of the atom-fragment texts, concatenated in corpus order.
+    private static final String ATOM_FRAGMENTS_SHA256 = "d914aca2d5d90e1519783bc61b1f85466b8cfd4982db8a6453ea00f273911485";
+
     private static final Map<BenchmarkUapCore.Corpus, Checksums> CHECKSUMS = Map.of(
             BenchmarkUapCore.Corpus.UA_TESTS, new Checksums(1_601, -6968283299897589861L, -6447375649388503287L, -7277181107649128217L, -870790577165327940L, -1049401749285213575L),
             BenchmarkUapCore.Corpus.OS_TESTS, new Checksums(483, 8163189598332632071L, -6119610868567635984L, -4876798987974686370L, 2621427302878393309L, -6311847022472504512L),
-            BenchmarkUapCore.Corpus.CRAWLERS, new Checksums(228, 6468400012786710832L, 1181710654150670858L, 421017945209268058L, -6911502379307713138L, 9079774301146019508L));
+            BenchmarkUapCore.Corpus.CRAWLERS, new Checksums(228, 6468400012786710832L, 1181710654150670858L, 421017945209268058L, -6911502379307713138L, 9079774301146019508L),
+            BenchmarkUapCore.Corpus.ATOM_FRAGMENTS, new Checksums(20_000, -8717577284317705342L, 5891413027497218050L, -3636883106187985693L, -690220669261557312L, -1192170275941812507L));
 
     @Test
     void testResources()
@@ -82,6 +87,19 @@ class TestBenchmarkUapCore
         String head = "x".repeat(TestingUapCoreParser.MAX_USER_AGENT_BYTES);
         String overlength = head + " (Windows NT 10.0; Win64; x64) Firefox/120.0";
         assertThat(parser.parse(Slices.utf8Slice(overlength))).isEqualTo(parser.parse(Slices.utf8Slice(head)));
+    }
+
+    @Test
+    void testAtomFragments()
+            throws NoSuchAlgorithmException
+    {
+        Slice[] texts = BenchmarkUapCore.atomFragments(new TestingUapCoreParser(Section.USER_AGENT, 32 << 20, 32 << 20), new TestingUapCoreParser(Section.OS, 32 << 20, 32 << 20));
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (int index = 0; index < texts.length; index++) {
+            assertThat(texts[index].length()).as("text %s", index).isEqualTo(TestingUapCoreParser.MAX_USER_AGENT_BYTES);
+            digest.update(texts[index].byteArray(), texts[index].byteArrayOffset(), texts[index].length());
+        }
+        assertThat(HexFormat.of().formatHex(digest.digest())).isEqualTo(ATOM_FRAGMENTS_SHA256);
     }
 
     @ParameterizedTest

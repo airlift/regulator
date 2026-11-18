@@ -144,6 +144,13 @@ final class TestingUapCoreParser
         return atomSet.size();
     }
 
+    /// Returns the section's atoms in the order this parser's atom set holds them. The atoms come
+    /// from the rules alone; atoms don't depend on the memory budget.
+    List<Slice> atoms()
+    {
+        return filteredRe2.atoms();
+    }
+
     /// Returns `userAgent` cut to its first [#MAX_USER_AGENT_BYTES] bytes, a calling application's
     /// input limit rather than anything uap-core specifies.
     static Slice cut(Slice userAgent)
