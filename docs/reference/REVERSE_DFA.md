@@ -23,8 +23,11 @@ Some searches skip the reverse pass:
 - When the pattern allows it, a matcher that asks only for group zero runs a
   forward cursor. Besides those cases, a nullable pattern with no assertions
   starts its match where the search started, and a one-character match that
-  ends in a valid UTF-8 character starts at that character's lead byte. Other
-  cursor matches still run the reverse pass.
+  ends in a valid UTF-8 character starts at that character's lead byte. A dense
+  all-match operation, such as a count, may instead take its starts from one
+  reverse pass over the rest of its region
+  ([match start set](../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches)).
+  Other cursor matches still run the reverse pass.
 - A leftmost-first unanchored search through a matcher that asks for groups
   beyond group zero runs one BitState pass instead of the forward, reverse, and
   capture passes, when OnePass cannot run the program and the search window is

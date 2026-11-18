@@ -540,4 +540,13 @@ public class TestJavaRegexp
             assertThat(regexp.matches(utf8Slice(input))).as("(?iu)[%s] against %s", range, input).isTrue();
         }
     }
+
+    @Test
+    public void testDenseFindsSwitchToMatchStartSet()
+    {
+        // A region that ends before the text does is the whole text to \\b, as for every find.
+        Slice input = utf8Slice("ab1 cd ".repeat(16 * 1024 / 7));
+        JavaRegexp pattern = JavaRegexp.compile(utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        TestRegexpMatcher.assertMatchStartSet(pattern, input, 0, input.length() - 3, 1);
+    }
 }
