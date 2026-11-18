@@ -681,6 +681,12 @@ final class Dfa
                 start < contextStart || end < start || end > contextEnd) {
             return SEARCH_NO_MATCH;
         }
+        if (matchKind == Prog.MatchKind.MANY_MATCH && (wantMatchBoundary || contextStart != start || contextEnd != end)) {
+            // A many-match search answers only whether any member matches in its text. Its
+            // match positions and end-of-text step assume upstream's states, which report a
+            // match one byte late, and a state that holds its own matches does not.
+            throw new IllegalArgumentException("a many-match search takes no match boundary and no context past its text");
+        }
         int contextOffset = context.byteArrayOffset();
         int ctxBegin = contextOffset + contextStart;
         int ctxEnd = contextOffset + contextEnd;
@@ -2706,6 +2712,10 @@ final class Dfa
                     }
                 }
 
+                if (dfa.statesHoldOwnMatches()) {
+                    // The state at the end of the text reported its matches when the search entered it.
+                    return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
+                }
                 int transition = getTransition(transitions, stateOffset + dfa.bytemapRange);
                 if (transition == T_UNCOMPUTED) {
                     transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
@@ -2830,6 +2840,10 @@ final class Dfa
                     stateOffset = transition & ~T_MATCH_BIT;
                 }
 
+                if (dfa.statesHoldOwnMatches()) {
+                    // The state at the end of the range holds the branches that match up to it.
+                    return minimumMatchId(dfa.stateData(tables, stateOffset));
+                }
                 int boundaryByte = textEnd < contextLimit ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
                 int transition = getTransition(transitions, stateOffset + dfa.byteMap(boundaryByte));
                 if (transition == T_UNCOMPUTED) {
@@ -6823,6 +6837,12 @@ final class Dfa
         private final int crlfSecondByte;
         private final boolean hasRustWordAssertions;
         private final boolean quitsOnNonAscii;
+        // Whether each many-match state holds the matches of its own frontier, which a search
+        // reports on entering it, rather than upstream's matches of the frontier before the byte
+        // that entered it. Without an empty-width assertion, whether a frontier matches does not
+        // depend on the next byte, so the state is a function of its frontier alone. "Many-Match
+        // States Hold Their Own Matches" in REGULATOR_DECISIONS.md describes the difference.
+        private final boolean statesHoldOwnMatches;
         private volatile Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
         private volatile int fixedDistanceSmallByteSet;
         // Set with the fixed-distance candidates, before they are published: whether a search too
@@ -6992,6 +7012,7 @@ final class Dfa
             this.crlfSecondByte = prog.reversed() ? '\r' : '\n';
             this.hasRustWordAssertions = (textDependentAssertions & EmptyOp.RUST_WORD_ASSERTIONS) != 0;
             this.quitsOnNonAscii = prog.dfaQuitsOnNonAscii();
+            this.statesHoldOwnMatches = kind == Kind.MANY_MATCH && !prog.hasEmptyWidthAssertions();
 
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
@@ -7398,6 +7419,11 @@ final class Dfa
         boolean canUseNullableStartByteCheck()
         {
             return nullableStartByteCandidates;
+        }
+
+        boolean statesHoldOwnMatches()
+        {
+            return statesHoldOwnMatches;
         }
 
         boolean canFixedDistanceByteAcceleration()
@@ -9700,7 +9726,8 @@ final class Dfa
         private StateData workQueueToCachedState(WorkQueue q, WorkQueue mq, int flag)
         {
             int qsize = q.size();
-            int mqSize = (mq != null) ? mq.size() : 0;
+            // A state that holds its own matches takes them from q.
+            int mqSize = statesHoldOwnMatches ? qsize : (mq != null) ? mq.size() : 0;
             int[] inst = new int[qsize + mqSize + 1];
             int n = 0;
 
@@ -9708,6 +9735,7 @@ final class Dfa
             boolean sawMatch = false;
             boolean sawMark = false;
             boolean isFirstEntry = true;
+            boolean holdsMatch = false;
 
             for (int it = 0; it < qsize; it++) {
                 int id = q.denseAt(it);
@@ -9746,12 +9774,21 @@ final class Dfa
                 if (op == InstOp.MATCH && !prog.anchorEnd()) {
                     sawMatch = true;
                 }
+                if (op == InstOp.MATCH) {
+                    holdsMatch = true;
+                }
 
                 isFirstEntry = false;
             }
 
             if (n > 0 && inst[n - 1] == Mark) {
                 n--;
+            }
+
+            if (statesHoldOwnMatches) {
+                // The state holds its own frontier's matches in place of the previous one's.
+                mq = holdsMatch ? q : null;
+                flag = holdsMatch ? flag | FLAG_MATCH : flag & ~FLAG_MATCH;
             }
 
             if (needflags == 0) {
@@ -9780,6 +9817,7 @@ final class Dfa
 
             if (mq != null) {
                 inst[n++] = MatchSep;
+                int matchIdsStart = n;
                 for (int it = 0; it < mq.size(); it++) {
                     int id = mq.denseAt(it);
                     if (!mq.isMark(id)) {
@@ -9788,6 +9826,11 @@ final class Dfa
                             inst[n++] = Prog.instMatchId(instruction);
                         }
                     }
+                }
+                if (statesHoldOwnMatches) {
+                    // The queue's order depends on the path that reached the frontier, and the
+                    // state must not.
+                    Arrays.sort(inst, matchIdsStart, n);
                 }
             }
 
