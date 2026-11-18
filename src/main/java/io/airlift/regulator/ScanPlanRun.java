@@ -456,23 +456,25 @@ final class ScanPlanRun
     }
 
     /// Returns the end of a run of ASCII characters alone, which reads one byte per character,
-    /// or `-1` when the run fails.
+    /// or the complement of where it stopped when the run fails, so that a failed attempt
+    /// charges the work budget for what the run read.
     /// Copied as `ScanKernelSupport.runMatch`; keep the copy in step.
     int match(byte[] input, int cursor, int end)
     {
         int limit = maximum < 0 ? end : cursor + Math.min(maximum, end - cursor);
         int stop = scan(input, cursor, limit);
-        return stop - cursor >= minimum ? stop : -1;
+        return stop - cursor >= minimum ? stop : ~stop;
     }
 
-    /// Returns the position after the run's minimum characters, or `-1` when they are absent.
+    /// Returns the position after the run's minimum characters, or the complement of where the
+    /// run stopped when they are absent.
     /// It fails exactly when [#match] fails but reads no further than the minimum.
     /// Copied as `ScanKernelSupport.runMatchMinimum`; keep the copy in step.
     int matchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
             if (cursor >= end || !members[input[cursor] & 0xFF]) {
-                return -1;
+                return ~cursor;
             }
             cursor++;
         }
@@ -487,7 +489,7 @@ final class ScanPlanRun
     {
         if (maximum < 0 && minimum <= 1) {
             int stop = re2Scan(input, cursor, end);
-            return stop - cursor >= minimum ? stop : -1;
+            return stop - cursor >= minimum ? stop : ~stop;
         }
         int count = 0;
         int limit = maximum < 0 ? minimum : maximum;
@@ -497,20 +499,21 @@ final class ScanPlanRun
             count++;
         }
         if (count < minimum) {
-            return -1;
+            return ~cursor;
         }
         return maximum < 0 ? re2Scan(input, cursor, end) : cursor;
     }
 
     /// The RE2 version of [#matchMinimum]: the position after the run's minimum
-    /// characters as [#re2Match] reads them, or `-1` when they are absent.
+    /// characters as [#re2Match] reads them, or the complement of where the run stopped when
+    /// they are absent.
     /// Copied as `ScanKernelSupport.re2RunMatchMinimum`; keep the copy in step.
     int re2MatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
             int width = re2MemberWidth(input, cursor, end);
             if (width == 0) {
-                return -1;
+                return ~cursor;
             }
             cursor += width;
         }
@@ -677,7 +680,7 @@ final class ScanPlanRun
     {
         if (maximum < 0 && minimum <= 1) {
             int stop = re2SetScan(input, cursor, end);
-            return stop - cursor >= minimum ? stop : -1;
+            return stop - cursor >= minimum ? stop : ~stop;
         }
         int count = 0;
         int limit = maximum < 0 ? minimum : maximum;
@@ -687,21 +690,21 @@ final class ScanPlanRun
             count++;
         }
         if (count < minimum) {
-            return -1;
+            return ~cursor;
         }
         return maximum < 0 ? re2SetScan(input, cursor, end) : cursor;
     }
 
     /// The version of [#re2MatchMinimum] for a run of some non-ASCII characters but not all:
     /// the position after the run's minimum characters as [#re2SetMatch] reads them, or
-    /// `-1` when they are absent.
+    /// the complement of where the run stopped when they are absent.
     /// Copied as `ScanKernelSupport.re2SetRunMatchMinimum`; keep the copy in step.
     int re2SetMatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
             int width = re2SetMemberWidth(input, cursor, end);
             if (width == 0) {
-                return -1;
+                return ~cursor;
             }
             cursor += width;
         }

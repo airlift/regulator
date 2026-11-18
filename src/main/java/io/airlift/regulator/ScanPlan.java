@@ -1727,7 +1727,8 @@ final class ScanPlan
         // After a skipped leading run, the failure resume and scanned extent start where the run
         // would have left them.
         int resumeRunEnd = failureResumeOperation == 0 ? cursor : matchStart;
-        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        // The furthest byte any unbounded scan of this attempt reached, across retries. A run
+        // that fails on its first byte made a bounded check and does not count.
         int scanned = cursor;
         long retryPositionsLow = 0;
         long retryPositionsHigh = 0;
@@ -1778,11 +1779,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1804,11 +1811,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1830,11 +1843,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1901,7 +1920,8 @@ final class ScanPlan
         int operation = 0;
         int retries = 0;
         int resumeRunEnd = matchStart;
-        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        // The furthest byte any unbounded scan of this attempt reached, across retries. A run
+        // that fails on its first byte made a bounded check and does not count.
         int scanned = matchStart;
         long retryPositionsLow = 0;
         long retryPositionsHigh = 0;
@@ -1969,11 +1989,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -1995,11 +2021,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
@@ -2021,11 +2053,17 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
+                            if (~stop > cursor) {
+                                scanned = Math.max(scanned, ~stop);
+                            }
                             failed = true;
                             break;
                         }

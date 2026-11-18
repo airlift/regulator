@@ -174,7 +174,8 @@ also skip it, because their candidate scan already skips to the literal.
 Every unanchored search of any plan also has a work budget. A failed attempt
 reports the furthest byte any of its unbounded scans reached, and the search
 adds that byte's distance from the attempt's start; literal and bounded checks,
-whose length the pattern limits, are not counted. Once the sum exceeds 2048
+whose length the pattern limits, are not counted, and a run that fails on its
+first byte counts as a bounded check. Once the sum exceeds 2048
 bytes plus four times the distance the search has advanced, the search stops
 where the plan would resume and continues on the ordinary engine with the same
 logical context, anchor, and capture offsets. No match starts before that

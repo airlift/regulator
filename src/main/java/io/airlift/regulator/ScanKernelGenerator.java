@@ -625,6 +625,9 @@ final class ScanKernelGenerator
                             .then(stop.cast(long.class).ret())
                             .build());
                 }
+                if (attempt == Attempt.UNANCHORED) {
+                    tail.append(chargeFailedRun());
+                }
                 tail.jump(fail);
                 body.append(IfStatement.builder()
                         .condition(groups.isNull().and(fullMatch.not()))
@@ -632,17 +635,38 @@ final class ScanKernelGenerator
                         .build());
             }
             body.append(stop.set(invokeStatic(ScanKernelSupport.class, match, int.class, run, bytes, cursor, end)));
-            body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
             if (attempt == Attempt.UNANCHORED) {
+                body.append(IfStatement.builder()
+                        .condition(stop.lessThan(constantInt(0)))
+                        .then(CodeBlock.blockBuilder()
+                                .append(chargeFailedRun())
+                                .jump(fail)
+                                .build())
+                        .build());
                 body.append(scanned.set(invokeStatic(Math.class, "max", int.class, scanned, stop)));
                 if (index == plan.failureResumeOperation()) {
                     body.append(resumeRunEnd.set(stop));
                 }
             }
+            else {
+                body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
+            }
             if (step.slot() > 0) {
                 emitCapture(step.slot());
             }
             body.append(cursor.set(stop));
+        }
+
+        /// Charges a failed run to the work budget up to where it stopped, which a failed run
+        /// returns as its complement in `stop`. A run that fails on its first byte made a
+        /// bounded check and is not charged.
+        private IfStatement chargeFailedRun()
+        {
+            BytecodeExpression stopped = stop.bitwiseXor(constantInt(-1));
+            return IfStatement.builder()
+                    .condition(stopped.greaterThan(cursor))
+                    .then(scanned.set(invokeStatic(Math.class, "max", int.class, scanned, stopped)))
+                    .build();
         }
 
         private void emitCapture(int slot)

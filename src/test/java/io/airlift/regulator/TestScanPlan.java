@@ -29,6 +29,7 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import static io.airlift.regulator.TestRe2ScanPlan.bytes;
@@ -2487,6 +2488,57 @@ public class TestScanPlan
     }
 
     @Test
+    public void testWorkBudgetChargesFailedRunMinimums()
+    {
+        // An attempt whose run stops short of its minimum has read to that stop, and every later
+        // candidate before the stop reads to it again. The work budget charges those reads, so
+        // the plan's search ends within the first block, and the ordinary engine finds the match.
+        // The rows cover a run, its minimum alone in a boolean tail, the ASCII-folded executor,
+        // and a run of ASCII members only.
+        Slice input = view(("x".repeat(999) + "/").repeat(2) + "x".repeat(1001) + "/");
+
+        record Language(String name, BiFunction<String, Boolean, CompiledPattern> compile) {}
+
+        List<Language> languages = List.of(
+                new Language("RE2", (value, generate) -> Re2.compile(utf8Slice(value), Re2.Options.defaults().setGenerateBytecode(generate))),
+                new Language("Java", (value, generate) -> JavaRegexp.compile(utf8Slice(value), JavaRegexp.Options.defaults().setGenerateBytecode(generate))),
+                new Language("Rust", (value, generate) -> RustRegexp.compile(utf8Slice(value), RustRegexp.Options.defaults().setGenerateBytecode(generate))),
+                new Language("Rust bytes", (value, generate) -> RustRegexp.compile(utf8Slice(value), RustRegexp.Options.bytes().setGenerateBytecode(generate))));
+        for (String expression : List.of("([^/]{1000,})/", "x([^/]{1000,})", "(?i)x([^/]{1000,})/", "x([a-z]{1000,})")) {
+            List<int[]> expected = joniMatches(joniPattern(expression), input);
+            assertThat(expected).as(expression).hasSize(1);
+            // Generated classes, which have no ASCII-folded form, charge the same budget.
+            for (boolean generate : List.of(false, true)) {
+                TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setGenerateBytecode(generate);
+                String description = expression + (generate ? " generated" : "");
+                TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression), options);
+                assertThat(regexp.usesGeneratedBytecode()).as(description).isEqualTo(generate && !expression.startsWith("(?i)"));
+                verifyOperations(description, regexp, _ -> expected, List.of(input), true);
+                TrinoRegexp planOnly = TrinoRegexp.compile(utf8Slice(expression), options);
+                disableOrdinaryEngine(planOnly);
+                verifyOperations(description + " without the ordinary engine", planOnly, _ -> List.of(), List.of(input), true);
+            }
+            // RE2, Java, and Rust plans read [^/] as RE2 does, and Rust's bytes mode as a run of
+            // some non-ASCII characters.
+            for (Language language : languages) {
+                for (boolean generate : List.of(false, true)) {
+                    String description = "%s %s%s".formatted(language.name(), expression, generate ? " generated" : "");
+                    CompiledPattern pattern = language.compile().apply(expression, generate);
+                    assertThat(pattern.usesScanPlanForDiagnostics()).as(description).isTrue();
+                    assertThat(pattern.usesGeneratedBytecode()).as(description).isEqualTo(generate && !expression.startsWith("(?i)"));
+                    assertThat(pattern.find(input)).as(description).isTrue();
+                    assertThat(pattern.count(input)).as(description).isEqualTo(1);
+                    CompiledPattern planOnly = language.compile().apply(expression, generate);
+                    disableOrdinaryEngine(planOnly);
+                    assertThat(planOnly.find(input)).as(description).isFalse();
+                    assertThat(planOnly.findInto(input, new int[2])).as(description).isFalse();
+                    assertThat(planOnly.count(input)).as(description).isZero();
+                }
+            }
+        }
+    }
+
+    @Test
     public void testWorkBudgetKeepsLinearSearchesOnPlan()
     {
         // Dense matches and short or sparse failed attempts stay within the budget: with an
@@ -2507,14 +2559,21 @@ public class TestScanPlan
                 new ExpressionInput("([^/]+)/", paths.toString()),
                 new ExpressionInput("(?i)content-type:([^;]+);", headers.toString()),
                 // Each failed attempt reads only to the next 'z', before the next candidate.
-                new ExpressionInput("x([^z]+)zq", "xaaazr".repeat(20000) + "xbzq"));
+                new ExpressionInput("x([^z]+)zq", "xaaazr".repeat(20000) + "xbzq"),
+                // Each failed attempt's run fails on its first byte, a bounded check like the
+                // literal before it.
+                new ExpressionInput("     ([^ ]+)", " ".repeat(10000) + "word"));
         for (ExpressionInput row : rows) {
             String expression = row.expression();
             Regex oracle = joniPattern(expression);
             Slice input = view(row.input());
             List<int[]> expected = joniMatches(oracle, input);
             assertThat(expected).as(expression).isNotEmpty();
-            verifyOperations(expression + " without the ordinary engine", withoutOrdinaryEngine(expression), _ -> expected, List.of(input), true);
+            for (boolean generate : List.of(false, true)) {
+                TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setGenerateBytecode(generate));
+                disableOrdinaryEngine(regexp);
+                verifyOperations(expression + (generate ? " generated" : "") + " without the ordinary engine", regexp, _ -> expected, List.of(input), true);
+            }
         }
     }
 

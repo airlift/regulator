@@ -56,7 +56,7 @@ public class TestScanPlanRun
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
         ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()));
         byte[] input = "xabc".getBytes(UTF_8);
-        assertThat(matchMinimum(run, input, 1, 3)).isEqualTo(-1);
+        assertThat(matchMinimum(run, input, 1, 3)).isEqualTo(~3);
         assertThat(matchMinimum(run, input, 0, 3)).isEqualTo(3);
     }
 
@@ -108,7 +108,7 @@ public class TestScanPlanRun
                                 int cursor = before.length;
                                 String description = "%s%s at %s on %s".formatted(set, quantifier, offset, text);
                                 MatchResult result = ordinary.lookingAtResult(wrappedBuffer(input, cursor, input.length - cursor));
-                                int expected = result == null ? -1 : cursor + result.end();
+                                int expected = result == null ? ~cursor : cursor + result.end();
                                 assertThat(run.re2Match(input, cursor, input.length)).as(description).isEqualTo(expected);
                                 assertThat(ScanKernelSupport.re2RunMatch(run, input, cursor, input.length)).as("kernel " + description).isEqualTo(expected);
                                 if (delimiter >= 0 && delimiter < ScanPlanRun.MATCHES_EVERY_BYTE) {
