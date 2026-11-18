@@ -32,6 +32,7 @@ final class VectorScanKernelSupport
     private static final int HIGH_NIBBLE_TABLE_OFFSET = 64;
     // As in VectorScanner.
     private static final byte[] FIRST_BLOCK_LANES = {0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    private static final byte[] LAST_BLOCK_LEADS = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x70, 0x60, 0x40};
 
     private VectorScanKernelSupport() {}
 
@@ -211,6 +212,36 @@ final class VectorScanKernelSupport
             pending = hasNonAsciiOrStop;
         }
         return characterStart(input, start, cursor);
+    }
+
+    /// A copy of `VectorScanner.findRe2LastBlockStop`.
+    static int findRe2LastBlockStop(byte[] input, int cursor, int stop, int end, int stopByte)
+    {
+        int block = end - SPECIES.length();
+        if (stop <= block || cursor > block || block < 3) {
+            return -1;
+        }
+        // skipRe2Run's SVE form on every platform, which keeps this within C2's inlining limit,
+        // with the stop byte apart and the end's lead bytes added.
+        ByteVector bytes = ByteVector.fromArray(SPECIES, input, block);
+        ByteVector expected = ByteVector.fromArray(SPECIES, input, block - 1).lanewise(VectorOperators.SUSUB, (byte) 0x40)
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, input, block - 2).lanewise(VectorOperators.SUSUB, (byte) 0x60))
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, input, block - 3).lanewise(VectorOperators.SUSUB, (byte) 0x70));
+        ByteVector shifted = bytes.lanewise(VectorOperators.ADD, (byte) 0x40);
+        VectorMask<Byte> rejected = shifted.lanewise(VectorOperators.SUSUB, (byte) 0x40).lanewise(VectorOperators.XOR, expected)
+                .lanewise(VectorOperators.OR, ByteVector.broadcast(SPECIES, (byte) 0x81).lanewise(VectorOperators.SUSUB, shifted))
+                .lanewise(VectorOperators.OR, bytes.lanewise(VectorOperators.SUSUB, (byte) 0x75))
+                .lanewise(VectorOperators.OR, bytes.lanewise(VectorOperators.SUSUB, ByteVector.fromArray(SPECIES, LAST_BLOCK_LEADS, 0)))
+                .compare(VectorOperators.LT, (byte) 0);
+        VectorMask<Byte> stops = ByteVector.broadcast(SPECIES, (byte) (stopByte >= 0 ? 0x80 : 0))
+                .lanewise(VectorOperators.SUSUB, bytes.lanewise(VectorOperators.XOR, (byte) Math.max(stopByte, 0)))
+                .compare(VectorOperators.LT, (byte) 0);
+        int rejectedLane = rejected.firstTrue();
+        int stopLane = stops.firstTrue();
+        if (stopLane < rejectedLane) {
+            return block + stopLane;
+        }
+        return rejectedLane == SPECIES.length() ? end : -1;
     }
 
     // A copy of VectorScanner.characterStart.

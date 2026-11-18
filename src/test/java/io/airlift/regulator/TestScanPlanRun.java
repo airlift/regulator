@@ -78,8 +78,11 @@ public class TestScanPlanRun
         // A run of every non-ASCII character reads characters as RE2 does, a block at a time
         // where it can: each character below, valid, accepted only by RE2's lenient reading,
         // malformed, or cut short, at every offset across the first three blocks of non-ASCII text,
-        // followed by ASCII or by the end. A character cut short at a block's end, followed by a
-        // block of ASCII alone, must stop the run. Lead bytes before the run must not affect it.
+        // or after that much ASCII text from the run's start, followed by ASCII, by a quote as a
+        // quoted field ends, or by the end. A character cut short at a block's end, followed by a
+        // block of ASCII alone, must stop the run. Lead bytes before the run must not affect it. A
+        // run that ends at its one excluded byte, as a delimited capture's does, is read before
+        // that delimiter the same way.
         // Valid; accepted only by RE2's lenient reading; malformed or cut short; the runs' stop bytes.
         List<String> characters = Arrays.asList(String.join(
                 " ",
@@ -89,22 +92,32 @@ public class TestScanPlanRun
                 "0a 22 2f 00").split(" "));
         byte[] before = {(byte) 0xF0, (byte) 0xE2, (byte) 0xC3};
         for (String set : List.of("(?s).", ".", "[^\"]", "[^\\x00]", "[^/:]")) {
-            Re2.Options options = Re2.Options.defaults();
-            ParseResult parsed = RegexpParser.parse(utf8Slice(set + "*"), options.parseFlags());
-            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
-            assertThat(run.matchesNonAscii()).as(set).isTrue();
-            Re2 ordinary = Re2.compileWithoutScanPlanForTesting(utf8Slice(set + "*"), options);
-            for (String character : characters) {
-                for (int offset = 0; offset < 48; offset++) {
-                    for (String after : List.of("", "b".repeat(40))) {
-                        String text = HexFormat.of().formatHex(before) + "c3a9" + "61".repeat(offset) + character + HexFormat.of().formatHex(after.getBytes(UTF_8));
-                        byte[] input = HexFormat.of().parseHex(text);
-                        int cursor = before.length;
-                        String description = "%s at %s on %s".formatted(set, offset, text);
-                        MatchResult result = ordinary.lookingAtResult(wrappedBuffer(input, cursor, input.length - cursor));
-                        int expected = cursor + requireNonNull(result, description).end();
-                        assertThat(run.re2Match(input, cursor, input.length)).as(description).isEqualTo(expected);
-                        assertThat(ScanKernelSupport.re2RunMatch(run, input, cursor, input.length)).as("kernel " + description).isEqualTo(expected);
+            for (String quantifier : List.of("*", "+")) {
+                Re2.Options options = Re2.Options.defaults();
+                ParseResult parsed = RegexpParser.parse(utf8Slice(set + quantifier), options.parseFlags());
+                ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
+                assertThat(run.matchesNonAscii()).as(set).isTrue();
+                int delimiter = run.unboundedScanTerminator();
+                Re2 ordinary = Re2.compileWithoutScanPlanForTesting(utf8Slice(set + quantifier), options);
+                for (String character : characters) {
+                    for (int offset = 0; offset < 48; offset++) {
+                        for (String start : List.of("c3a9", "")) {
+                            for (String after : List.of("", "\"", "b".repeat(40))) {
+                                String text = HexFormat.of().formatHex(before) + start + "61".repeat(offset) + character + HexFormat.of().formatHex(after.getBytes(UTF_8));
+                                byte[] input = HexFormat.of().parseHex(text);
+                                int cursor = before.length;
+                                String description = "%s%s at %s on %s".formatted(set, quantifier, offset, text);
+                                MatchResult result = ordinary.lookingAtResult(wrappedBuffer(input, cursor, input.length - cursor));
+                                int expected = result == null ? -1 : cursor + result.end();
+                                assertThat(run.re2Match(input, cursor, input.length)).as(description).isEqualTo(expected);
+                                assertThat(ScanKernelSupport.re2RunMatch(run, input, cursor, input.length)).as("kernel " + description).isEqualTo(expected);
+                                if (delimiter >= 0 && delimiter < ScanPlanRun.MATCHES_EVERY_BYTE) {
+                                    int expectedBefore = expected >= 0 && expected < input.length && input[expected] == delimiter ? expected : -1;
+                                    assertThat(run.re2MatchBefore(input, cursor, input.length, (byte) delimiter)).as("before " + description).isEqualTo(expectedBefore);
+                                    assertThat(ScanKernelSupport.re2RunMatchBefore(run, input, cursor, input.length, (byte) delimiter)).as("kernel before " + description).isEqualTo(expectedBefore);
+                                }
+                            }
+                        }
                     }
                 }
             }
