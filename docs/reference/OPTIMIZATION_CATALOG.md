@@ -293,8 +293,9 @@ answer, or reject the input before any engine runs.
 - **Where:** `RegexpMatcher.switchToMatchStartSet`,
   `CompiledPattern.switchesToMatchStartSet`, `Dfa.collectMatchStarts`,
   `Prog.matchStartSetDfa`
-- **Applies when:** The library's all-match operations (count, and Trino's
-  extract-all, split, and replacements) of group zero on the group-zero
+- **Applies when:** The library's all-match operations (count and
+  `forEachMatch`, and Trino's extract-all, split, and replacements; a caller's
+  own find loop never switches) of group zero on the group-zero
   forward cursor, whose first 64 finds advanced at most 64 bytes each on
   average with at least 4 KiB of the region left, for a pattern whose finds
   run both a forward and a reverse search, that has no literal route or

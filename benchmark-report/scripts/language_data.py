@@ -384,6 +384,9 @@ def validate_language_report(data):
                     contracts = {'trino-output-assisted-count-v1', 'trino-matcher-count-v3'}
                 elif language in {'re2', 'java', 'rust'} and row['model'] in {'grep', 'count'}:
                     contracts = {'public-find-count-v2'}
+                # From contract version 5, every language sums spans through public forEachMatch.
+                if row['model'] == 'count-spans':
+                    contracts.add('public-for-each-match-v1')
             if row['workContract'] not in contracts:
                 raise ValueError('invalid benchmark work contract')
         coverage[language, platform, mode].add((row['source'], row['operation']))
