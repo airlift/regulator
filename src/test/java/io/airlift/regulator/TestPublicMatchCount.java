@@ -18,12 +18,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.ToLongBiFunction;
 import java.util.regex.Pattern;
 
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestPublicMatchCount
 {
@@ -147,6 +149,121 @@ public class TestPublicMatchCount
             spans.add(matcher.start() + "-" + matcher.end());
         }
         return spans;
+    }
+
+    @Test
+    public void testForEachMatchPassesFindLoopSpans()
+    {
+        // forEachMatch passes the spans and count of a caller's find loop, with each language's
+        // advance past an empty match and Rust's skipped empty matches. The dense rows switch to
+        // a match start set, which a caller's loop never does, and a Trino literal alternation
+        // finds on its span kernel.
+        Slice nonAscii = utf8Slice("x\u00e9\ud83d\udcb0 xx\u00e9");
+        Slice malformed = wrappedBuffer(new byte[] {'x', (byte) 0xFF, (byte) 0xC3, 'x', 'x'});
+        for (Slice input : List.of(nonAscii, malformed)) {
+            for (String expression : List.of("a*", "\\b", "x*")) {
+                assertForEachMatch(Re2.compile(utf8Slice(expression)), input, false);
+                assertForEachMatch(JavaRegexp.compile(utf8Slice(expression)), input, false);
+                assertForEachMatch(RustRegexp.compile(utf8Slice(expression)), input, false);
+                assertForEachMatch(TrinoRegexp.compile(utf8Slice(expression)), input, false);
+            }
+        }
+        Slice words = utf8Slice("ab1 cd ".repeat(16 * 1024 / 7).strip());
+        assertForEachMatch(Re2.compile(utf8Slice("\\b[a-z]+\\b|[0-9]")), words, true);
+        assertForEachMatch(JavaRegexp.compile(utf8Slice("\\b[a-z]+\\b|[0-9]")), words, true);
+        assertForEachMatch(RustRegexp.compile(utf8Slice("(?-u:\\b)[a-z]*")), words, true);
+        Slice lines = utf8Slice("ab cd\n\u00e9\u00e9 ef\n".repeat(16 * 1024 / 14));
+        assertForEachMatch(TrinoRegexp.compile(utf8Slice("(?m)^|[a-z]+")), lines, true);
+        assertForEachMatch(TrinoRegexp.compile(utf8Slice("cd|ef")), lines, false);
+    }
+
+    @Test
+    public void testForEachMatchReleasesStartSetOnEveryExit()
+    {
+        // A consumer that returns false on the k-th match gets k matches, and the call returns k;
+        // a consumer's exception propagates. Neither exit, before or after the switch to a match
+        // start set, leaves a set charged.
+        Re2 re2 = Re2.compile(utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        assertForEachMatchExits(re2::forEachMatch, re2, utf8Slice("ab1 cd ".repeat(3000)));
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("(?m)^|[a-z]+"));
+        assertForEachMatchExits(trino::forEachMatch, trino.re2(), utf8Slice("ab cd\n".repeat(3000)));
+    }
+
+    private static void assertForEachMatch(CompiledPattern pattern, Slice input, boolean switches)
+    {
+        String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8();
+        assertForEachMatch(label, pattern::forEachMatch, pattern, input, findSpans(pattern.matcher(input)), switches);
+    }
+
+    private static void assertForEachMatch(TrinoRegexp pattern, Slice input, boolean switches)
+    {
+        List<String> expected = new ArrayList<>();
+        TrinoRegexpMatcher matcher = pattern.matcher(input);
+        while (matcher.find()) {
+            expected.add(matcher.start() + "-" + matcher.end());
+        }
+        assertForEachMatch("Trino " + pattern.pattern().toStringUtf8(), pattern::forEachMatch, pattern.re2(), input, expected, switches);
+    }
+
+    private static void assertForEachMatch(String label, ToLongBiFunction<Slice, MatchSpanConsumer> forEachMatch, CompiledPattern engine, Slice input, List<String> expected, boolean switches)
+    {
+        long passes = matchStartSetPasses(engine);
+        List<String> spans = new ArrayList<>();
+        long count = forEachMatch.applyAsLong(input, (start, end) -> {
+            spans.add(start + "-" + end);
+            return true;
+        });
+        assertThat(spans).as(label).isEqualTo(expected);
+        assertThat(count).as(label).isEqualTo(expected.size());
+        assertThat(matchStartSetPasses(engine) - passes).as("start set passes of %s", label).isEqualTo(switches ? 1 : 0);
+    }
+
+    private static void assertForEachMatchExits(ToLongBiFunction<Slice, MatchSpanConsumer> forEachMatch, CompiledPattern engine, Slice input)
+    {
+        String label = engine.pattern().toStringUtf8();
+        for (int stop : List.of(3, RegexpMatcher.MATCH_START_SET_SWITCH_FINDS + 5)) {
+            boolean switches = stop > RegexpMatcher.MATCH_START_SET_SWITCH_FINDS;
+            long passes = matchStartSetPasses(engine);
+            int[] calls = new int[1];
+            assertThat(forEachMatch.applyAsLong(input, (_, _) -> {
+                if (++calls[0] < stop) {
+                    return true;
+                }
+                // The set is charged while the consumer of a switched operation runs.
+                assertThat(matchStartSetReservation(engine) > 0).as("start set reservation of %s", label).isEqualTo(switches);
+                return false;
+            })).as(label).isEqualTo(stop);
+            assertThat(calls[0]).as(label).isEqualTo(stop);
+            assertThat(matchStartSetPasses(engine) - passes).as("start set passes of %s", label).isEqualTo(switches ? 1 : 0);
+            assertThat(matchStartSetReservation(engine)).as(label).isZero();
+        }
+        long passes = matchStartSetPasses(engine);
+        int[] calls = new int[1];
+        IllegalStateException failure = new IllegalStateException("stop");
+        assertThatThrownBy(() -> forEachMatch.applyAsLong(input, (_, _) -> {
+            if (++calls[0] > RegexpMatcher.MATCH_START_SET_SWITCH_FINDS) {
+                assertThat(matchStartSetReservation(engine)).as("start set reservation of %s", label).isPositive();
+                throw failure;
+            }
+            return true;
+        })).as(label).isSameAs(failure);
+        assertThat(matchStartSetPasses(engine) - passes).as("start set passes of %s", label).isEqualTo(1);
+        assertThat(matchStartSetReservation(engine)).as(label).isZero();
+    }
+
+    // A Trino pattern that finds on a span kernel alone holds no engine, and so no start set.
+    private static long matchStartSetPasses(CompiledPattern engine)
+    {
+        Prog reverse = engine == null ? null : engine.reverseProgramIfComputedForDiagnostics();
+        Dfa.DfaInstance startSetDfa = reverse == null ? null : reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH);
+        return startSetDfa == null ? 0 : startSetDfa.matchStartSetPassCount();
+    }
+
+    private static long matchStartSetReservation(CompiledPattern engine)
+    {
+        Prog reverse = engine.reverseProgramIfComputedForDiagnostics();
+        Dfa.DfaInstance lender = reverse == null ? null : reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        return lender == null ? 0 : lender.matchStartSetReservationForDiagnostics();
     }
 
     @Test

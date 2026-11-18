@@ -588,6 +588,7 @@ assert.equal(comparisonIssue({ ...bulk, measurementSource: { candidate_commit: '
 assert.equal(comparisonIssue({ ...bulk, language: 'trino', model: 'count-captures' }).label, 'Different API work');
 assert.equal(comparisonIssue({ ...bulk, language: 'trino', model: 'count-spans' }).label, 'Different API work');
 assert.equal(comparisonIssue({ ...bulk, language: 'trino', model: 'count-spans', workContract: 'trino-matcher-count-v3' }), null);
+assert.equal(comparisonIssue({ ...bulk, language: 'trino', model: 'count-spans', workContract: 'public-for-each-match-v1' }), null);
 assert.equal(comparisonIssue({ ...bulk, language: 'trino', model: 'count-captures', workContract: 'trino-output-assisted-count-v1' }).label, 'Different API work');
 assert.equal(comparisonIssue({ ...bulk, language: 'trino' }), null);
 assert.equal(comparisonIssue({ ...mismatched, language: 'trino', operation: 'split' }).label, 'Different output APIs');
