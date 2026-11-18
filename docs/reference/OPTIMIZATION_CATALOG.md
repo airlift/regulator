@@ -333,17 +333,25 @@ so the automata run only where a match can be.
   byte, the probe byte, and checks the other byte per candidate. The vector
   loop only tests whether any lane holds both bytes, so C2 compiles it as a
   counted loop, and candidates are rebuilt and verified after the loop exits;
-  the whole scan runs out of line from its callers. The counted form takes
-  Graviton `aqj`, Sherlock, and `the-upper` rows to 0.51 to 0.60 of their
-  earlier time and Intel `aqj`, `no-match-common`, and `line-boundary` rows to
-  0.78 to 0.80, and RE2's count of `The` from 1.39 to 0.75 of native RE2's time
-  ([#140]). On x86 with 64-byte vectors
-  (`VectorSupport.X86_WITH_64_BYTE_VECTORS`), the second byte is compared under
-  the first byte's mask, one AVX-512 compare in place of a compare and a mask
-  AND, which takes Intel `no-match-common` and rsc's 1 MB rows to 0.81 to 0.83
-  of the compare-and-AND form's time. On 128-bit SVE the masked form took 1.54x
-  to 1.76x the XOR form's time, so it keeps its XOR test; other hosts, 512-bit
-  SVE among them, are unmeasured in the masked form and keep compare and AND.
+  the whole scan runs out of line from its callers. The unmasked and reverse
+  scans write the KMP budget test after a failed candidate in line: on Russian
+  Sherlock text, where failed candidates are rare, C2 left it out of line as a
+  cold call, and the call made it rebuild both probe broadcasts and the zero
+  vector at every 16-byte step on Graviton, 11 instructions per step against 8.
+  The x86 masked scan keeps the call: written in line there, it left the
+  64-byte loop unchanged but moved the code around it, and Russian Sherlock
+  (`01-literal sherlock-ru`) ran about 3% slower on r8i. The counted form
+  takes Graviton `aqj`, Sherlock, and `the-upper` rows to 0.51 to 0.60 of
+  their earlier time and Intel `aqj`, `no-match-common`, and `line-boundary`
+  rows to 0.78 to 0.80, and RE2's count
+  of `The` from 1.39 to 0.75 of native RE2's time ([#140]). On x86 with 64-byte
+  vectors (`VectorSupport.X86_WITH_64_BYTE_VECTORS`), the second byte is
+  compared under the first byte's mask, one AVX-512 compare in place of a
+  compare and a mask AND, which takes Intel `no-match-common` and rsc's 1 MB
+  rows to 0.81 to 0.83 of the compare-and-AND form's time. On 128-bit SVE the
+  masked form took 1.54x to 1.76x the XOR form's time, so it keeps its XOR
+  test; other hosts, 512-bit SVE among them, are unmeasured in the masked form
+  and keep compare and AND.
   For a literal that starts with a multibyte UTF-8 character, the
   pair probes that character's last byte instead of its lead byte, which many
   characters in the same script share; that takes Russian Sherlock rows to 0.28
