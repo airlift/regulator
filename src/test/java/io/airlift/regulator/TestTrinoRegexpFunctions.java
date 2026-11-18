@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -37,6 +38,7 @@ import java.util.stream.Stream;
 
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.TestingPatternShapes.shape;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -1426,6 +1428,79 @@ public class TestTrinoRegexpFunctions
 
         assertThat(failure.get()).isNull();
         assertThat(result.get()).isEqualTo(2);
+    }
+
+    @Test
+    public void testDenseOperationsSwitchToMatchStartSet()
+    {
+        // Each line start is an empty match, and the one before an accented line advances by a
+        // whole code point. The source starts inside its byte array.
+        byte[] text = "ab cd\n\u00e9\u00e9 ef\n".repeat(16 * 1024 / 14).getBytes(UTF_8);
+        byte[] padded = new byte[text.length + 6];
+        System.arraycopy(text, 0, padded, 3, text.length);
+        assertDenseOperationsSwitch("(?m)^|[a-z]+", Slices.wrappedBuffer(padded, 3, text.length), 1);
+        // Without assertions, `bc` starts a byte after each `abc`, which a start marked a byte
+        // late would extract in its place. A DFA count counts these matches without a find loop.
+        assertDenseOperationsSwitch("[^ ]bc|bc", utf8("abc ".repeat(4096)), 0);
+    }
+
+    // Checks that a count, which runs `countPasses` reverse passes, and an extract-all, split,
+    // and replacement, which each switch to a match start set and so run one, of `pattern` over
+    // `source` return what the generic matcher's finds give.
+    private static void assertDenseOperationsSwitch(String pattern, Slice source, long countPasses)
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8(pattern));
+        RegexpMatcher generic = regexp.re2().genericGroupZeroMatcherForDiagnostics(source);
+        List<Slice> groups = new ArrayList<>();
+        List<Slice> parts = new ArrayList<>();
+        DynamicSliceOutput replaced = new DynamicSliceOutput(source.length());
+        int previousEnd = 0;
+        while (generic.find()) {
+            groups.add(generic.group());
+            parts.add(source.slice(previousEnd, generic.start() - previousEnd));
+            replaced.writeBytes(source, previousEnd, generic.start() - previousEnd);
+            replaced.writeByte('_');
+            previousEnd = generic.end();
+        }
+        parts.add(source.slice(previousEnd, source.length() - previousEnd));
+        replaced.writeBytes(source, previousEnd, source.length() - previousEnd);
+
+        assertThat(regexp.count(source)).isEqualTo(groups.size());
+        assertThat(TestRegexpMatcher.matchStartSetPasses(regexp.re2())).isEqualTo(countPasses);
+        assertThat(regexp.extractAll(source)).containsExactlyElementsOf(groups);
+        assertThat(regexp.split(source)).containsExactlyElementsOf(parts);
+        assertThat(regexp.replace(source, utf8("_"))).isEqualTo(replaced.slice());
+        assertThat(TestRegexpMatcher.matchStartSetPasses(regexp.re2())).isEqualTo(countPasses + 3);
+    }
+
+    @Test
+    public void testCallbackReplaceReleasesStartSetOnEveryExit()
+    {
+        // A callback that ends the replacement after the switch, by returning null or throwing,
+        // leaves no start set charged.
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(?m)^|[a-z]+"));
+        Slice source = utf8("ab cd\n".repeat(3000));
+        for (boolean throwing : new boolean[] {false, true}) {
+            int[] calls = new int[1];
+            Function<List<Slice>, Slice> replacement = _ -> {
+                if (++calls[0] <= RegexpMatcher.MATCH_START_SET_SWITCH_FINDS) {
+                    return utf8("_");
+                }
+                if (throwing) {
+                    throw new IllegalStateException("stop");
+                }
+                return null;
+            };
+            if (throwing) {
+                assertThatThrownBy(() -> regexp.replace(source, replacement)).hasMessage("stop");
+            }
+            else {
+                assertThat(regexp.replace(source, replacement)).isNull();
+            }
+            Prog reverse = regexp.re2().reverseProgramIfComputedForDiagnostics();
+            assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchStartSetReservationForDiagnostics()).isZero();
+            assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH).matchStartSetPassCount()).isEqualTo(throwing ? 2 : 1);
+        }
     }
 
     private static long countSingleByteMatches(String pattern, Slice source)
