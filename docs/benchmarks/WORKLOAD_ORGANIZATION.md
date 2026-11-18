@@ -217,6 +217,15 @@ Internal diagnostics stay in the private evidence archive and are absent from
 the public report and its download. Neither population's count, median, nor
 direction changes an application or bulk-text summary.
 
+`BenchmarkUapCore` runs the `user_agent_parsers` and `os_parsers` sections of
+`regexes.yaml` in ua-parser/uap-core at commit 73e7340c, used under the
+Apache-2.0 license;
+[`uap-core/README.md`](../../src/test/resources/io/airlift/regulator/uap-core/README.md)
+carries their notice. It runs each section as a whole rule collection through
+`FilteredRe2` and `Re2Set`, an operation none of the six populations covers,
+over the user agents of uap-core's `tests/test_ua.yaml` and `tests/test_os.yaml`.
+It is diagnostic evidence, not a publication row.
+
 Classify by purpose. The public report publishes every campaign row except a
 short hide list in `benchmark-report/scripts/publication_data.py`. Hide
 optimizer, engine, and synthetic-scaling probes, except

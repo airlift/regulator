@@ -60,6 +60,22 @@ exists and names the revision, so a revision change updates it first:
 python3 tools/re2-benchmark/manifests/provision-literal-corpus.py --rebar-root <pinned-rebar-checkout> --check
 ```
 
+`uap-core-corpus.tsv` pins the uap-core user-agent rules and tests that
+`BenchmarkUapCore` runs. It records each source's URL, revision, size,
+checksum, and license, and the uncompressed size and checksum of the committed
+resource generated from it. The resources are the browser and OS sections of
+`regexes.yaml` and the browser and OS test cases, as gzip JSON lines, and
+`LICENSE`, upstream's license notice, copied unchanged; the full terms are the
+repository's root `LICENSE`. Their `README.md` states the conversion and the
+pinned revision, as the Apache-2.0 license requires. `provision-uap-core.py`
+regenerates the resources from a checkout of that revision, and with `--check`
+verifies them; both fail unless the `README.md` exists and names the revision,
+so a revision change updates it first:
+
+```bash
+python3 tools/re2-benchmark/manifests/provision-uap-core.py --uap-core-root <pinned-uap-core-checkout> --check
+```
+
 `tpch-like-corpus.tsv` pins the committed TPC-H column samples used by the
 Trino LIKE TPC-H benchmark by generator, scale factor, row range, size, and
 checksum, and `tpch-like-workloads.tsv` lists its workloads with their source
