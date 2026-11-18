@@ -560,7 +560,7 @@ public class TestHotMethodSize
         assertThat(codeLength(Dfa.class, "scanManyBytes"))
                 .as("Dfa.scanManyBytes bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(352);
+                .isLessThanOrEqualTo(370);
     }
 
     /// Keeps the find loop's check of whether a search tries the inner or window literal first,

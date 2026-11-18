@@ -2638,8 +2638,10 @@ final class Dfa
         }
 
         // The byte scan's matched states: slot 0 holds the count, and the following slots the
-        // matched state offsets.
-        int[] matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
+        // matched state offsets. Until the search's own step enters a matching state, there is no
+        // buffer, and the scan stops before a matching transition, so a text that never matches
+        // allocates none.
+        int[] matchedStates = null;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -2681,11 +2683,13 @@ final class Dfa
                     // Record the states the scan matched in the tables it read them from, before
                     // the step that handles the byte the scan stopped at can compute a transition,
                     // reset, or retry.
-                    int matchedCount = matchedStates[0];
-                    if (matchedCount != 0) {
-                        matched = true;
-                        for (int index = 1; index <= matchedCount; index++) {
-                            recordMatches(dfa.stateData(tables, matchedStates[index]), matches);
+                    if (matchedStates != null) {
+                        int matchedCount = matchedStates[0];
+                        if (matchedCount != 0) {
+                            matched = true;
+                            for (int index = 1; index <= matchedCount; index++) {
+                                recordMatches(dfa.stateData(tables, matchedStates[index]), matches);
+                            }
                         }
                     }
                     if (position == textEnd) {
@@ -2730,6 +2734,9 @@ final class Dfa
                     if (stateMatched) {
                         matched = true;
                         recordMatches(dfa.stateData(tables, stateOffset), matches);
+                        if (matchedStates == null) {
+                            matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
+                        }
                     }
                 }
 
@@ -2784,13 +2791,15 @@ final class Dfa
     // Steps from position toward end through the many-match transition table, from stateOffset,
     // stopping before a transition that is uncomputed, dead, or full-match, which searchMany's own
     // step handles. matchedStates holds the count in slot 0 and the matched state offsets in the
-    // following slots. The scan steps through a matching transition, appending the state it enters
-    // unless that state is the one it appended last, and stops before a matching transition when
-    // matchedStates is full. Four bytes a step keep it larger than FreqInlineSize, so C2 compiles
-    // it on its own and allocates its registers from its own few live values rather than from
-    // searchMany's whole graph. Returns the position and state reached as position << 32 | state.
+    // following slots, or is null, which holds no states. The scan steps through a matching
+    // transition, appending the state it enters unless that state is the one it appended last, and
+    // stops before a matching transition when matchedStates is full or null. Four bytes a step
+    // keep it larger than FreqInlineSize, so C2 compiles it on its own and allocates its registers
+    // from its own few live values rather than from searchMany's whole graph. Returns the position
+    // and state reached as position << 32 | state.
     private static long scanManyBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int end, int stateOffset, int[] matchedStates)
     {
+        int capacity = matchedStates == null ? 0 : matchedStates.length - 1;
         int count = 0;
         int lastMatchedState = -1;
         int unrolledEnd = end - 3;
@@ -2846,7 +2855,7 @@ final class Dfa
             }
             int matchedState = flagged & ~T_MATCH_BIT;
             if (matchedState != lastMatchedState) {
-                if (count == matchedStates.length - 1) {
+                if (count == capacity) {
                     break;
                 }
                 count++;
@@ -2856,7 +2865,9 @@ final class Dfa
             stateOffset = matchedState;
             position++;
         }
-        matchedStates[0] = count;
+        if (matchedStates != null) {
+            matchedStates[0] = count;
+        }
         return ((long) position << 32) | stateOffset;
     }
 
