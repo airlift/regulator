@@ -26,6 +26,7 @@ import java.lang.classfile.ClassModel;
 import java.lang.classfile.CodeModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
+import java.lang.classfile.instruction.BranchInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
@@ -625,6 +626,55 @@ public class TestHotMethodSize
         assertThat(codeLength(LiteralNeighborMatcher.class, "find")).as("LiteralNeighborMatcher.find bytecode bytes").isPositive().isLessThanOrEqualTo(205);
     }
 
+    /// Keeps the RE2 run reader's ASCII entry, which a short run such as a quoted field's takes on
+    /// every row, within MaxInlineSize, and its stop scan at the size it was added at: the scan
+    /// stops at the run's stop byte or a non-ASCII byte with one compare per byte, and neither
+    /// calls the walk by character, which bounds each block and reads character widths. The entry
+    /// takes the stop scan first, and only a stop at a non-ASCII byte enters that walk. The entry
+    /// calls `re2ByteStop`, then `re2ScanNonAscii`, without a branch; that wrapper stays within
+    /// MaxInlineSize and the last block's check within FreqInlineSize. `re2ScanNonAscii` says why.
+    /// The kernel's copies are held the same way.
+    @Test
+    public void testRe2RunAsciiEntryStaysOffCharacterWalk()
+    {
+        for (Class<?> type : List.of(ScanPlanRun.class, ScanKernelSupport.class)) {
+            String prefix = type == ScanPlanRun.class ? "re2" : "re2Run";
+            Class<?> vectors = type == ScanPlanRun.class ? VectorScanner.class : VectorScanKernelSupport.class;
+            assertThat(codeLength(type, prefix + "ScanNonAscii"))
+                    .as("%s.%sScanNonAscii bytecode bytes", type.getSimpleName(), prefix)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_INLINE_SIZE);
+            assertThat(calledMethods(type, prefix + "ScanNonAscii", vectors))
+                    .as("%s methods %s.%sScanNonAscii calls", vectors.getSimpleName(), type.getSimpleName(), prefix)
+                    .containsExactly("findRe2LastBlockStop");
+            assertThat(codeLength(vectors, "findRe2LastBlockStop"))
+                    .as("%s.findRe2LastBlockStop bytecode bytes", vectors.getSimpleName())
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+            assertThat(codeLength(type, prefix + "ScanBlocks"))
+                    .as("%s.%sScanBlocks bytecode bytes", type.getSimpleName(), prefix)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_INLINE_SIZE);
+            assertThat(calledMethods(type, prefix + "ScanBlocks", type))
+                    .as("%s methods %s.%sScanBlocks calls", type.getSimpleName(), type.getSimpleName(), prefix)
+                    .containsExactly(prefix + "ByteStop", prefix + "ScanNonAscii");
+            assertThat(branches(type, prefix + "ScanBlocks"))
+                    .as("%s.%sScanBlocks branches", type.getSimpleName(), prefix)
+                    .isZero();
+            assertThat(codeLength(type, prefix + "ByteStop"))
+                    .as("%s.%sByteStop bytecode bytes", type.getSimpleName(), prefix)
+                    .isPositive()
+                    .isLessThanOrEqualTo(64);
+            for (String method : List.of(prefix + "ScanBlocks", prefix + "ByteStop")) {
+                for (Class<?> owner : List.of(ScanPlanRun.class, ScanKernelSupport.class, Utf8.class, VectorScanner.class, VectorScanKernelSupport.class)) {
+                    assertThat(calledMethods(type, method, owner))
+                            .as("%s methods %s.%s calls", owner.getSimpleName(), type.getSimpleName(), method)
+                            .doesNotContain("re2WalkLimit", "re2CharacterWidth", "skipRe2Run");
+                }
+            }
+        }
+    }
+
     // Asserts that `methodName` of `type` calls both folded pair selectors and no folded pair
     // kernel directly.
     private static void assertCallsSelectors(Class<?> type, String methodName)
@@ -663,6 +713,16 @@ public class TestHotMethodSize
                 .filter(InvokeInstruction.class::isInstance)
                 .map(InvokeInstruction.class::cast)
                 .filter(invoke -> invoke.owner().asInternalName().equals(ownerName));
+    }
+
+    private static long branches(Class<?> type, String methodName)
+    {
+        return ClassFile.of().parse(classfile(type)).methods().stream()
+                .filter(method -> method.methodName().equalsString(methodName))
+                .flatMap(model -> model.code().stream())
+                .flatMap(CodeModel::elementStream)
+                .filter(BranchInstruction.class::isInstance)
+                .count();
     }
 
     private static int codeLength(Class<?> type, String methodName)

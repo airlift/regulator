@@ -143,6 +143,7 @@ public class TestScanKernel
             "VectorScanKernelSupport.findNibbleTable",
             "VectorScanKernelSupport.findRange",
             "VectorScanKernelSupport.findRe2ByteStop",
+            "VectorScanKernelSupport.findRe2LastBlockStop",
             "VectorScanKernelSupport.findRe2RunStop",
             "VectorScanKernelSupport.findRunCandidate",
             "VectorScanKernelSupport.findRunStop",

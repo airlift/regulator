@@ -26,6 +26,10 @@ final class VectorScanner
     // Loaded at offsets 2, 1, and 0, the lanes of a block that a byte one, two, or three bytes
     // back can affect.
     private static final byte[] FIRST_BLOCK_LANES = {0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    // Subtracted from the input's last block, as unsigned bytes that saturate at 0: the high bit
+    // stays exactly in a lead byte of at least 0xF0, 0xE0, or 0xC0 in the block's last three
+    // lanes, a character the end of the input cuts short.
+    private static final byte[] LAST_BLOCK_LEADS = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x70, 0x60, 0x40};
 
     private VectorScanner() {}
 
@@ -234,6 +238,56 @@ final class VectorScanner
             pending = hasNonAsciiOrStop;
         }
         return characterStart(input, start, cursor);
+    }
+
+    /// Finishes the byte stop scan from `cursor` of an RE2 run that [#skipRe2Run] reads, which
+    /// stopped at `stop`. A stop at `end` or at the stop byte is where the run stops, and returns
+    /// `stop`. At a non-ASCII byte, this checks the input's last block, the 16 bytes before `end`:
+    /// the input is eligible when `cursor <= end - 16 < stop < end` and `end >= 19`, so the three
+    /// bytes before the block can be read. Eligible input returns where the run stops, the block's
+    /// first `stopByte` or `end`, when the run reads every character before it, and `-1` when the
+    /// block holds a sequence the run may reject before that, where the caller walks by character.
+    /// Ineligible input returns `-1`. A short run with a few non-ASCII characters near the end,
+    /// such as a quoted field's, takes this one check rather than the walk by character.
+    ///
+    /// A lane is rejected on the checks of [#skipRe2Run] other than the stop byte, and where a lead
+    /// byte in the last three lanes starts a character the end cuts short; the run stops at the
+    /// first stop byte when no lane up to it is rejected. Unlike skipRe2Run's first block, the
+    /// lanes the bytes before the block reach are not cleared: a lead byte there that expects a
+    /// continuation byte in the block expects one in its first lane, which holds ASCII text before
+    /// `stop`, so that lane is rejected and the walk decides; the check never passes a character
+    /// the run rejects.
+    /// Copied as `VectorScanKernelSupport.findRe2LastBlockStop`; keep the copy in step.
+    static int findRe2LastBlockStop(byte[] input, int cursor, int stop, int end, int stopByte)
+    {
+        if (stop == end || input[stop] >= 0) {
+            return stop;
+        }
+        int block = end - SPECIES.length();
+        if (stop <= block || cursor > block || block < 3) {
+            return -1;
+        }
+        // skipRe2Run's SVE form on every platform, which keeps this within C2's inlining limit,
+        // with the stop byte apart and the end's lead bytes added.
+        ByteVector bytes = ByteVector.fromArray(SPECIES, input, block);
+        ByteVector expected = ByteVector.fromArray(SPECIES, input, block - 1).lanewise(VectorOperators.SUSUB, (byte) 0x40)
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, input, block - 2).lanewise(VectorOperators.SUSUB, (byte) 0x60))
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, input, block - 3).lanewise(VectorOperators.SUSUB, (byte) 0x70));
+        ByteVector shifted = bytes.lanewise(VectorOperators.ADD, (byte) 0x40);
+        VectorMask<Byte> rejected = shifted.lanewise(VectorOperators.SUSUB, (byte) 0x40).lanewise(VectorOperators.XOR, expected)
+                .lanewise(VectorOperators.OR, ByteVector.broadcast(SPECIES, (byte) 0x81).lanewise(VectorOperators.SUSUB, shifted))
+                .lanewise(VectorOperators.OR, bytes.lanewise(VectorOperators.SUSUB, (byte) 0x75))
+                .lanewise(VectorOperators.OR, bytes.lanewise(VectorOperators.SUSUB, ByteVector.fromArray(SPECIES, LAST_BLOCK_LEADS, 0)))
+                .compare(VectorOperators.LT, (byte) 0);
+        VectorMask<Byte> stops = ByteVector.broadcast(SPECIES, (byte) (stopByte >= 0 ? 0x80 : 0))
+                .lanewise(VectorOperators.SUSUB, bytes.lanewise(VectorOperators.XOR, (byte) Math.max(stopByte, 0)))
+                .compare(VectorOperators.LT, (byte) 0);
+        int rejectedLane = rejected.firstTrue();
+        int stopLane = stops.firstTrue();
+        if (stopLane < rejectedLane) {
+            return block + stopLane;
+        }
+        return rejectedLane == SPECIES.length() ? end : -1;
     }
 
     // Returns `position`, or the lead byte of a character that starts in the three bytes before it,

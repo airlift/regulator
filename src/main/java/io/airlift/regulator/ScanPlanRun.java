@@ -517,14 +517,21 @@ final class ScanPlanRun
         return cursor;
     }
 
-    /// For a run of every character except the ASCII `delimiter`: returns the position
-    /// where [#re2Match] stops when `delimiter` is there, or `-1` when the run
-    /// fails or stops at a rejected sequence or the end.
+    /// For an unbounded run, with a minimum of at most one, of every character except the
+    /// ASCII `delimiter`: returns the position where [#re2Match] stops when `delimiter` is
+    /// there, or `-1` when the run fails or stops at a rejected sequence or the end.
     /// Copied as `ScanKernelSupport.re2RunMatchBefore`; keep the copy in step.
     int re2MatchBefore(byte[] input, int cursor, int end, byte delimiter)
     {
-        int stop = re2Match(input, cursor, end);
-        return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
+        // ASCII text stops at the delimiter alone, and only a stop at non-ASCII text reads
+        // characters, from there. Masking the ASCII delimiter shows C2 that it is not negative,
+        // so the stop scan's choice of needle and bound folds away.
+        int stop = re2ByteStop(input, cursor, end, delimiter & 0x7F);
+        if (stop < end && input[stop] < 0) {
+            stop = VectorSupport.isAvailable() ? re2ScanNonAscii(input, cursor, stop, end, delimiter) : re2Scan(input, stop, end);
+            return stop - cursor >= minimum && stop < end && input[stop] == delimiter ? stop : -1;
+        }
+        return stop - cursor >= minimum && stop < end ? stop : -1;
     }
 
     // Copied as ScanKernelSupport.re2RunMemberWidth; keep the copy in step.
@@ -575,22 +582,55 @@ final class ScanPlanRun
     }
 
     // re2Scan with vectors for a run that excludes at most one ASCII byte, `stopByte`, or none
-    // when it is NO_STOP_BYTE. ASCII text stops at that byte in the inlined stop scan, so a
-    // stop there needs no member lookup. A stretch of non-ASCII text takes the out-of-line
-    // validating skip, and the walk by character from where it returns finds the exact stop
-    // within a block; less than a block of input is walked whole.
+    // when it is NO_STOP_BYTE. ASCII text stops at that byte in the stop scan, so a stop there
+    // needs no member lookup, and only a stop at non-ASCII text reaches the character reader.
+    // Every stop enters re2ScanNonAscii, whose last block's check returns any other stop at once.
     // Copied as ScanKernelSupport.re2RunScanBlocks; keep the copy in step.
     private static int re2ScanBlocks(byte[] input, int cursor, int end, int stopByte)
     {
+        return re2ScanNonAscii(input, cursor, re2ByteStop(input, cursor, end, stopByte), end, stopByte);
+    }
+
+    // The first byte at or after `cursor` that is `stopByte`, an ASCII byte or NO_STOP_BYTE,
+    // or non-ASCII, or `end` if there is none. Less than a block of input takes a counted loop
+    // with the vector scan's one compare: XORed with the stop byte, a byte is zero at it and
+    // negative when non-ASCII. With no stop byte the needle and the bound are both zero, so
+    // every ASCII byte, NUL included, passes and only a non-ASCII byte stops the loop.
+    // Copied as ScanKernelSupport.re2RunByteStop; keep the copy in step.
+    private static int re2ByteStop(byte[] input, int cursor, int end, int stopByte)
+    {
+        if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
+            return VectorScanner.findRe2ByteStop(input, cursor, end, stopByte);
+        }
+        int needle = Math.max(stopByte, 0);
+        int bound = stopByte >= 0 ? 1 : 0;
+        while (cursor < end && (input[cursor] ^ needle) >= bound) {
+            cursor++;
+        }
+        return cursor;
+    }
+
+    // re2ScanBlocks from `stop`, where the stop scan from `cursor` stopped. The last block's check
+    // comes first and returns a stop at `end` or the stop byte; where it cannot decide, the walk
+    // by character from the non-ASCII byte at `stop` finds the stop. re2ScanBlocks calls this for
+    // every stop, so its profile and the check's mature with the stop scan's, and C2 inlines both
+    // however few runs reach non-ASCII text.
+    // Copied as ScanKernelSupport.re2RunScanNonAscii; keep the copy in step.
+    private static int re2ScanNonAscii(byte[] input, int cursor, int stop, int end, int stopByte)
+    {
+        int lastBlockStop = VectorScanner.findRe2LastBlockStop(input, cursor, stop, end, stopByte);
+        return lastBlockStop >= 0 ? lastBlockStop : re2WalkNonAscii(input, stop, end, stopByte);
+    }
+
+    // re2ScanNonAscii by character from the non-ASCII byte at `cursor`. A stretch of non-ASCII
+    // text takes the out-of-line validating skip, and the walk by character from where it returns
+    // finds the exact stop within a block; less than a block of input is walked whole.
+    // Copied as ScanKernelSupport.re2RunWalkNonAscii; keep the copy in step.
+    private static int re2WalkNonAscii(byte[] input, int cursor, int end, int stopByte)
+    {
         while (true) {
             if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
-                cursor = VectorScanner.findRe2ByteStop(input, cursor, end, stopByte);
-                if (cursor == end || input[cursor] >= 0) {
-                    return cursor;
-                }
-                if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
-                    cursor = VectorScanner.skipRe2Run(input, cursor, end, stopByte);
-                }
+                cursor = VectorScanner.skipRe2Run(input, cursor, end, stopByte);
             }
             int limit = re2WalkLimit(cursor, end);
             while (cursor < limit) {
@@ -610,6 +650,12 @@ final class ScanPlanRun
             }
             if (cursor >= end) {
                 return cursor;
+            }
+            if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
+                cursor = VectorScanner.findRe2ByteStop(input, cursor, end, stopByte);
+                if (cursor == end || input[cursor] >= 0) {
+                    return cursor;
+                }
             }
         }
     }

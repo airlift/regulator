@@ -1826,16 +1826,21 @@ byte operations instead of an automaton.
   bytes back. Regulator: the check narrowed to RE2's lenient reading, fused
   with the run's stop byte, refined by a walk by character, and its
   one-compare form on 128-bit SVE.
-- **Where:** `VectorScanner.skipRe2Run`, `ScanPlanRun.re2ScanBlocks`,
-  `VectorScanKernelSupport.skipRe2Run`
+- **Where:** `VectorScanner.skipRe2Run` and `VectorScanner.findRe2LastBlockStop`
+  (copies in `VectorScanKernelSupport`), and `ScanPlanRun.re2ScanBlocks` (copy
+  `ScanKernelSupport.re2RunScanBlocks`)
 - **Applies when:** RE2 runs, in every language's plans, that hold every
   non-ASCII character and every ASCII byte but at most one, such as `[^"]*`,
   `.*`, and `(?s).*`, when the Vector API is available and at least 16 bytes
-  remain at a non-ASCII byte
-- **What it does:** The run's ASCII stop scan stays inline. At a non-ASCII
-  byte, an out-of-line skip checks 16-byte blocks: a block passes when it holds
-  no stop byte, no `C0`, `C1`, or `F5`-`FF`, and a continuation byte exactly
-  where a lead byte one, two, or three bytes before it expects one. Unlike a
+  remain at a non-ASCII byte, or the run passed ASCII text to a non-ASCII byte
+  in the input's last 16 bytes from at least 16 bytes before the end
+- **What it does:** The run's ASCII stop scan stays inline; under a block of
+  input it is a counted byte loop with the same one compare, so a short ASCII
+  run, such as a quoted field's, never enters the walk by character, and a
+  delimited capture accepts its delimiter there. At a non-ASCII byte, an
+  out-of-line skip checks 16-byte blocks: a block passes when it holds no stop
+  byte, no `C0`, `C1`, or `F5`-`FF`, and a continuation byte exactly where a
+  lead byte one, two, or three bytes before it expects one. Unlike a
   UTF-8 validator, it does not reject overlong three- and four-byte forms,
   encoded surrogates, or values above U+10FFFF, because the engine's `.`
   accepts them. A block of ASCII alone passes on the stop scan's one compare
@@ -1843,6 +1848,12 @@ byte operations instead of an automaton.
   that fails, the skip returns the boundary of the character there, and a
   walk by character finds the exact stop. On SVE each check sets a byte's
   high bit by unsigned saturating subtraction, and one compare tests their OR.
+  A non-ASCII byte in the input's last block, such as a short quoted field's
+  `München 東京`, instead takes one inlined check of that block in the SVE
+  form on every platform: it returns the first stop byte, or the end, when no
+  check fails before it and no lead byte in the last three lanes starts a
+  character the end cuts short, and otherwise leaves the stop to the walk by
+  character.
   A long mixed-script `(?s)^([^/]+)/.*$` tail makes about 2 character reads
   per row instead of about 441, with the skip covering 4,077 of 4,095 bytes.
 
