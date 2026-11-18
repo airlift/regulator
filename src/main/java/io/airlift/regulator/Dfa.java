@@ -92,6 +92,8 @@ final class Dfa
     private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 16;
     // The matching states one many-match byte scan holds for its caller to record.
     static final int MANY_MATCH_SCAN_STATES = 64;
+    // The first scan buffer fills one cache line; a search whose scan fills it switches to the full batch.
+    static final int MANY_MATCH_FIRST_SCAN_STATES = 11;
     // Sidecar rows and entries are eight-byte aligned, so their low bits encode computed terminals.
     private static final long ABSOLUTE_POINTER_TAG_MASK = Long.BYTES - 1;
     private static final long ABSOLUTE_POINTER_MATCH_TAG = 1;
@@ -2735,6 +2737,9 @@ final class Dfa
                         matched = true;
                         recordMatches(dfa.stateData(tables, stateOffset), matches);
                         if (matchedStates == null) {
+                            matchedStates = new int[MANY_MATCH_FIRST_SCAN_STATES + 1];
+                        }
+                        else if (matchedStates.length == MANY_MATCH_FIRST_SCAN_STATES + 1 && matchedStates[0] == MANY_MATCH_FIRST_SCAN_STATES) {
                             matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
                         }
                     }
