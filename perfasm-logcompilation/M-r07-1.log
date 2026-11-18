@@ -1,0 +1,1482 @@
+bundle e24m revision 0db30b513a5cf79e685be74b1120afdd2c5516a2
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/home/ec2-user/bundles/deps/jars/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /home/ec2-user/jvmwrap.sh
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+PrintCompilation -XX:+PrintInlining -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D24/M-r07-1.xml
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 5 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkRe2ScanPlan.contains
+# Parameters: (dotAll = false, generateBytecode = false, scanPlan = true, workload = FOLDED_UNANCHORED)
+
+# Run progress: 0.00% complete, ETA 00:00:10
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfAsmProfiler 
+# Profilers consume stdout and stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   1: 163.932 ns/op
+# Warmup Iteration   2: 66.088 ns/op
+# Warmup Iteration   3: 64.092 ns/op
+# Warmup Iteration   4: 42.480 ns/op
+# Warmup Iteration   5: 44.117 ns/op
+Iteration   1: 30.600 ns/op
+Iteration   2: 31.269 ns/op
+Iteration   3: 29.725 ns/op
+Iteration   4: 43.899 ns/op
+Iteration   5: 30.281 ns/op
+# Processing profiler results: LinuxPerfAsmProfiler 
+
+
+Result "io.airlift.regulator.BenchmarkRe2ScanPlan.contains":
+  33.155 ±(99.9%) 23.227 ns/op [Average]
+  (min, avg, max) = (29.725, 33.155, 43.899), stdev = 6.032
+  CI (99.9%): [9.928, 56.381] (assumes normal distribution)
+
+Secondary result "io.airlift.regulator.BenchmarkRe2ScanPlan.contains:asm":
+PrintAssembly processed: 198197 total address lines.
+Perf output processed (skipped 8.804 seconds):
+ Column 1: cycles (6008 events)
+ Column 2: instructions (5746 events)
+
+Hottest code regions (>0.50% "cycles" events):
+ Event counts are percents of total event count.
+
+....[Hottest Region 1]..............................................................................
+c2, level 4, io.airlift.regulator.jmh_generated.BenchmarkRe2ScanPlan_contains_jmhTest::contains_avgt_jmhStub, version 2, compile id 982 
+
+ <region is too big to display, has 1409 lines, but threshold is 1000>
+....................................................................................................
+  54.59%    53.57%  <total for region 1>
+
+....[Hottest Region 2]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+
+                                    # parm5:    [sp+0x90]   = &apos;[I&apos;  (sp of caller)
+                                    0x00007fcfaff16682:   mov    0x8(%rsi),%r10d
+                                    0x00007fcfaff16686:   cmp    0x8(%rax),%r10d
+                                    0x00007fcfaff1668a:   jne    0x00007fcfaf9865e0           ;   {runtime_call Shared Runtime ic_miss_blob}
+                                  [Verified Entry Point]
+   0.80%     0.92%                  0x00007fcfaff16690:   mov    %eax,-0x14000(%rsp)
+                                    0x00007fcfaff16697:   push   %rbp
+                                    0x00007fcfaff16698:   sub    $0x80,%rsp
+                                    0x00007fcfaff1669f:   nop
+                                    0x00007fcfaff166a0:   cmpl   $0x1,0x20(%r15)
+                                    0x00007fcfaff166a8:   jne    0x00007fcfaff172fa           ;*synchronization entry
+                                                                                              ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@-1 (line 1897)
+                                    0x00007fcfaff166ae:   mov    %edi,0x18(%rsp)
+                                    0x00007fcfaff166b2:   mov    %r9d,0xc(%rsp)
+   0.78%     0.75%                  0x00007fcfaff166b7:   mov    %r8d,0x2c(%rsp)
+                                    0x00007fcfaff166bc:   mov    %ecx,0x28(%rsp)
+                                    0x00007fcfaff166c0:   mov    %rdx,0x20(%rsp)
+                                    0x00007fcfaff166c5:   mov    %rsi,(%rsp)
+                                    0x00007fcfaff166c9:   mov    0x90(%rsp),%r10
+                                    0x00007fcfaff166d1:   test   %r10,%r10
+                                    0x00007fcfaff166d4:   jne    0x00007fcfaff16db0           ;*ifnull {reexecute=0 rethrow=0 return_oop=0}
+                                                                                              ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@2 (line 1897)
+                                    0x00007fcfaff166da:   mov    %r9d,0x48(%rsp)
+                                    0x00007fcfaff166df:   mov    %r9d,0x40(%rsp)
+   0.93%     0.64%                  0x00007fcfaff166e4:   xor    %r10d,%r10d
+                    ╭               0x00007fcfaff166e7:   jmp    0x00007fcfaff167be
+   0.02%            │    ↗          0x00007fcfaff166ec:   mov    %r13,0x10(%rsp)
+                    │    │          0x00007fcfaff166f1:   mov    %r11d,%ebp
+   0.65%     0.71%  │    │          0x00007fcfaff166f4:   mov    %edi,0x90(%rsp)
+                    │    │          0x00007fcfaff166fb:   mov    %r13,%rsi
+                    │    │          0x00007fcfaff166fe:   mov    0x20(%rsp),%rdx
+                    │    │          0x00007fcfaff16703:   mov    0x40(%rsp),%ecx
+   0.03%     0.03%  │    │          0x00007fcfaff16707:   mov    0x2c(%rsp),%r8d
+                    │    │          0x00007fcfaff1670c:   mov    0xc(%rsp),%r11d
+             0.02%  │    │          0x00007fcfaff16711:   mov    %r11d,0x94(%rsp)
+             0.02%  │    │          0x00007fcfaff16719:   xchg   %ax,%ax
+   0.60%     0.59%  │    │          0x00007fcfaff1671b:   call   0x00007fcfaff17317           ; ImmutableOopMap {rbp=NarrowOop [0]=Oop [16]=Oop [32]=Oop }
+                    │    │                                                                    ;*invokevirtual matchesAsciiFolded {reexecute=0 rethrow=0 return_oop=0}
+                    │    │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@210 (line 1931)
+                    │    │                                                                    ;   {optimized virtual_call}
+   0.02%     0.02%  │    │          0x00007fcfaff16720:   nopl   0x198(%rax,%rax,1)           ;*invokevirtual matchesAsciiFolded {reexecute=0 rethrow=0 return_oop=0}
+                    │    │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@210 (line 1931)
+                    │    │                                                                    ;   {post_call_nop}
+   0.03%            │    │          0x00007fcfaff16728:   test   %eax,%eax
+                    │╭   │          0x00007fcfaff1672a:   je     0x00007fcfaff16a60           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                    ││   │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@213 (line 1931)
+   0.08%     0.03%  ││   │          0x00007fcfaff16730:   mov    0x30(%r12,%rbp,8),%r11d      ;*getfield literal {reexecute=0 rethrow=0 return_oop=0}
+                    ││   │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@220 (line 1932)
+   0.15%     0.03%  ││   │          0x00007fcfaff16735:   mov    0xc(%r12,%r11,8),%edx        ; implicit exception: dispatches to 0x00007fcfaff1727e
+   0.32%     0.42%  ││   │          0x00007fcfaff1673a:   add    0x40(%rsp),%edx              ;*iadd {reexecute=0 rethrow=0 return_oop=0}
+                    ││   │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@224 (line 1932)
+                    ││   │          0x00007fcfaff1673e:   mov    0x18(%rsp),%r11d
+                    ││   │          0x00007fcfaff16743:   xor    %r10d,%r10d
+                    ││   │          0x00007fcfaff16746:   mov    0x20(%rsp),%r9
+   0.02%            ││   │          0x00007fcfaff1674b:   mov    0x48(%rsp),%r8d
+                    ││   │          0x00007fcfaff16750:   mov    0x90(%rsp),%edi              ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                    ││   │                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@227 (line 1932)
+   0.18%     0.24%  ││   │     ↗↗↗  0x00007fcfaff16757:   test   %r10d,%r10d
+                    ││╭  │     │││  0x00007fcfaff1675a:   je     0x00007fcfaff167a7           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                    │││  │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@990 (line 2055)
+   0.02%            │││  │     │││  0x00007fcfaff1675c:   movslq %r8d,%rax
+   0.12%     0.07%  │││  │     │││  0x00007fcfaff1675f:   movslq 0xc(%rsp),%r10
+                    │││  │     │││  0x00007fcfaff16764:   shl    $0x20,%rax
+   0.08%     0.21%  │││  │     │││  0x00007fcfaff16768:   or     %r10,%rax
+                    │││  │     │││  0x00007fcfaff1676b:   not    %rax                         ;*lxor {reexecute=0 rethrow=0 return_oop=0}
+                    │││  │     │││                                                            ; - io.airlift.regulator.ScanPlan::failedAttempt@11 (line 2091)
+                    │││  │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@1002 (line 2057)
+   0.02%     0.07%  │││╭ │     │││  0x00007fcfaff1676e:   jmp    0x00007fcfaff16794
+   0.08%     0.26%  ││││↗│     │││  0x00007fcfaff16770:   mov    (%rsp),%r11
+   0.07%     0.05%  ││││││     │││  0x00007fcfaff16774:   movzbl 0x22(%r11),%ebp              ;*getfield partialMatch {reexecute=0 rethrow=0 return_oop=0}
+                    ││││││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@52 (line 1912)
+   0.02%            ││││││     │││  0x00007fcfaff16779:   test   %ebp,%ebp
+                    ││││││     │││  0x00007fcfaff1677b:   je     0x00007fcfaff17068           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                    ││││││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@55 (line 1912)
+   0.03%     0.12%  ││││││     │││  0x00007fcfaff16781:   mov    0x18(%rsp),%r8d
+                    ││││││     │││  0x00007fcfaff16786:   test   %r8d,%r8d
+                    ││││││     │││  0x00007fcfaff16789:   jne    0x00007fcfaff17088           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                    ││││││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@60 (line 1912)
+   0.10%     0.05%  ││││││     │││  0x00007fcfaff1678f:   movslq 0x40(%rsp),%rax              ;*synchronization entry
+                    ││││││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@-1 (line 1897)
+   0.12%     0.10%  │││↘││     │││  0x00007fcfaff16794:   add    $0x80,%rsp
+   0.15%     0.12%  │││ ││     │││  0x00007fcfaff1679b:   pop    %rbp
+   0.17%     0.16%  │││ ││     │││  0x00007fcfaff1679c:   cmp    0x28(%r15),%rsp              ;   {poll_return}
+                    │││ ││     │││  0x00007fcfaff167a0:   ja     0x00007fcfaff172e4
+   0.25%     0.17%  │││ ││     │││  0x00007fcfaff167a6:   ret                                 ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                    │││ ││     │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                    │││ ││     │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                    │││ ││     │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                    │││ ││     │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                    │││ ││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.10%     0.10%  ││↘ ││     │││  0x00007fcfaff167a7:   mov    0x30(%r15),%rcx              ; ImmutableOopMap {r9=Oop [0]=Oop }
+                    ││  ││     │││                                                            ;*goto {reexecute=1 rethrow=0 return_oop=0}
+                    ││  ││     │││                                                            ; - (reexecute) io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@1138 (line 2081)
+   0.40%     0.66%  ││  ││     │││  0x00007fcfaff167ab:   test   %eax,(%rcx)                  ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                    ││  ││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@1138 (line 2081)
+                    ││  ││     │││                                                            ;   {poll}
+   0.13%     0.23%  ││  ││     │││  0x00007fcfaff167ad:   mov    %edx,0x40(%rsp)
+   0.17%     0.40%  ││  ││     │││  0x00007fcfaff167b1:   mov    %r9,0x20(%rsp)
+   0.08%     0.17%  ││  ││     │││  0x00007fcfaff167b6:   mov    %edi,%r10d
+   0.12%     0.26%  ││  ││     │││  0x00007fcfaff167b9:   mov    %r8d,0x48(%rsp)              ;*iconst_0 {reexecute=0 rethrow=0 return_oop=0}
+                    ││  ││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@38 (line 1910)
+   0.15%     0.37%  ↘│  ││     │││  0x00007fcfaff167be:   mov    (%rsp),%r11
+   0.25%     0.17%   │  ││     │││  0x00007fcfaff167c2:   mov    0x2c(%r11),%r11d             ;*getfield steps {reexecute=0 rethrow=0 return_oop=0}
+                     │  ││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@44 (line 1911)
+   0.10%     0.12%   │  ││     │││  0x00007fcfaff167c6:   mov    0xc(%r12,%r11,8),%r9d        ; implicit exception: dispatches to 0x00007fcfaff17214
+                     │  ││     │││                                                            ;*arraylength {reexecute=0 rethrow=0 return_oop=0}
+                     │  ││     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@47 (line 1911)
+   0.57%     0.37%   │  ││     │││  0x00007fcfaff167cb:   cmp    %r9d,%r10d
+                     │  ╰│     │││  0x00007fcfaff167ce:   je     0x00007fcfaff16770           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+                     │   │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@48 (line 1911)
+   0.05%     0.19%   │   │     │││  0x00007fcfaff167d0:   lea    0x1(%r10),%edi
+   0.17%     0.40%   │   │     │││  0x00007fcfaff167d4:   cmp    %r9d,%r10d
+                     │   │     │││  0x00007fcfaff167d7:   jae    0x00007fcfaff16c87
+   0.98%     0.64%   │   │     │││  0x00007fcfaff167dd:   shl    $0x3,%r11
+   0.05%     0.02%   │   │     │││  0x00007fcfaff167e1:   mov    0x10(%r11,%r10,4),%r11d      ;*aaload {reexecute=0 rethrow=0 return_oop=0}
+                     │   │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@105 (line 1920)
+   0.28%     0.47%   │   │     │││  0x00007fcfaff167e6:   mov    0x2c(%r12,%r11,8),%r8d       ; implicit exception: dispatches to 0x00007fcfaff17228
+                     │   │     │││                                                            ;*getfield kind {reexecute=0 rethrow=0 return_oop=0}
+                     │   │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@110 (line 1921)
+   0.35%     0.68%   │   │     │││  0x00007fcfaff167eb:   mov    0xc(%r12,%r8,8),%ebp         ; implicit exception: dispatches to 0x00007fcfaff1723c
+                     │   │     │││                                                            ;*getfield ordinal {reexecute=0 rethrow=0 return_oop=0}
+                     │   │     │││                                                            ; - java.lang.Enum::ordinal@1 (line 128)
+                     │   │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@113 (line 1921)
+   0.52%     0.38%   │   │     │││  0x00007fcfaff167f0:   lea    (%r12,%r11,8),%r13           ;*aaload {reexecute=0 rethrow=0 return_oop=0}
+                     │   │     │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@105 (line 1920)
+   0.47%     0.44%   │   │     │││  0x00007fcfaff167f4:   cmp    $0x1,%ebp
+                     │   ╰     │││  0x00007fcfaff167f7:   je     0x00007fcfaff166ec           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@116 (line 1921)
+   0.05%     0.05%   │         │││  0x00007fcfaff167fd:   mov    0x2c(%rsp),%r9d
+   0.17%     0.30%   │         │││  0x00007fcfaff16802:   sub    0x40(%rsp),%r9d              ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@2 (line 602)
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │         │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.10%     0.24%   │         │││  0x00007fcfaff16807:   cmp    $0x8,%ebp
+                     │    ╭    │││  0x00007fcfaff1680a:   jne    0x00007fcfaff169d5           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@116 (line 1921)
+   0.05%             │    │    │││  0x00007fcfaff16810:   mov    0x18(%rsp),%ecx
+   0.02%     0.03%   │    │    │││  0x00007fcfaff16814:   test   %ecx,%ecx
+                     │    │    │││  0x00007fcfaff16816:   jne    0x00007fcfaff16f30           ;*ifne {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@613 (line 1991)
+   0.03%     0.02%   │    │    │││  0x00007fcfaff1681c:   mov    (%rsp),%r8
+   0.10%     0.07%   │    │    │││  0x00007fcfaff16820:   mov    0x30(%r8),%ebp               ;*getfield booleanTails {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@617 (line 1991)
+   0.32%     0.56%   │    │    │││  0x00007fcfaff16824:   mov    0xc(%r12,%rbp,8),%ecx        ; implicit exception: dispatches to 0x00007fcfaff172a4
+                     │    │    │││  0x00007fcfaff16829:   cmp    %ecx,%r10d
+                     │    │    │││  0x00007fcfaff1682c:   jae    0x00007fcfaff16d74
+                     │    │    │││  0x00007fcfaff16832:   lea    (%r12,%rbp,8),%r8
+                     │    │    │││  0x00007fcfaff16836:   movzbl 0x10(%r8,%r10,1),%ebp        ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@622 (line 1991)
+             0.09%   │    │    │││  0x00007fcfaff1683c:   test   %ebp,%ebp
+                     │    │    │││  0x00007fcfaff1683e:   jne    0x00007fcfaff16f74           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@623 (line 1991)
+   0.03%             │    │    │││  0x00007fcfaff16844:   mov    0x38(%r12,%r11,8),%r8d       ;*getfield run {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@657 (line 2001)
+             0.03%   │    │    │││  0x00007fcfaff16849:   mov    0x40(%r12,%r8,8),%ebp        ; implicit exception: dispatches to 0x00007fcfaff172bc
+                     │    │    │││                                                            ;*getfield maximum {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@1 (line 488)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.12%     0.12%   │    │    │││  0x00007fcfaff1684e:   test   %ebp,%ebp
+                     │    │    │││  0x00007fcfaff16850:   jge    0x00007fcfaff16fa8           ;*ifge {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@4 (line 488)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.40%     0.70%   │    │    │││  0x00007fcfaff16856:   mov    0x3c(%r12,%r8,8),%ebp        ;*getfield minimum {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@8 (line 488)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    │    │││  0x00007fcfaff1685b:   cmp    $0x1,%ebp
+                     │    │    │││  0x00007fcfaff1685e:   jg     0x00007fcfaff16fe4           ;*if_icmpgt {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@12 (line 488)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    │    │││  0x00007fcfaff16864:   mov    0xc(%r12,%r8,8),%ecx         ;*getfield re2StopByte {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@1 (line 553)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%             │    │    │││  0x00007fcfaff16869:   cmp    $0xfffffffe,%ecx
+                     │    │    │││  0x00007fcfaff1686c:   je     0x00007fcfaff17020           ;*if_icmpeq {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@6 (line 553)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%             │    │    │││  0x00007fcfaff16872:   lea    (%r12,%r8,8),%rax            ;*getfield run {reexecute=0 rethrow=0 return_oop=0}
+                     │    │    │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@657 (line 2001)
+             0.03%   │    │    │││  0x00007fcfaff16876:   cmp    $0x10,%r9d
+                     │    │╭   │││  0x00007fcfaff1687a:   jge    0x00007fcfaff16a85           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@5 (line 602)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.08%     0.05%   │    ││   │││  0x00007fcfaff16880:   xor    %r9d,%r9d
+   0.17%     0.09%   │    ││   │││  0x00007fcfaff16883:   xor    %esi,%esi
+   0.37%     0.44%   │    ││   │││  0x00007fcfaff16885:   mov    %ecx,%edx
+   0.02%             │    ││   │││  0x00007fcfaff16887:   cmp    %r9d,%ecx
+                     │    ││   │││  0x00007fcfaff1688a:   cmovl  %esi,%edx                    ;*invokestatic max {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@24 (line 605)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││   │││  0x00007fcfaff1688d:   test   %ecx,%ecx
+                     │    ││   │││  0x00007fcfaff1688f:   jl     0x00007fcfaff170bc           ;*iflt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@30 (line 606)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.03%   │    ││   │││  0x00007fcfaff16895:   mov    0x40(%rsp),%ebx
+                     │    ││   │││  0x00007fcfaff16899:   cmp    0x2c(%rsp),%ebx
+                     │    ││   │││  0x00007fcfaff1689d:   jge    0x00007fcfaff16c17           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@42 (line 607)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+             0.03%   │    ││   │││  0x00007fcfaff168a3:   mov    0x20(%rsp),%r9
+   0.07%             │    ││   │││  0x00007fcfaff168a8:   mov    0xc(%r9),%esi                ; implicit exception: dispatches to 0x00007fcfaff16e43
+                     │    ││   │││                                                            ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││   │││                                                            ;   {other}
+   0.40%     0.35%   │    ││   │││  0x00007fcfaff168ac:   cmp    %esi,%ebx
+                     │    ││   │││  0x00007fcfaff168ae:   jae    0x00007fcfaff16e43
+                     │    ││   │││  0x00007fcfaff168b4:   mov    %edx,0x90(%rsp)
+                     │    ││   │││  0x00007fcfaff168bb:   movslq %esi,%rdx
+             0.02%   │    ││   │││  0x00007fcfaff168be:   movslq 0x2c(%rsp),%r14
+   0.02%             │    ││   │││  0x00007fcfaff168c3:   lea    -0x1(%r14),%rsi
+   0.02%     0.02%   │    ││   │││  0x00007fcfaff168c7:   cmp    %rdx,%rsi
+                     │    ││   │││  0x00007fcfaff168ca:   jae    0x00007fcfaff16e3c
+   0.10%     0.03%   │    ││   │││  0x00007fcfaff168d0:   mov    0x40(%rsp),%ebp
+   0.12%     0.17%   │    ││   │││  0x00007fcfaff168d4:   inc    %ebp
+   0.33%     0.64%   │    ││   │││  0x00007fcfaff168d6:   mov    0x40(%rsp),%edx              ;*aload_0 {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@45 (line 607)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+             0.02%   │    ││↗  │││  0x00007fcfaff168da:   movsbl 0x10(%r9,%rdx,1),%esi        ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.02%   │    │││  │││  0x00007fcfaff168e0:   xor    0x90(%rsp),%esi
+                     │    │││  │││  0x00007fcfaff168e7:   cmp    $0x1,%esi
+                     │    │││  │││  0x00007fcfaff168ea:   jl     0x00007fcfaff16b19           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    │││  │││  0x00007fcfaff168f0:   inc    %edx                         ;*iinc {reexecute=0 rethrow=0 return_oop=0}
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@56 (line 608)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    │││  │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.02%   │    │││  │││  0x00007fcfaff168f2:   cmp    %ebp,%edx
+                     │    ││╰  │││  0x00007fcfaff168f4:   jl     0x00007fcfaff168da           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@42 (line 607)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.03%     0.02%   │    ││   │││  0x00007fcfaff168f6:   add    $0xfffffffffffffffd,%r14
+   0.05%     0.07%   │    ││   │││  0x00007fcfaff168fa:   mov    $0xffffffff80000000,%rsi
+   0.17%     0.31%   │    ││   │││  0x00007fcfaff16901:   cmp    $0xffffffff80000000,%r14
+                     │    ││   │││  0x00007fcfaff16908:   cmovl  %rsi,%r14
+                     │    ││   │││  0x00007fcfaff1690c:   mov    %r14d,%r14d
+                     │    ││   │││  0x00007fcfaff1690f:   cmp    %r14d,%edx
+                     │    ││   │││  0x00007fcfaff16912:   jge    0x00007fcfaff16c5a
+   0.02%             │    ││   │││  0x00007fcfaff16918:   mov    %r14d,%ebp
+                     │    ││   │││  0x00007fcfaff1691b:   sub    %edx,%ebp
+                     │    ││   │││  0x00007fcfaff1691d:   xor    %esi,%esi
+                     │    ││   │││  0x00007fcfaff1691f:   cmp    %edx,%r14d
+   0.03%     0.02%   │    ││   │││  0x00007fcfaff16922:   cmovl  %esi,%ebp
+   0.12%     0.10%   │    ││   │││  0x00007fcfaff16925:   cmp    $0xfa0,%ebp
+                     │    ││   │││  0x00007fcfaff1692b:   mov    $0xfa0,%esi
+                     │    ││   │││  0x00007fcfaff16930:   cmova  %esi,%ebp
+                     │    ││   │││  0x00007fcfaff16933:   add    %edx,%ebp
+             0.02%   │    ││   │││  0x00007fcfaff16935:   data16 data16 nopw 0x0(%rax,%rax,1) ;*aload_0 {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@45 (line 607)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.22%     0.21%   │    ││ ↗ │││  0x00007fcfaff16940:   movsbl 0x10(%r9,%rdx,1),%esi        ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.05%     0.03%   │    ││ │ │││  0x00007fcfaff16946:   xor    0x90(%rsp),%esi
+   0.18%     0.28%   │    ││ │ │││  0x00007fcfaff1694d:   cmp    $0x1,%esi
+                     │    ││ │ │││  0x00007fcfaff16950:   jl     0x00007fcfaff16b19           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││ │ │││  0x00007fcfaff16956:   vmovq  %rax,%xmm1
+                     │    ││ │ │││  0x00007fcfaff1695b:   vmovd  %ecx,%xmm0
+                     │    ││ │ │││  0x00007fcfaff1695f:   mov    %r8d,%eax
+   0.02%             │    ││ │ │││  0x00007fcfaff16962:   mov    %r11d,%esi
+                     │    ││ │ │││  0x00007fcfaff16965:   mov    %r10d,%r8d
+   0.17%     0.17%   │    ││ │ │││  0x00007fcfaff16968:   movslq %edx,%rcx
+   0.03%     0.09%   │    ││ │ │││  0x00007fcfaff1696b:   movsbl 0x11(%r9,%rcx,1),%r11d       ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.17%     0.28%   │    ││ │ │││  0x00007fcfaff16971:   xor    0x90(%rsp),%r11d
+                     │    ││ │ │││  0x00007fcfaff16979:   cmp    $0x1,%r11d
+                     │    ││ │ │││  0x00007fcfaff1697d:   jl     0x00007fcfaff16b00           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││ │ │││  0x00007fcfaff16983:   movsbl 0x12(%r9,%rcx,1),%r10d       ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││ │ │││  0x00007fcfaff16989:   xor    0x90(%rsp),%r10d
+   0.02%     0.02%   │    ││ │ │││  0x00007fcfaff16991:   cmp    $0x1,%r10d
+                     │    ││ │ │││  0x00007fcfaff16995:   jl     0x00007fcfaff16bfd           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.03%     0.03%   │    ││ │ │││  0x00007fcfaff1699b:   movsbl 0x13(%r9,%rcx,1),%r11d       ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.08%     0.17%   │    ││ │ │││  0x00007fcfaff169a1:   xor    0x90(%rsp),%r11d
+   0.03%     0.05%   │    ││ │ │││  0x00007fcfaff169a9:   cmp    $0x1,%r11d                   ;   {other}
+                     │    ││ │ │││  0x00007fcfaff169ad:   jl     0x00007fcfaff16b04           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.20%     0.37%   │    ││ │ │││  0x00007fcfaff169b3:   add    $0x4,%edx                    ;*iinc {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@56 (line 608)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││ │ │││  0x00007fcfaff169b6:   cmp    %ebp,%edx
+                     │    ││ │ │││  0x00007fcfaff169b8:   jge    0x00007fcfaff16c25           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@42 (line 607)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │    ││ │ │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                     │    ││ │ │││  0x00007fcfaff169be:   mov    %r8d,%r10d
+                     │    ││ │ │││  0x00007fcfaff169c1:   mov    %esi,%r11d
+             0.02%   │    ││ │ │││  0x00007fcfaff169c4:   mov    %eax,%r8d
+                     │    ││ │ │││  0x00007fcfaff169c7:   vmovd  %xmm0,%ecx
+             0.03%   │    ││ │ │││  0x00007fcfaff169cb:   vmovq  %xmm1,%rax
+                     │    ││ ╰ │││  0x00007fcfaff169d0:   jmp    0x00007fcfaff16940
+   0.05%     0.07%   │    ↘│   │││  0x00007fcfaff169d5:   cmp    $0x1,%ebp
+                     │     │   │││  0x00007fcfaff169d8:   ja     0x00007fcfaff16cc0           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                     │     │   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@116 (line 1921)
+   0.15%     0.44%   │     │   │││  0x00007fcfaff169de:   mov    0x30(%r12,%r11,8),%r10d      ;*getfield literal {reexecute=0 rethrow=0 return_oop=0}
+                     │     │   │││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@1 (line 2851)
+                     │     │   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.08%     0.24%   │     │   │││  0x00007fcfaff169e3:   mov    0xc(%r12,%r10,8),%ecx        ; implicit exception: dispatches to 0x00007fcfaff17250
+                     │     │   │││                                                            ;*arraylength {reexecute=0 rethrow=0 return_oop=0}
+                     │     │   │││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@4 (line 2851)
+                     │     │   │││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.10%     0.03%   │     │   │││  0x00007fcfaff169e8:   cmp    %r9d,%ecx
+                     │     │  ╭│││  0x00007fcfaff169eb:   jle    0x00007fcfaff16a0b           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                     │     │  ││││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@8 (line 2851)
+                     │     │  ││││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+                     │     │  ││││  0x00007fcfaff169ed:   mov    0x18(%rsp),%r11d
+                     │     │  ││││  0x00007fcfaff169f2:   mov    0x40(%rsp),%edx
+                     │     │  ││││  0x00007fcfaff169f6:   mov    $0x1,%r10d
+   0.02%             │     │  ││││  0x00007fcfaff169fc:   mov    0x20(%rsp),%r9
+   0.02%     0.05%   │     │  ││││  0x00007fcfaff16a01:   mov    0x48(%rsp),%r8d
+                     │     │  │╰││  0x00007fcfaff16a06:   jmp    0x00007fcfaff16757
+   0.02%             │     │  ↘ ││  0x00007fcfaff16a0b:   cmp    $0x10,%ecx
+                     │     │    ││  0x00007fcfaff16a0e:   jg     0x00007fcfaff16ef0           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@20 (line 2854)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+             0.09%   │     │    ││  0x00007fcfaff16a14:   mov    0x20(%r12,%r11,8),%ebp       ;*getfield width {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@55 (line 2857)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.13%     0.28%   │     │    ││  0x00007fcfaff16a19:   cmp    $0x1,%ebp
+                     │     │    ││  0x00007fcfaff16a1c:   jne    0x00007fcfaff16d38           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@58 (line 2857)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.07%     0.19%   │     │    ││  0x00007fcfaff16a22:   mov    0x20(%rsp),%r9
+                     │     │    ││  0x00007fcfaff16a27:   mov    0xc(%r9),%r10d               ; implicit exception: dispatches to 0x00007fcfaff17290
+   0.10%     0.24%   │     │    ││  0x00007fcfaff16a2b:   mov    0x40(%rsp),%edx
+             0.02%   │     │    ││  0x00007fcfaff16a2f:   cmp    %r10d,%edx
+                     │     │    ││  0x00007fcfaff16a32:   jae    0x00007fcfaff16d00
+             0.03%   │     │    ││  0x00007fcfaff16a38:   movsbq 0x10(%r9,%rdx,1),%r10        ;*i2l {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@107 (line 2858)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+             0.03%   │     │    ││  0x00007fcfaff16a3e:   mov    0x10(%r12,%r11,8),%r8        ;*getfield first {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@109 (line 2858)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.05%     0.02%   │     │    ││  0x00007fcfaff16a43:   cmp    %r8,%r10
+                     │     │    ││  0x00007fcfaff16a46:   jne    0x00007fcfaff16eac           ;*ifne {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan$Step::matches@113 (line 2858)
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.15%     0.24%   │     │    ││  0x00007fcfaff16a4c:   add    %ecx,%edx                    ;*iadd {reexecute=0 rethrow=0 return_oop=0}
+                     │     │    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@192 (line 1924)
+   0.02%     0.09%   │     │    ││  0x00007fcfaff16a4e:   mov    0x18(%rsp),%r11d
+                     │     │    ││  0x00007fcfaff16a53:   xor    %r10d,%r10d
+   0.13%     0.16%   │     │    ││  0x00007fcfaff16a56:   mov    0x48(%rsp),%r8d
+   0.03%     0.02%   │     │    ╰│  0x00007fcfaff16a5b:   jmp    0x00007fcfaff16757
+   0.02%     0.02%   ↘     │     │  0x00007fcfaff16a60:   mov    0x18(%rsp),%r11d
+   0.20%     0.09%         │     │  0x00007fcfaff16a65:   mov    0x40(%rsp),%edx
+                           │     │  0x00007fcfaff16a69:   mov    $0x1,%r10d
+                           │     │  0x00007fcfaff16a6f:   mov    0x20(%rsp),%r9
+                           │     │  0x00007fcfaff16a74:   mov    0x48(%rsp),%r8d
+                           │     │  0x00007fcfaff16a79:   mov    0x90(%rsp),%edi
+                           │     ╰  0x00007fcfaff16a80:   jmp    0x00007fcfaff16757
+                           ↘        0x00007fcfaff16a85:   mov    %rax,0x38(%rsp)
+   0.02%                            0x00007fcfaff16a8a:   mov    %ecx,0x30(%rsp)
+   0.15%     0.05%                  0x00007fcfaff16a8e:   mov    %r8d,0x1c(%rsp)
+                                    0x00007fcfaff16a93:   mov    %r13,0x10(%rsp)
+                                    0x00007fcfaff16a98:   mov    %r11d,0x8(%rsp)
+                                    0x00007fcfaff16a9d:   mov    %edi,0x94(%rsp)
+                                    0x00007fcfaff16aa4:   mov    %r10d,0x90(%rsp)             ;   {other}
+             0.03%                  0x00007fcfaff16aac:   mov    0x20(%rsp),%rsi
+             0.02%                  0x00007fcfaff16ab1:   mov    0x40(%rsp),%edx
+   0.02%     0.07%                  0x00007fcfaff16ab5:   mov    0x2c(%rsp),%ecx
+   0.05%     0.05%                  0x00007fcfaff16ab9:   mov    0x30(%rsp),%r8d
+                                    0x00007fcfaff16abe:   nop
+                                    0x00007fcfaff16abf:   call   0x00007fcfaf9874e0           ; ImmutableOopMap {[0]=Oop [8]=NarrowOop [16]=Oop [28]=NarrowOop [32]=Oop [56]=Oop }
+                                                                                              ;*invokestatic findRe2ByteStop {reexecute=0 rethrow=0 return_oop=0}
+                                                                                              ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@18 (line 603)
+                                                                                              ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                              ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                              ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                              ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+....................................................................................................
+  15.26%    19.06%  <total for region 2>
+
+....[Hottest Region 3]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+
+             0.03%              0x00007fcfaff16a38:   movsbq 0x10(%r9,%rdx,1),%r10        ;*i2l {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlan$Step::matches@107 (line 2858)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+             0.03%              0x00007fcfaff16a3e:   mov    0x10(%r12,%r11,8),%r8        ;*getfield first {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlan$Step::matches@109 (line 2858)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.05%     0.02%              0x00007fcfaff16a43:   cmp    %r8,%r10
+                                0x00007fcfaff16a46:   jne    0x00007fcfaff16eac           ;*ifne {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlan$Step::matches@113 (line 2858)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@178 (line 1923)
+   0.15%     0.24%              0x00007fcfaff16a4c:   add    %ecx,%edx                    ;*iadd {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@192 (line 1924)
+   0.02%     0.09%              0x00007fcfaff16a4e:   mov    0x18(%rsp),%r11d
+                                0x00007fcfaff16a53:   xor    %r10d,%r10d
+   0.13%     0.16%              0x00007fcfaff16a56:   mov    0x48(%rsp),%r8d
+   0.03%     0.02%              0x00007fcfaff16a5b:   jmp    0x00007fcfaff16757
+   0.02%     0.02%              0x00007fcfaff16a60:   mov    0x18(%rsp),%r11d
+   0.20%     0.09%              0x00007fcfaff16a65:   mov    0x40(%rsp),%edx
+                                0x00007fcfaff16a69:   mov    $0x1,%r10d
+                                0x00007fcfaff16a6f:   mov    0x20(%rsp),%r9
+                                0x00007fcfaff16a74:   mov    0x48(%rsp),%r8d
+                                0x00007fcfaff16a79:   mov    0x90(%rsp),%edi
+                                0x00007fcfaff16a80:   jmp    0x00007fcfaff16757
+                                0x00007fcfaff16a85:   mov    %rax,0x38(%rsp)
+   0.02%                        0x00007fcfaff16a8a:   mov    %ecx,0x30(%rsp)
+   0.15%     0.05%              0x00007fcfaff16a8e:   mov    %r8d,0x1c(%rsp)
+                                0x00007fcfaff16a93:   mov    %r13,0x10(%rsp)
+                                0x00007fcfaff16a98:   mov    %r11d,0x8(%rsp)
+                                0x00007fcfaff16a9d:   mov    %edi,0x94(%rsp)
+                                0x00007fcfaff16aa4:   mov    %r10d,0x90(%rsp)             ;   {other}
+             0.03%              0x00007fcfaff16aac:   mov    0x20(%rsp),%rsi
+             0.02%              0x00007fcfaff16ab1:   mov    0x40(%rsp),%edx
+   0.02%     0.07%              0x00007fcfaff16ab5:   mov    0x2c(%rsp),%ecx
+   0.05%     0.05%              0x00007fcfaff16ab9:   mov    0x30(%rsp),%r8d
+                                0x00007fcfaff16abe:   nop
+                                0x00007fcfaff16abf:   call   0x00007fcfaf9874e0           ; ImmutableOopMap {[0]=Oop [8]=NarrowOop [16]=Oop [28]=NarrowOop [32]=Oop [56]=Oop }
+                                                                                          ;*invokestatic findRe2ByteStop {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@18 (line 603)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                                                                                          ;   {static_call}
+   0.03%                        0x00007fcfaff16ac4:   nopl   0x200053c(%rax,%rax,1)       ;*invokestatic findRe2ByteStop {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@18 (line 603)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                                                                                          ;   {post_call_nop}
+                                0x00007fcfaff16acc:   mov    %eax,%edx
+                                0x00007fcfaff16ace:   mov    0x20(%rsp),%r9
+             0.02%              0x00007fcfaff16ad3:   mov    0x90(%rsp),%r10d
+                                0x00007fcfaff16adb:   mov    0x40(%rsp),%ebx
+   0.12%     0.10%              0x00007fcfaff16adf:   mov    0x94(%rsp),%edi
+                                0x00007fcfaff16ae6:   mov    0x8(%rsp),%r11d
+                                0x00007fcfaff16aeb:   mov    0x1c(%rsp),%r8d
+                                0x00007fcfaff16af0:   mov    0x30(%rsp),%ecx
+                                0x00007fcfaff16af4:   mov    0x38(%rsp),%rax
+                                0x00007fcfaff16af9:   mov    0x10(%rsp),%r13
+             0.02%  ╭           0x00007fcfaff16afe:   jmp    0x00007fcfaff16b19
+                    │           0x00007fcfaff16b00:   inc    %edx
+                    │╭          0x00007fcfaff16b02:   jmp    0x00007fcfaff16b07
+                    ││          0x00007fcfaff16b04:   add    $0x3,%edx                    ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                    ││                                                                    ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                    ││                                                                    ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                    ││                                                                    ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                    ││                                                                    ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                    ││                                                                    ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                    │↘          0x00007fcfaff16b07:   mov    %r8d,%r10d
+                    │           0x00007fcfaff16b0a:   mov    %esi,%r11d
+                    │           0x00007fcfaff16b0d:   mov    %eax,%r8d
+                    │           0x00007fcfaff16b10:   vmovd  %xmm0,%ecx
+                    │           0x00007fcfaff16b14:   vmovq  %xmm1,%rax                   ;*invokestatic re2ByteStop {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                                     ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                    │                                                                     ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                    │                                                                     ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                    │                                                                     ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.17%     0.03%  ↘       ↗↗  0x00007fcfaff16b19:   cmp    0x2c(%rsp),%edx
+                      ╭     ││  0x00007fcfaff16b1d:   je     0x00007fcfaff16b33           ;*if_icmpeq {reexecute=0 rethrow=0 return_oop=0}
+                      │     ││                                                            ; - io.airlift.regulator.VectorScanner::findRe2LastBlockStop@2 (line 263)
+                      │     ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@6 (line 621)
+                      │     ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                      │     ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                      │     ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                      │     ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.20%     0.26%    │     ││  0x00007fcfaff16b1f:   mov    0xc(%r9),%esi                ; implicit exception: dispatches to 0x00007fcfaff172d0
+   0.17%     0.16%    │     ││  0x00007fcfaff16b23:   cmp    %esi,%edx
+                      │     ││  0x00007fcfaff16b25:   jae    0x00007fcfaff16dd8
+   0.03%     0.03%    │     ││  0x00007fcfaff16b2b:   cmpb   $0x0,0x10(%r9,%rdx,1)
+   0.33%     0.35%    │╭    ││  0x00007fcfaff16b31:   jl     0x00007fcfaff16b39           ;*iload_2 {reexecute=0 rethrow=0 return_oop=0}
+                      ││    ││                                                            ; - io.airlift.regulator.VectorScanner::findRe2LastBlockStop@11 (line 264)
+                      ││    ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@6 (line 621)
+                      ││    ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                      ││    ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                      ││    ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                      ││    ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%              ↘│    ││  0x00007fcfaff16b33:   test   %edx,%edx
+                       │╭   ││  0x00007fcfaff16b35:   jl     0x00007fcfaff16b50           ;*iflt {reexecute=0 rethrow=0 return_oop=0}
+                       ││   ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@13 (line 622)
+                       ││   ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                       ││   ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                       ││   ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                       ││   ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                       ││╭  ││  0x00007fcfaff16b37:   jmp    0x00007fcfaff16baf
+                       ↘││  ││  0x00007fcfaff16b39:   mov    0x2c(%rsp),%ebp
+                        ││  ││  0x00007fcfaff16b3d:   add    $0xfffffff0,%ebp             ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                        ││  ││                                                            ; - io.airlift.regulator.VectorScanner::findRe2LastBlockStop@22 (line 266)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@6 (line 621)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                        ││  ││  0x00007fcfaff16b40:   cmp    %ebp,%edx
+                        ││  ││  0x00007fcfaff16b42:   jle    0x00007fcfaff17164           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                        ││  ││                                                            ; - io.airlift.regulator.VectorScanner::findRe2LastBlockStop@28 (line 267)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@6 (line 621)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                        ││  ││  0x00007fcfaff16b48:   cmp    %ebp,%ebx
+                        ││  ││  0x00007fcfaff16b4a:   jle    0x00007fcfaff171b8           ;*iflt {reexecute=0 rethrow=0 return_oop=0}
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@13 (line 622)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                        ││  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.02%      ↘│  ││  0x00007fcfaff16b50:   mov    %rax,0x30(%rsp)
+   0.02%     0.02%       │  ││  0x00007fcfaff16b55:   mov    %ecx,%eax
+   0.05%     0.03%       │  ││  0x00007fcfaff16b57:   mov    %r8d,0x1c(%rsp)
+             0.02%       │  ││  0x00007fcfaff16b5c:   mov    %r13,0x20(%rsp)
+             0.02%       │  ││  0x00007fcfaff16b61:   mov    %r11d,0x14(%rsp)
+                         │  ││  0x00007fcfaff16b66:   mov    %edi,0x10(%rsp)
+                         │  ││  0x00007fcfaff16b6a:   mov    %ebx,%ebp
+                         │  ││  0x00007fcfaff16b6c:   mov    %r10d,0x8(%rsp)
+                         │  ││  0x00007fcfaff16b71:   mov    %r9,0x90(%rsp)
+             0.03%       │  ││  0x00007fcfaff16b79:   mov    %r9,%rsi
+   0.10%     0.14%       │  ││  0x00007fcfaff16b7c:   mov    0x2c(%rsp),%ecx
+                         │  ││  0x00007fcfaff16b80:   mov    %eax,%r8d
+                         │  ││  0x00007fcfaff16b83:   call   0x00007fcfaff17326           ; ImmutableOopMap {[0]=Oop [20]=NarrowOop [28]=NarrowOop [32]=Oop [48]=Oop [144]=Oop }
+                         │  ││                                                            ;*invokestatic re2WalkNonAscii {reexecute=0 rethrow=0 return_oop=0}
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@26 (line 622)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                         │  ││                                                            ;   {static_call}
+   0.02%                 │  ││  0x00007fcfaff16b88:   nopl   0x3000600(%rax,%rax,1)       ;*invokestatic re2WalkNonAscii {reexecute=0 rethrow=0 return_oop=0}
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@26 (line 622)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                         │  ││                                                            ;   {post_call_nop}
+                         │  ││  0x00007fcfaff16b90:   mov    %eax,%edx
+                         │  ││  0x00007fcfaff16b92:   mov    0x90(%rsp),%r9
+                         │  ││  0x00007fcfaff16b9a:   mov    0x8(%rsp),%r10d
+   0.12%     0.10%       │  ││  0x00007fcfaff16b9f:   mov    %ebp,%ebx
+                         │  ││  0x00007fcfaff16ba1:   mov    0x10(%rsp),%edi
+                         │  ││  0x00007fcfaff16ba5:   mov    0x14(%rsp),%r11d
+                         │  ││  0x00007fcfaff16baa:   mov    0x1c(%rsp),%r8d              ;*ireturn {reexecute=0 rethrow=0 return_oop=0}
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanNonAscii@29 (line 622)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@11 (line 591)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                         │  ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.03%     0.03%       ↘  ││  0x00007fcfaff16baf:   mov    0x3c(%r12,%r8,8),%r8d
+   0.20%     0.24%          ││  0x00007fcfaff16bb4:   mov    %edx,%esi
+                            ││  0x00007fcfaff16bb6:   sub    %ebx,%esi
+   0.10%     0.28%          ││  0x00007fcfaff16bb8:   cmp    %r8d,%esi
+                          ╭ ││  0x00007fcfaff16bbb:   jge    0x00007fcfaff16bd2
+             0.02%        │↗││  0x00007fcfaff16bbd:   mov    %ebx,%edx
+   0.12%     0.07%        ││││  0x00007fcfaff16bbf:   mov    $0x1,%r10d
+                          ││││  0x00007fcfaff16bc5:   xor    %r11d,%r11d
+                          ││││  0x00007fcfaff16bc8:   mov    0x48(%rsp),%r8d
+                          ││││  0x00007fcfaff16bcd:   jmp    0x00007fcfaff16757
+             0.02%        ↘│││  0x00007fcfaff16bd2:   test   %edx,%edx
+                           ╰││  0x00007fcfaff16bd4:   jl     0x00007fcfaff16bbd           ;*ifge {reexecute=0 rethrow=0 return_oop=0}
+                            ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@671 (line 2002)
+   0.13%     0.23%          ││  0x00007fcfaff16bd6:   mov    0x48(%rsp),%r8d
+   0.05%     0.16%          ││  0x00007fcfaff16bdb:   cmp    %edx,%r8d
+                            ││  0x00007fcfaff16bde:   cmovl  %edx,%r8d                    ;*invokestatic max {reexecute=0 rethrow=0 return_oop=0}
+                            ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@684 (line 2006)
+   0.02%                    ││  0x00007fcfaff16be2:   mov    (%rsp),%rcx
+   0.03%     0.02%          ││  0x00007fcfaff16be6:   mov    0x14(%rcx),%ebp              ;*getfield failureResumeOperation {reexecute=0 rethrow=0 return_oop=0}
+                            ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@692 (line 2007)
+   0.18%     0.19%          ││  0x00007fcfaff16be9:   cmp    %ebp,%r10d
+                            ││  0x00007fcfaff16bec:   je     0x00007fcfaff17118           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+                            ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@695 (line 2007)
+   0.12%     0.09%          ││  0x00007fcfaff16bf2:   xor    %r10d,%r10d
+   0.03%     0.03%          ││  0x00007fcfaff16bf5:   xor    %r11d,%r11d
+   0.12%     0.28%          ││  0x00007fcfaff16bf8:   jmp    0x00007fcfaff16757
+                            ││  0x00007fcfaff16bfd:   add    $0x2,%edx                    ;*iinc {reexecute=0 rethrow=0 return_oop=0}
+                            ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@56 (line 608)
+                            ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                            ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                            ││                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                            ││                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                            ││  0x00007fcfaff16c00:   mov    %r8d,%r10d
+                            ││  0x00007fcfaff16c03:   mov    %esi,%r11d
+                            ││  0x00007fcfaff16c06:   mov    %eax,%r8d
+                            ││  0x00007fcfaff16c09:   vmovd  %xmm0,%ecx
+                            ││  0x00007fcfaff16c0d:   vmovq  %xmm1,%rax
+                            ╰│  0x00007fcfaff16c12:   jmp    0x00007fcfaff16b19
+                             │  0x00007fcfaff16c17:   mov    0x40(%rsp),%edx
+                             │  0x00007fcfaff16c1b:   mov    0x20(%rsp),%r9
+                             ╰  0x00007fcfaff16c20:   jmp    0x00007fcfaff16b19           ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                          ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                                0x00007fcfaff16c25:   mov    0x30(%r15),%r11              ; ImmutableOopMap {r9=Oop rsi=NarrowOop rax=NarrowOop r13=Oop xmm1=Oop [0]=Oop }
+                                                                                          ;*goto {reexecute=1 rethrow=0 return_oop=0}
+                                                                                          ; - (reexecute) io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                                                                                          ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+....................................................................................................
+   2.75%     3.24%  <total for region 3>
+
+....[Hottest Region 4]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+
+                          0x00007fcfaff1b4b9:   jg     0x00007fcfaff1b5d0           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@8 (line 2868)
+   0.02%                  0x00007fcfaff1b4bf:   cmp    $0x10,%r11d
+                          0x00007fcfaff1b4c3:   jg     0x00007fcfaff1b5f8           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@20 (line 2871)
+             0.02%        0x00007fcfaff1b4c9:   mov    0x20(%rsi),%ebp              ;*getfield width {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@99 (line 2884)
+                          0x00007fcfaff1b4cc:   cmp    $0x8,%ebp
+                          0x00007fcfaff1b4cf:   jne    0x00007fcfaff1b58c           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@102 (line 2884)
+                          0x00007fcfaff1b4d5:   mov    0xc(%rdx),%r11d              ; implicit exception: dispatches to 0x00007fcfaff1b630
+                          0x00007fcfaff1b4d9:   add    $0xfffffff9,%r11d            ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@5 (line 101)
+                                                                                    ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                                                                                    ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                          0x00007fcfaff1b4dd:   test   %r11d,%r11d
+                          0x00007fcfaff1b4e0:   jl     0x00007fcfaff1b5ac           ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                                                                                    ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@9 (line 101)
+                                                                                    ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                                                                                    ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                                                                                    ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                          0x00007fcfaff1b4e6:   cmp    %r11d,%ecx
+                    ╭     0x00007fcfaff1b4e9:   jae    0x00007fcfaff1b53e
+   0.57%     0.49%  │     0x00007fcfaff1b4eb:   mov    0x34(%rsi),%r10d             ;*getfield asciiFolded {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                               ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@313 (line 2890)
+                    │     0x00007fcfaff1b4ef:   mov    0x10(%r12,%r10,8),%rbx       ; implicit exception: dispatches to 0x00007fcfaff1b644
+                    │                                                               ;*getfield firstMask {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                               ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@316 (line 2890)
+                    │     0x00007fcfaff1b4f4:   mov    0x24(%rsi),%edi              ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                               ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@9 (line 101)
+                    │                                                               ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                    │                                                               ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                    │                                                               ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                    │     0x00007fcfaff1b4f7:   lea    (%rcx,%rdi,1),%r9d
+                    │     0x00007fcfaff1b4fb:   movslq %ecx,%r8                     ;*i2l {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                               ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@22 (line 110)
+                    │                                                               ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                    │                                                               ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                    │     0x00007fcfaff1b4fe:   or     0x10(%rdx,%r8,1),%rbx
+   0.22%     0.10%  │     0x00007fcfaff1b503:   xor    0x10(%rsi),%rbx              ;*lxor {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                               ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@324 (line 2890)
+   0.05%     0.03%  │     0x00007fcfaff1b507:   cmp    %r11d,%r9d
+                    │╭    0x00007fcfaff1b50a:   jae    0x00007fcfaff1b564
+   0.75%     0.56%  ││    0x00007fcfaff1b50c:   mov    0x18(%r12,%r10,8),%r10
+   0.02%     0.02%  ││    0x00007fcfaff1b511:   movslq %edi,%r11
+   0.02%            ││    0x00007fcfaff1b514:   add    %r8,%r11
+                    ││    0x00007fcfaff1b517:   or     0x10(%rdx,%r11,1),%r10
+   0.12%     0.16%  ││    0x00007fcfaff1b51c:   xor    0x18(%rsi),%r10
+   0.05%     0.07%  ││    0x00007fcfaff1b520:   or     %rbx,%r10
+   0.07%     0.05%  ││╭   0x00007fcfaff1b523:   jne    0x00007fcfaff1b53a           ;*ifne {reexecute=0 rethrow=0 return_oop=0}
+                    │││                                                             ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@354 (line 2891)
+   0.10%     0.07%  │││   0x00007fcfaff1b525:   mov    $0x1,%eax                    ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                    │││                                                             ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@362 (line 2891)
+   0.48%     0.37%  │││↗  0x00007fcfaff1b52a:   add    $0x30,%rsp
+                    ││││  0x00007fcfaff1b52e:   pop    %rbp
+                    ││││  0x00007fcfaff1b52f:   cmp    0x28(%r15),%rsp              ;   {poll_return}
+                    ││││  0x00007fcfaff1b533:   ja     0x00007fcfaff1b658
+                    ││││  0x00007fcfaff1b539:   ret    
+                    ││↘│  0x00007fcfaff1b53a:   xor    %eax,%eax
+   0.13%     0.07%  ││ ╰  0x00007fcfaff1b53c:   jmp    0x00007fcfaff1b52a
+                    ↘│    0x00007fcfaff1b53e:   mov    %rsi,%rbp
+                     │    0x00007fcfaff1b541:   mov    %rdx,0x10(%rsp)
+                     │    0x00007fcfaff1b546:   mov    %ecx,0xc(%rsp)
+                     │    0x00007fcfaff1b54a:   mov    %r11d,0x18(%rsp)
+                     │    0x00007fcfaff1b54f:   mov    $0xffffffe4,%esi
+                     │    0x00007fcfaff1b554:   data16 xchg %ax,%ax
+                     │    0x00007fcfaff1b557:   call   0x00007fcfafa6f2e0           ; ImmutableOopMap {rbp=Oop [16]=Oop }
+                     │                                                              ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                              ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@9 (line 101)
+                     │                                                              ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                     │                                                              ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                     │                                                              ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                     │                                                              ;   {runtime_call UncommonTrapBlob}
+                     │    0x00007fcfaff1b55c:   nopl   0x1d4(%rax,%rax,1)           ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                              ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@9 (line 101)
+                     │                                                              ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                     │                                                              ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                     │                                                              ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                     │                                                              ;   {post_call_nop}
+                     ↘    0x00007fcfaff1b564:   mov    %rsi,%rbp
+                          0x00007fcfaff1b567:   mov    %rdx,(%rsp)
+                          0x00007fcfaff1b56b:   mov    %rbx,0x8(%rsp)
+                          0x00007fcfaff1b570:   mov    %r9d,0x10(%rsp)
+                          0x00007fcfaff1b575:   mov    %r11d,0x14(%rsp)
+....................................................................................................
+   2.56%     1.98%  <total for region 4>
+
+....[Hottest Region 5]..............................................................................
+ [kernel.kallsyms], intel_pmu_disable_all 
+
+ <no assembly is recorded, native region>
+....................................................................................................
+   1.05%     0.02%  <total for region 5>
+
+....[Hottest Region 6]..............................................................................
+c2, level 4, io.airlift.regulator.VectorScanner::findRe2ByteStop, version 2, compile id 956 
+
+   0.12%     0.26%          0x00007fcfaff18d43:   mov    %r8d,%r10d
+                            0x00007fcfaff18d46:   cmovl  %r11d,%r10d
+                            0x00007fcfaff18d4a:   movsbl %r10b,%r9d                   ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                                                                                      ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                                                                                      ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                            0x00007fcfaff18d4e:   vpbroadcastb %r9d,%xmm0             ;*invokestatic fromBitsCoerced {reexecute=0 rethrow=0 return_oop=0}
+                                                                                      ; - jdk.incubator.vector.ByteVector$ByteSpecies::broadcastBits@19 (line 4253)
+                                                                                      ; - jdk.incubator.vector.ByteVector$ByteSpecies::broadcast@5 (line 4262)
+                                                                                      ; - jdk.incubator.vector.ByteVector::broadcast@7 (line 624)
+                                                                                      ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@9 (line 137)
+                            0x00007fcfaff18d54:   test   %r8d,%r8d
+                            0x00007fcfaff18d57:   jl     0x00007fcfaff18f18
+                            0x00007fcfaff18d5d:   lea    -0x10(%rcx),%r9d
+                            0x00007fcfaff18d61:   cmp    %r9d,%edx
+                    ╭       0x00007fcfaff18d64:   jg     0x00007fcfaff18e1d           ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                                 ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                    │                                                                 ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                    │       0x00007fcfaff18d6a:   vpbroadcastd -0x73(%rip),%xmm1        # 0x00007fcfaff18d00
+                    │                                                                 ;*invokestatic fromBitsCoerced {reexecute=0 rethrow=0 return_oop=0}
+                    │                                                                 ; - jdk.incubator.vector.ByteVector$ByteSpecies::broadcastBits@19 (line 4253)
+                    │                                                                 ; - jdk.incubator.vector.ByteVector$ByteSpecies::broadcast@5 (line 4262)
+                    │                                                                 ; - jdk.incubator.vector.ByteVector::broadcast@7 (line 624)
+                    │                                                                 ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@27 (line 138)
+                    │                                                                 ;   {section_word}
+   0.07%     0.12%  │       0x00007fcfaff18d73:   mov    0xc(%rsi),%edi               ; implicit exception: dispatches to 0x00007fcfaff18eb0
+                    │       0x00007fcfaff18d76:   lea    -0xf(%rdi),%r10d
+                    │       0x00007fcfaff18d7a:   test   %r10d,%r10d
+                    │       0x00007fcfaff18d7d:   jl     0x00007fcfaff18eb0
+                    │       0x00007fcfaff18d83:   cmp    %r10d,%edx
+                    │       0x00007fcfaff18d86:   jae    0x00007fcfaff18eb0
+   0.02%            │       0x00007fcfaff18d8c:   movslq %edi,%rdi
+                    │       0x00007fcfaff18d8f:   movslq %edx,%rsi
+                    │       0x00007fcfaff18d92:   add    $0xfffffffffffffff1,%rdi
+                    │       0x00007fcfaff18d96:   lea    -0xf(%rcx),%r10d
+   0.08%     0.23%  │       0x00007fcfaff18d9a:   movslq %r10d,%rax
+                    │       0x00007fcfaff18d9d:   sub    %rsi,%rax
+                    │       0x00007fcfaff18da0:   add    $0xf,%rax
+                    │       0x00007fcfaff18da4:   and    $0xfffffffffffffff0,%rax
+                    │       0x00007fcfaff18da8:   mov    %eax,%eax
+                    │       0x00007fcfaff18daa:   add    %edx,%eax
+                    │       0x00007fcfaff18dac:   movslq %eax,%rsi
+                    │       0x00007fcfaff18daf:   add    $0xfffffffffffffff0,%rsi
+   0.25%     0.26%  │       0x00007fcfaff18db3:   cmp    %rdi,%rsi
+                    │       0x00007fcfaff18db6:   jae    0x00007fcfaff18eb0
+   0.02%            │       0x00007fcfaff18dbc:   cmp    $0x7fffffef,%r9d
+                    │       0x00007fcfaff18dc3:   jg     0x00007fcfaff18ee4
+                    │       0x00007fcfaff18dc9:   cmp    %r9d,%edx
+                    │       0x00007fcfaff18dcc:   jge    0x00007fcfaff18ee4
+                    │       0x00007fcfaff18dd2:   mov    $0x3e80,%ebp
+   0.02%            │  ↗    0x00007fcfaff18dd7:   mov    %ecx,%edi
+                    │  │    0x00007fcfaff18dd9:   sub    %edx,%edi
+                    │  │    0x00007fcfaff18ddb:   add    $0xfffffff1,%edi
+                    │  │    0x00007fcfaff18dde:   cmp    %edx,%r10d
+             0.02%  │  │    0x00007fcfaff18de1:   cmovl  %r11d,%edi
+   0.15%     0.33%  │  │    0x00007fcfaff18de5:   cmp    $0x3e80,%edi
+                    │  │    0x00007fcfaff18deb:   cmova  %ebp,%edi
+                    │  │    0x00007fcfaff18dee:   add    %edx,%edi                    ;*getstatic SPECIES {reexecute=0 rethrow=0 return_oop=0}
+                    │  │                                                              ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@46 (line 140)
+                    │ ↗│    0x00007fcfaff18df0:   mov    %edx,%eax                    ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                    │ ││                                                              ; - java.util.Objects::checkIndex@3 (line 365)
+                    │ ││                                                              ; - jdk.incubator.vector.VectorIntrinsics::checkFromIndexSize@43 (line 58)
+                    │ ││                                                              ; - jdk.incubator.vector.ByteVector::fromArray@9 (line 3030)
+                    │ ││                                                              ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@51 (line 140)
+                    │ ││    0x00007fcfaff18df2:   vpxor  0x10(%rbx,%rax,1),%xmm0,%xmm2;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                    │ ││                                                              ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                    │ ││                                                              ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+   0.05%     0.14%  │ ││    0x00007fcfaff18df8:   vpcmpltb %xmm1,%xmm2,%k7            ;*invokestatic compare {reexecute=0 rethrow=0 return_oop=0}
+                    │ ││                                                              ; - jdk.incubator.vector.ByteVector::compareTemplate@42 (line 2072)
+                    │ ││                                                              ; - jdk.incubator.vector.Byte128Vector::compare@5 (line 384)
+                    │ ││                                                              ; - jdk.incubator.vector.Byte128Vector::compare@3 (line 43)
+                    │ ││                                                              ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@67 (line 140)
+   0.10%     0.35%  │ ││    0x00007fcfaff18dff:   kortestw %k7,%k7
+                    │╭││    0x00007fcfaff18e03:   jne    0x00007fcfaff18e7c
+                    ││││    0x00007fcfaff18e05:   add    $0x10,%edx
+                    ││││    0x00007fcfaff18e08:   cmp    %edi,%edx
+                    ││╰│    0x00007fcfaff18e0a:   jl     0x00007fcfaff18df0
+                    ││ │    0x00007fcfaff18e0c:   mov    0x30(%r15),%r9               ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                    ││ │                                                              ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                    ││ │                                                              ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                    ││ │    0x00007fcfaff18e10:   add    $0x10,%eax                   ; ImmutableOopMap {rbx=Oop }
+                    ││ │                                                              ;*goto {reexecute=1 rethrow=0 return_oop=0}
+                    ││ │                                                              ; - (reexecute) io.airlift.regulator.VectorScanner::findRe2ByteStop@99 (line 139)
+   0.02%            ││ │    0x00007fcfaff18e13:   test   %eax,(%r9)                   ;   {poll}
+                    ││ │    0x00007fcfaff18e16:   cmp    %r10d,%edx
+                    ││ ╰    0x00007fcfaff18e19:   jl     0x00007fcfaff18dd7
+   0.15%     0.16%  ││  ╭   0x00007fcfaff18e1b:   jmp    0x00007fcfaff18e1f
+                    ↘│  │   0x00007fcfaff18e1d:   mov    %edx,%eax
+             0.02%   │  ↘   0x00007fcfaff18e1f:   cmp    %ecx,%eax
+                     │      0x00007fcfaff18e21:   jge    0x00007fcfaff18f80
+                     │      0x00007fcfaff18e27:   mov    0xc(%rbx),%r11d              ; implicit exception: dispatches to 0x00007fcfaff18f9c
+                     │      0x00007fcfaff18e2b:   cmp    %r11d,%eax
+                     │   ╭  0x00007fcfaff18e2e:   jae    0x00007fcfaff18e58           ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                     │   │                                                            ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                     │   │                                                            ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                     │   │  0x00007fcfaff18e30:   movsbl 0x10(%rbx,%rax,1),%r11d      ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │   │                                                            ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@109 (line 146)
+                     │   │  0x00007fcfaff18e36:   test   %r11d,%r11d
+                     │   │  0x00007fcfaff18e39:   jl     0x00007fcfaff18f40
+             0.02%   │   │  0x00007fcfaff18e3f:   cmp    %r8d,%r11d                   ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                     │   │                                                            ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                     │   │                                                            ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                     │   │  0x00007fcfaff18e42:   jne    0x00007fcfaff18f58
+   0.02%             │   │  0x00007fcfaff18e48:   add    $0x50,%rsp
+   0.07%     0.09%   │   │  0x00007fcfaff18e4c:   pop    %rbp
+                     │   │  0x00007fcfaff18e4d:   cmp    0x28(%r15),%rsp              ;   {poll_return}
+                     │   │  0x00007fcfaff18e51:   ja     0x00007fcfaff18fb0
+             0.02%   │   │  0x00007fcfaff18e57:   ret    
+                     │   ↘  0x00007fcfaff18e58:   mov    $0xffffffe4,%esi
+                     │      0x00007fcfaff18e5d:   mov    %ecx,0x4(%rsp)
+                     │      0x00007fcfaff18e61:   mov    %r8d,0x8(%rsp)
+                     │      0x00007fcfaff18e66:   mov    %rbx,0x10(%rsp)
+                     │      0x00007fcfaff18e6b:   mov    %eax,0xc(%rsp)
+                     │      0x00007fcfaff18e6f:   call   0x00007fcfafa6f2e0           ; ImmutableOopMap {[16]=Oop }
+                     │                                                                ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                                ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@109 (line 146)
+                     │                                                                ;   {runtime_call UncommonTrapBlob}
+                     │      0x00007fcfaff18e74:   nopl   0x100026c(%rax,%rax,1)       ;   {post_call_nop}
+                     ↘      0x00007fcfaff18e7c:   kortestw %k7,%k7
+                            0x00007fcfaff18e80:   setne  %r11b
+                            0x00007fcfaff18e84:   mov    $0xffffff45,%esi
+                            0x00007fcfaff18e89:   vpmovm2b %k7,%xmm0
+                            0x00007fcfaff18e8f:   vpabsb %xmm0,%xmm0
+                            0x00007fcfaff18e94:   mov    %eax,%ebp
+                            0x00007fcfaff18e96:   mov    %r11d,(%rsp)
+                            0x00007fcfaff18e9a:   vmovdqu %xmm0,0x10(%rsp)            ;*invokestatic test {reexecute=0 rethrow=0 return_oop=0}
+                                                                                      ; - jdk.incubator.vector.Byte128Vector$Byte128Mask::anyTrue@23 (line 795)
+                                                                                      ; - io.airlift.regulator.VectorScanner::findRe2ByteStop@74 (line 141)
+                            0x00007fcfaff18ea0:   data16 xchg %ax,%ax
+                            0x00007fcfaff18ea3:   call   0x00007fcfafa6f2e0           ; ImmutableOopMap {}
+                                                                                      ;*ifeq {reexecute=1 rethrow=0 return_oop=0}
+                                                                                      ; - (reexecute) io.airlift.regulator.VectorScanner::findRe2ByteStop@77 (line 141)
+....................................................................................................
+   1.00%     1.74%  <total for region 6>
+
+....[Hottest Region 7]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+
+                     dependencies   [0x00007fcf4c202070,0x00007fcf4c202098] = 40
+                     nul chk table  [0x00007fcf4c202098,0x00007fcf4c2020f0] = 88
+                     handler table  [0x00007fcf4c2020f0,0x00007fcf4c202138] = 72
+                     scopes pcs     [0x00007fcf4c202138,0x00007fcf4c202b88] = 2640
+                     scopes data    [0x00007fcf4c202b88,0x00007fcf4c203770] = 3048
+                    [Disassembly]
+                    --------------------------------------------------------------------------------
+                    [Constant Pool (empty)]
+                    --------------------------------------------------------------------------------
+                    [Instructions begin]
+                      0x00007fcfaff16680:   xchg   %ax,%ax
+                    [Entry Point]
+                      # {method} {0x00007fcf8061ac28} &apos;matchAsciiFoldedUnanchoredAt&apos; &apos;([BIIIZ[I)J&apos; in &apos;io/airlift/regulator/ScanPlan&apos;
+                      # this:     rsi:rsi   = &apos;io/airlift/regulator/ScanPlan&apos;
+                      # parm0:    rdx:rdx   = &apos;[B&apos;
+                      # parm1:    rcx       = int
+                      # parm2:    r8        = int
+                      # parm3:    r9        = int
+                      # parm4:    rdi       = boolean
+                      # parm5:    [sp+0x90]   = &apos;[I&apos;  (sp of caller)
+                      0x00007fcfaff16682:   mov    0x8(%rsi),%r10d
+                      0x00007fcfaff16686:   cmp    0x8(%rax),%r10d
+                      0x00007fcfaff1668a:   jne    0x00007fcfaf9865e0           ;   {runtime_call Shared Runtime ic_miss_blob}
+                    [Verified Entry Point]
+   0.80%     0.92%    0x00007fcfaff16690:   mov    %eax,-0x14000(%rsp)
+                      0x00007fcfaff16697:   push   %rbp
+                      0x00007fcfaff16698:   sub    $0x80,%rsp
+                      0x00007fcfaff1669f:   nop
+                      0x00007fcfaff166a0:   cmpl   $0x1,0x20(%r15)
+                      0x00007fcfaff166a8:   jne    0x00007fcfaff172fa           ;*synchronization entry
+                                                                                ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@-1 (line 1897)
+                      0x00007fcfaff166ae:   mov    %edi,0x18(%rsp)
+                      0x00007fcfaff166b2:   mov    %r9d,0xc(%rsp)
+   0.78%     0.75%    0x00007fcfaff166b7:   mov    %r8d,0x2c(%rsp)
+                      0x00007fcfaff166bc:   mov    %ecx,0x28(%rsp)
+                      0x00007fcfaff166c0:   mov    %rdx,0x20(%rsp)
+                      0x00007fcfaff166c5:   mov    %rsi,(%rsp)
+                      0x00007fcfaff166c9:   mov    0x90(%rsp),%r10
+                      0x00007fcfaff166d1:   test   %r10,%r10
+                      0x00007fcfaff166d4:   jne    0x00007fcfaff16db0           ;*ifnull {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@2 (line 1897)
+                      0x00007fcfaff166da:   mov    %r9d,0x48(%rsp)
+                      0x00007fcfaff166df:   mov    %r9d,0x40(%rsp)
+   0.93%     0.64%    0x00007fcfaff166e4:   xor    %r10d,%r10d
+                      0x00007fcfaff166e7:   jmp    0x00007fcfaff167be
+   0.02%              0x00007fcfaff166ec:   mov    %r13,0x10(%rsp)
+                      0x00007fcfaff166f1:   mov    %r11d,%ebp
+   0.65%     0.71%    0x00007fcfaff166f4:   mov    %edi,0x90(%rsp)
+....................................................................................................
+   0.80%     0.92%  <total for region 7>
+
+....[Hottest Region 8]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+
+                    [Instructions begin]
+                      0x00007fcfaff16680:   xchg   %ax,%ax
+                    [Entry Point]
+                      # {method} {0x00007fcf8061ac28} &apos;matchAsciiFoldedUnanchoredAt&apos; &apos;([BIIIZ[I)J&apos; in &apos;io/airlift/regulator/ScanPlan&apos;
+                      # this:     rsi:rsi   = &apos;io/airlift/regulator/ScanPlan&apos;
+                      # parm0:    rdx:rdx   = &apos;[B&apos;
+                      # parm1:    rcx       = int
+                      # parm2:    r8        = int
+                      # parm3:    r9        = int
+                      # parm4:    rdi       = boolean
+                      # parm5:    [sp+0x90]   = &apos;[I&apos;  (sp of caller)
+                      0x00007fcfaff16682:   mov    0x8(%rsi),%r10d
+                      0x00007fcfaff16686:   cmp    0x8(%rax),%r10d
+                      0x00007fcfaff1668a:   jne    0x00007fcfaf9865e0           ;   {runtime_call Shared Runtime ic_miss_blob}
+                    [Verified Entry Point]
+   0.80%     0.92%    0x00007fcfaff16690:   mov    %eax,-0x14000(%rsp)
+                      0x00007fcfaff16697:   push   %rbp
+                      0x00007fcfaff16698:   sub    $0x80,%rsp
+                      0x00007fcfaff1669f:   nop
+                      0x00007fcfaff166a0:   cmpl   $0x1,0x20(%r15)
+                      0x00007fcfaff166a8:   jne    0x00007fcfaff172fa           ;*synchronization entry
+                                                                                ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@-1 (line 1897)
+                      0x00007fcfaff166ae:   mov    %edi,0x18(%rsp)
+                      0x00007fcfaff166b2:   mov    %r9d,0xc(%rsp)
+   0.78%     0.75%    0x00007fcfaff166b7:   mov    %r8d,0x2c(%rsp)
+                      0x00007fcfaff166bc:   mov    %ecx,0x28(%rsp)
+                      0x00007fcfaff166c0:   mov    %rdx,0x20(%rsp)
+                      0x00007fcfaff166c5:   mov    %rsi,(%rsp)
+                      0x00007fcfaff166c9:   mov    0x90(%rsp),%r10
+                      0x00007fcfaff166d1:   test   %r10,%r10
+                      0x00007fcfaff166d4:   jne    0x00007fcfaff16db0           ;*ifnull {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@2 (line 1897)
+                      0x00007fcfaff166da:   mov    %r9d,0x48(%rsp)
+                      0x00007fcfaff166df:   mov    %r9d,0x40(%rsp)
+   0.93%     0.64%    0x00007fcfaff166e4:   xor    %r10d,%r10d
+                      0x00007fcfaff166e7:   jmp    0x00007fcfaff167be
+   0.02%              0x00007fcfaff166ec:   mov    %r13,0x10(%rsp)
+                      0x00007fcfaff166f1:   mov    %r11d,%ebp
+   0.65%     0.71%    0x00007fcfaff166f4:   mov    %edi,0x90(%rsp)
+                      0x00007fcfaff166fb:   mov    %r13,%rsi
+                      0x00007fcfaff166fe:   mov    0x20(%rsp),%rdx
+                      0x00007fcfaff16703:   mov    0x40(%rsp),%ecx
+   0.03%     0.03%    0x00007fcfaff16707:   mov    0x2c(%rsp),%r8d
+                      0x00007fcfaff1670c:   mov    0xc(%rsp),%r11d
+             0.02%    0x00007fcfaff16711:   mov    %r11d,0x94(%rsp)
+             0.02%    0x00007fcfaff16719:   xchg   %ax,%ax
+   0.60%     0.59%    0x00007fcfaff1671b:   call   0x00007fcfaff17317           ; ImmutableOopMap {rbp=NarrowOop [0]=Oop [16]=Oop [32]=Oop }
+                                                                                ;*invokevirtual matchesAsciiFolded {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@210 (line 1931)
+....................................................................................................
+   0.78%     0.75%  <total for region 8>
+
+....[Hottest Region 9]..............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+
+                     relocation     [0x00007fcf4c109470,0x00007fcf4c1094a8] = 56
+                     metadata       [0x00007fcf4c1094a8,0x00007fcf4c1094f8] = 80
+                     immutable data [0x00007fcf4c2040a0,0x00007fcf4c2044f8] = 1112
+                     dependencies   [0x00007fcf4c2040a0,0x00007fcf4c2040b8] = 24
+                     nul chk table  [0x00007fcf4c2040b8,0x00007fcf4c2040d8] = 32
+                     scopes pcs     [0x00007fcf4c2040d8,0x00007fcf4c204328] = 592
+                     scopes data    [0x00007fcf4c204328,0x00007fcf4c2044f8] = 464
+                    [Disassembly]
+                    --------------------------------------------------------------------------------
+                    [Constant Pool (empty)]
+                    --------------------------------------------------------------------------------
+                    [Instructions begin]
+                      0x00007fcfaff1b480:   xchg   %ax,%ax
+                    [Entry Point]
+                      # {method} {0x00007fcf8061e8f0} &apos;matchesAsciiFolded&apos; &apos;([BII)Z&apos; in &apos;io/airlift/regulator/ScanPlan$Step&apos;
+                      # this:     rsi:rsi   = &apos;io/airlift/regulator/ScanPlan$Step&apos;
+                      # parm0:    rdx:rdx   = &apos;[B&apos;
+                      # parm1:    rcx       = int
+                      # parm2:    r8        = int
+                      #           [sp+0x40]  (sp of caller)
+                      0x00007fcfaff1b482:   mov    0x8(%rsi),%r10d
+                      0x00007fcfaff1b486:   cmp    0x8(%rax),%r10d
+                      0x00007fcfaff1b48a:   jne    0x00007fcfaf9865e0           ;   {runtime_call Shared Runtime ic_miss_blob}
+                    [Verified Entry Point]
+   0.72%     0.54%    0x00007fcfaff1b490:   mov    %eax,-0x14000(%rsp)
+                      0x00007fcfaff1b497:   push   %rbp
+                      0x00007fcfaff1b498:   sub    $0x30,%rsp
+                      0x00007fcfaff1b49c:   cmpl   $0x0,0x20(%r15)
+                      0x00007fcfaff1b4a4:   jne    0x00007fcfaff1b66e           ;*synchronization entry
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@-1 (line 2868)
+                      0x00007fcfaff1b4aa:   mov    0x30(%rsi),%r11d             ;*getfield literal {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@1 (line 2868)
+                      0x00007fcfaff1b4ae:   mov    0xc(%r12,%r11,8),%r11d       ; implicit exception: dispatches to 0x00007fcfaff1b61c
+                                                                                ;*arraylength {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@4 (line 2868)
+                      0x00007fcfaff1b4b3:   sub    %ecx,%r8d                    ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@7 (line 2868)
+   0.68%     0.61%    0x00007fcfaff1b4b6:   cmp    %r8d,%r11d
+                      0x00007fcfaff1b4b9:   jg     0x00007fcfaff1b5d0           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@8 (line 2868)
+   0.02%              0x00007fcfaff1b4bf:   cmp    $0x10,%r11d
+                      0x00007fcfaff1b4c3:   jg     0x00007fcfaff1b5f8           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@20 (line 2871)
+             0.02%    0x00007fcfaff1b4c9:   mov    0x20(%rsi),%ebp              ;*getfield width {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@99 (line 2884)
+                      0x00007fcfaff1b4cc:   cmp    $0x8,%ebp
+                      0x00007fcfaff1b4cf:   jne    0x00007fcfaff1b58c           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@102 (line 2884)
+....................................................................................................
+   0.72%     0.54%  <total for region 9>
+
+....[Hottest Region 10].............................................................................
+ [kernel.kallsyms], __intel_pmu_enable_all.constprop.0 
+
+ <no assembly is recorded, native region>
+....................................................................................................
+   0.70%            <total for region 10>
+
+....[Hottest Region 11].............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+
+                    [Entry Point]
+                      # {method} {0x00007fcf8061e8f0} &apos;matchesAsciiFolded&apos; &apos;([BII)Z&apos; in &apos;io/airlift/regulator/ScanPlan$Step&apos;
+                      # this:     rsi:rsi   = &apos;io/airlift/regulator/ScanPlan$Step&apos;
+                      # parm0:    rdx:rdx   = &apos;[B&apos;
+                      # parm1:    rcx       = int
+                      # parm2:    r8        = int
+                      #           [sp+0x40]  (sp of caller)
+                      0x00007fcfaff1b482:   mov    0x8(%rsi),%r10d
+                      0x00007fcfaff1b486:   cmp    0x8(%rax),%r10d
+                      0x00007fcfaff1b48a:   jne    0x00007fcfaf9865e0           ;   {runtime_call Shared Runtime ic_miss_blob}
+                    [Verified Entry Point]
+   0.72%     0.54%    0x00007fcfaff1b490:   mov    %eax,-0x14000(%rsp)
+                      0x00007fcfaff1b497:   push   %rbp
+                      0x00007fcfaff1b498:   sub    $0x30,%rsp
+                      0x00007fcfaff1b49c:   cmpl   $0x0,0x20(%r15)
+                      0x00007fcfaff1b4a4:   jne    0x00007fcfaff1b66e           ;*synchronization entry
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@-1 (line 2868)
+                      0x00007fcfaff1b4aa:   mov    0x30(%rsi),%r11d             ;*getfield literal {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@1 (line 2868)
+                      0x00007fcfaff1b4ae:   mov    0xc(%r12,%r11,8),%r11d       ; implicit exception: dispatches to 0x00007fcfaff1b61c
+                                                                                ;*arraylength {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@4 (line 2868)
+                      0x00007fcfaff1b4b3:   sub    %ecx,%r8d                    ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@7 (line 2868)
+   0.68%     0.61%    0x00007fcfaff1b4b6:   cmp    %r8d,%r11d
+                      0x00007fcfaff1b4b9:   jg     0x00007fcfaff1b5d0           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@8 (line 2868)
+   0.02%              0x00007fcfaff1b4bf:   cmp    $0x10,%r11d
+                      0x00007fcfaff1b4c3:   jg     0x00007fcfaff1b5f8           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@20 (line 2871)
+             0.02%    0x00007fcfaff1b4c9:   mov    0x20(%rsi),%ebp              ;*getfield width {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@99 (line 2884)
+                      0x00007fcfaff1b4cc:   cmp    $0x8,%ebp
+                      0x00007fcfaff1b4cf:   jne    0x00007fcfaff1b58c           ;*tableswitch {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@102 (line 2884)
+                      0x00007fcfaff1b4d5:   mov    0xc(%rdx),%r11d              ; implicit exception: dispatches to 0x00007fcfaff1b630
+                      0x00007fcfaff1b4d9:   add    $0xfffffff9,%r11d            ;*isub {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@5 (line 101)
+                                                                                ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                                                                                ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                      0x00007fcfaff1b4dd:   test   %r11d,%r11d
+                      0x00007fcfaff1b4e0:   jl     0x00007fcfaff1b5ac           ;*invokestatic checkIndex {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::index@9 (line 101)
+                                                                                ; - java.lang.invoke.VarHandleByteArrayAsLongs$ArrayHandle::get@19 (line 110)
+                                                                                ; - java.lang.invoke.VarHandleGuards::guard_LI_J@45 (line 198)
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@309 (line 2890)
+                      0x00007fcfaff1b4e6:   cmp    %r11d,%ecx
+                      0x00007fcfaff1b4e9:   jae    0x00007fcfaff1b53e
+   0.57%     0.49%    0x00007fcfaff1b4eb:   mov    0x34(%rsi),%r10d             ;*getfield asciiFolded {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@313 (line 2890)
+                      0x00007fcfaff1b4ef:   mov    0x10(%r12,%r10,8),%rbx       ; implicit exception: dispatches to 0x00007fcfaff1b644
+                                                                                ;*getfield firstMask {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded@316 (line 2890)
+....................................................................................................
+   0.70%     0.63%  <total for region 11>
+
+....[Hottest Region 12].............................................................................
+ [kernel.kallsyms], pvclock_clocksource_read 
+
+ <no assembly is recorded, native region>
+....................................................................................................
+   0.67%     0.21%  <total for region 12>
+
+....[Hottest Region 13].............................................................................
+ [kernel.kallsyms], entry_SYSCALL_64 
+
+ <no assembly is recorded, native region>
+....................................................................................................
+   0.63%     0.05%  <total for region 13>
+
+....[Hottest Region 14].............................................................................
+c2, level 4, io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                        0x00007fcfaff16c00:   mov    %r8d,%r10d
+                        0x00007fcfaff16c03:   mov    %esi,%r11d
+                        0x00007fcfaff16c06:   mov    %eax,%r8d
+                        0x00007fcfaff16c09:   vmovd  %xmm0,%ecx
+                        0x00007fcfaff16c0d:   vmovq  %xmm1,%rax
+                        0x00007fcfaff16c12:   jmp    0x00007fcfaff16b19
+                        0x00007fcfaff16c17:   mov    0x40(%rsp),%edx
+                        0x00007fcfaff16c1b:   mov    0x20(%rsp),%r9
+                        0x00007fcfaff16c20:   jmp    0x00007fcfaff16b19           ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                        0x00007fcfaff16c25:   mov    0x30(%r15),%r11              ; ImmutableOopMap {r9=Oop rsi=NarrowOop rax=NarrowOop r13=Oop xmm1=Oop [0]=Oop }
+                                                                                  ;*goto {reexecute=1 rethrow=0 return_oop=0}
+                                                                                  ; - (reexecute) io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%                0x00007fcfaff16c29:   test   %eax,(%r11)                  ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@59 (line 608)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                                                                                  ;   {poll}
+   0.02%     0.03%      0x00007fcfaff16c2c:   cmp    %r14d,%edx
+                    ╭   0x00007fcfaff16c2f:   jge    0x00007fcfaff16c48
+                    │   0x00007fcfaff16c31:   mov    %r8d,%r10d
+                    │   0x00007fcfaff16c34:   mov    %esi,%r11d
+                    │   0x00007fcfaff16c37:   mov    %eax,%r8d
+                    │   0x00007fcfaff16c3a:   vmovd  %xmm0,%ecx
+                    │   0x00007fcfaff16c3e:   vmovq  %xmm1,%rax
+                    │   0x00007fcfaff16c43:   jmp    0x00007fcfaff16918
+   0.02%     0.03%  ↘   0x00007fcfaff16c48:   mov    %r8d,%r10d
+   0.08%     0.12%      0x00007fcfaff16c4b:   mov    %esi,%r11d
+   0.05%     0.02%      0x00007fcfaff16c4e:   mov    %eax,%r8d
+   0.12%     0.09%      0x00007fcfaff16c51:   vmovd  %xmm0,%ecx
+   0.02%                0x00007fcfaff16c55:   vmovq  %xmm1,%rax
+                        0x00007fcfaff16c5a:   cmp    0x2c(%rsp),%edx
+                        0x00007fcfaff16c5e:   jge    0x00007fcfaff16b19           ;*aload_0 {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@45 (line 607)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.03%             ↗  0x00007fcfaff16c64:   movsbl 0x10(%r9,%rdx,1),%esi        ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@47 (line 607)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.02%   │  0x00007fcfaff16c6a:   xor    0x90(%rsp),%esi
+   0.05%     0.03%   │  0x00007fcfaff16c71:   cmp    $0x1,%esi
+                     │  0x00007fcfaff16c74:   jl     0x00007fcfaff16b19           ;*if_icmplt {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@53 (line 607)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.15%     0.17%   │  0x00007fcfaff16c7a:   inc    %edx                         ;*iinc {reexecute=0 rethrow=0 return_oop=0}
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@56 (line 608)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                     │                                                            ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                     │                                                            ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+   0.02%     0.03%   │  0x00007fcfaff16c7c:   cmp    0x2c(%rsp),%edx
+   0.02%     0.12%   ╰  0x00007fcfaff16c80:   jl     0x00007fcfaff16c64           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ByteStop@42 (line 607)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2ScanBlocks@6 (line 591)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Scan@22 (line 554)
+                                                                                  ; - io.airlift.regulator.ScanPlanRun::re2Match@19 (line 489)
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@664 (line 2001)
+                        0x00007fcfaff16c82:   jmp    0x00007fcfaff16b19
+                        0x00007fcfaff16c87:   mov    $0xffffffe4,%esi
+                        0x00007fcfaff16c8c:   mov    (%rsp),%rbp
+                        0x00007fcfaff16c90:   mov    0xc(%rsp),%r8d
+                        0x00007fcfaff16c95:   mov    %edi,(%rsp)
+                        0x00007fcfaff16c98:   mov    %r8d,0x4(%rsp)
+                        0x00007fcfaff16c9d:   mov    %r11d,0x10(%rsp)
+                        0x00007fcfaff16ca2:   mov    %r10d,0x14(%rsp)
+                        0x00007fcfaff16ca7:   mov    0x28(%rsp),%r10d
+                        0x00007fcfaff16cac:   mov    %r10d,0x1c(%rsp)
+                        0x00007fcfaff16cb1:   xchg   %ax,%ax
+                        0x00007fcfaff16cb3:   call   0x00007fcfafa6f2e0           ; ImmutableOopMap {rbp=Oop [16]=NarrowOop [32]=Oop }
+                                                                                  ;*aaload {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@105 (line 1920)
+                                                                                  ;   {runtime_call UncommonTrapBlob}
+                        0x00007fcfaff16cb8:   nopl   0x5000730(%rax,%rax,1)       ;*aaload {reexecute=0 rethrow=0 return_oop=0}
+                                                                                  ; - io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt@105 (line 1920)
+                                                                                  ;   {post_call_nop}
+                        0x00007fcfaff16cc0:   mov    $0xffffff45,%esi
+....................................................................................................
+   0.60%     0.68%  <total for region 14>
+
+....[Hottest Region 15].............................................................................
+c2, level 4, io.airlift.regulator.ScanPlanRun::re2WalkNonAscii, version 2, compile id 961 
+
+                      0x00007fcfaff19b8c:   cmp    %rsi,%r11
+                      0x00007fcfaff19b8f:   jae    0x00007fcfaff19df0
+                      0x00007fcfaff19b95:   movzbl 0x11(%r13,%r8,1),%ebp
+                      0x00007fcfaff19b9b:   and    $0xc0,%ebp                   ;*iand {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@78 (line 164)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19ba1:   cmp    $0x80,%ebp
+                      0x00007fcfaff19ba7:   jne    0x00007fcfaff19f0c           ;*if_icmpeq {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@82 (line 164)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19bad:   movzbl 0x12(%r13,%r8,1),%ebp
+   0.17%     0.14%    0x00007fcfaff19bb3:   and    $0xc0,%ebp                   ;*iand {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@78 (line 164)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19bb9:   cmp    $0x80,%ebp
+                      0x00007fcfaff19bbf:   jne    0x00007fcfaff19f11           ;*if_icmpeq {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@82 (line 164)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19bc5:   lea    0x3(%rdi),%r11d
+                      0x00007fcfaff19bc9:   movslq %ecx,%rdx
+                      0x00007fcfaff19bcc:   movslq %r11d,%r11
+                      0x00007fcfaff19bcf:   neg    %rdx
+                      0x00007fcfaff19bd2:   mov    $0xffffffff80000001,%r8
+                      0x00007fcfaff19bd9:   sub    %rdx,%r8
+   0.22%     0.14%    0x00007fcfaff19bdc:   cmp    %r8,%r11
+                      0x00007fcfaff19bdf:   cmovl  %r8,%r11
+                      0x00007fcfaff19be3:   mov    %r11d,%r8d
+                      0x00007fcfaff19be6:   cmp    %r10d,%r8d
+                      0x00007fcfaff19be9:   cmovg  %r10d,%r8d                   ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@90 (line 163)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+             0.02%    0x00007fcfaff19bed:   mov    0x30(%r15),%r11
+                      0x00007fcfaff19bf1:   add    $0x3,%eax                    ; ImmutableOopMap {r13=Oop }
+                                                                                ;*goto {reexecute=1 rethrow=0 return_oop=0}
+                                                                                ; - (reexecute) io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@73 (line 650)
+                      0x00007fcfaff19bf4:   test   %eax,(%r11)                  ;*goto {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@73 (line 650)
+                                                                                ;   {poll}
+   0.13%     0.26%    0x00007fcfaff19bf7:   cmp    %r8d,%eax
+                      0x00007fcfaff19bfa:   jl     0x00007fcfaff19b31           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@26 (line 636)
+                      0x00007fcfaff19c00:   mov    $0xffffffff80000000,%r11
+   0.02%              0x00007fcfaff19c07:   mov    $0xfffffffffffffffe,%r8
+                      0x00007fcfaff19c0e:   sub    %rdx,%r8
+                      0x00007fcfaff19c11:   cmp    $0xffffffff80000000,%r8
+                      0x00007fcfaff19c18:   cmovl  %r11,%r8
+                      0x00007fcfaff19c1c:   cmp    %rbx,%r8
+   0.02%              0x00007fcfaff19c1f:   cmovl  %r8,%rbx
+   0.13%     0.12%    0x00007fcfaff19c23:   mov    %ebx,%r8d
+                      0x00007fcfaff19c26:   cmp    %r8d,%eax
+                      0x00007fcfaff19c29:   jge    0x00007fcfaff19cc8
+                      0x00007fcfaff19c2f:   nop                                 ;*aload_0 {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@29 (line 637)
+                      0x00007fcfaff19c30:   movslq %eax,%rbx
+                      0x00007fcfaff19c33:   movsbl 0x10(%r13,%rbx,1),%r11d      ;*baload {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@31 (line 637)
+                      0x00007fcfaff19c39:   test   %r11d,%r11d
+                      0x00007fcfaff19c3c:   jge    0x00007fcfaff19d82           ;*iflt {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@36 (line 638)
+                      0x00007fcfaff19c42:   movzbl 0x10(%r13,%rbx,1),%ebp       ;*iand {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@6 (line 155)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19c48:   lea    -0xc2(%rbp),%r11d
+                      0x00007fcfaff19c4f:   cmp    $0x33,%r11d
+                      0x00007fcfaff19c53:   jae    0x00007fcfaff19e94           ;*if_icmple {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@19 (line 156)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19c59:   lea    -0xe0(%rbp),%ebx
+                      0x00007fcfaff19c5f:   cmp    $0x10,%ebx
+                      0x00007fcfaff19c62:   jae    0x00007fcfaff19ebc           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+                                                                                ; - io.airlift.regulator.Utf8::re2CharacterWidth@39 (line 159)
+                                                                                ; - io.airlift.regulator.ScanPlanRun::re2WalkNonAscii@56 (line 645)
+                      0x00007fcfaff19c68:   movslq %eax,%r11
+....................................................................................................
+   0.52%     0.54%  <total for region 15>
+
+....[Hottest Regions]...............................................................................
+  54.59%    53.57%           c2, level 4  io.airlift.regulator.jmh_generated.BenchmarkRe2ScanPlan_contains_jmhTest::contains_avgt_jmhStub, version 2, compile id 982 
+  15.26%    19.06%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   2.75%     3.24%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   2.56%     1.98%           c2, level 4  io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+   1.05%     0.02%     [kernel.kallsyms]  intel_pmu_disable_all 
+   1.00%     1.74%           c2, level 4  io.airlift.regulator.VectorScanner::findRe2ByteStop, version 2, compile id 956 
+   0.80%     0.92%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   0.78%     0.75%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   0.72%     0.54%           c2, level 4  io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+   0.70%               [kernel.kallsyms]  __intel_pmu_enable_all.constprop.0 
+   0.70%     0.63%           c2, level 4  io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+   0.67%     0.21%     [kernel.kallsyms]  pvclock_clocksource_read 
+   0.63%     0.05%     [kernel.kallsyms]  entry_SYSCALL_64 
+   0.60%     0.68%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   0.52%     0.54%           c2, level 4  io.airlift.regulator.ScanPlanRun::re2WalkNonAscii, version 2, compile id 961 
+   0.42%     0.07%             libjvm.so  ElfSymbolTable::lookup 
+   0.32%     0.17%           c2, level 4  io.airlift.regulator.ScanPlanRun::re2WalkNonAscii, version 2, compile id 961 
+   0.30%     0.03%     [kernel.kallsyms]  restore_fpregs_from_fpstate 
+   0.27%     0.31%           c2, level 4  io.airlift.regulator.ScanPlanRun::re2WalkNonAscii, version 2, compile id 961 
+   0.25%     0.03%             libc.so.6  __GI___pthread_disable_asynccancel 
+  15.11%    15.45%  <...other 487 warm regions...>
+....................................................................................................
+  99.98%   100.00%  <totals>
+
+....[Hottest Methods (after inlining)]..............................................................
+  54.68%    53.71%           c2, level 4  io.airlift.regulator.jmh_generated.BenchmarkRe2ScanPlan_contains_jmhTest::contains_avgt_jmhStub, version 2, compile id 982 
+  20.19%    24.64%           c2, level 4  io.airlift.regulator.ScanPlan::matchAsciiFoldedUnanchoredAt, version 2, compile id 933 
+   3.98%     3.15%           c2, level 4  io.airlift.regulator.ScanPlan$Step::matchesAsciiFolded, version 2, compile id 966 
+   1.75%     1.98%           c2, level 4  io.airlift.regulator.ScanPlanRun::re2WalkNonAscii, version 2, compile id 961 
+   1.18%     2.26%           c2, level 4  io.airlift.regulator.VectorScanner::findRe2ByteStop, version 2, compile id 956 
+   1.05%     0.02%     [kernel.kallsyms]  intel_pmu_disable_all 
+   0.98%     0.52%                        <unknown> 
+   0.70%               [kernel.kallsyms]  __intel_pmu_enable_all.constprop.0 
+   0.67%     0.21%     [kernel.kallsyms]  pvclock_clocksource_read 
+   0.63%     0.05%     [kernel.kallsyms]  entry_SYSCALL_64 
+   0.45%     1.51%     [kernel.kallsyms]  psi_group_change 
+   0.42%     0.07%             libjvm.so  ElfSymbolTable::lookup 
+   0.37%     0.05%     [kernel.kallsyms]  vfs_write 
+   0.37%     0.24%     [kernel.kallsyms]  pipe_write 
+   0.30%     0.03%     [kernel.kallsyms]  restore_fpregs_from_fpstate 
+   0.27%     0.09%             libjvm.so  xmlStream::write_text 
+   0.25%     0.03%             libc.so.6  __GI___pthread_disable_asynccancel 
+   0.23%     0.21%             libjvm.so  defaultStream::write 
+   0.23%     0.31%     [kernel.kallsyms]  select_task_rq_fair 
+   0.22%     0.10%        hsdis-amd64.so  print_insn 
+  11.09%     9.57%  <...other 209 warm methods...>
+....................................................................................................
+  99.98%    98.78%  <totals>
+
+....[Distribution by Source]........................................................................
+  81.77%    85.75%           c2, level 4
+  12.58%    10.46%     [kernel.kallsyms]
+   2.26%     1.78%             libjvm.so
+   1.73%     1.22%             libc.so.6
+   0.98%     0.52%                      
+   0.32%     0.19%        hsdis-amd64.so
+   0.18%     0.05%           interpreter
+   0.13%     0.03%  ld-linux-x86-64.so.2
+   0.02%                     c1, level 3
+....................................................................................................
+  99.98%   100.00%  <totals>
+
+Perf-annotated Hotspot log is saved to /home/ec2-user/runs/D24/M-r07-1.perfasm
+
+
+# Run complete. Total time: 00:00:17
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                          (dotAll)  (generateBytecode)  (scanPlan)         (workload)  Mode  Cnt   Score    Error  Units
+BenchmarkRe2ScanPlan.contains         false               false        true  FOLDED_UNANCHORED  avgt    5  33.155 ± 23.227  ns/op
+BenchmarkRe2ScanPlan.contains:asm     false               false        true  FOLDED_UNANCHORED  avgt          NaN             ---
+
+Benchmark result is saved to /home/ec2-user/runs/D24/M-r07-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    3055 Nov 18 20:46 /home/ec2-user/runs/D24/M-r07-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user  163569 Nov 18 20:46 /home/ec2-user/runs/D24/M-r07-1.log
+-rw-rw-r--. 1 ec2-user ec2-user 1664772 Nov 18 20:46 /home/ec2-user/runs/D24/M-r07-1.perfasm.zst
+-rw-rw-r--. 1 ec2-user ec2-user 1609875 Nov 18 20:45 /home/ec2-user/runs/D24/M-r07-1.xml.zst

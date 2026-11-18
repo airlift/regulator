@@ -1,0 +1,241 @@
+platform	host	row	leg	fork	kind	score_ns_op	instructions_op	cycles_op	nmethod	cid	main_code_B	inline_decisions	inline_with_sizes	stub_call_site	hot_loop_off	hot_loop_mod32	hot_loop_mod64	hot_loop_B	hot_loop_ins	hot_loop_cycles_pct	hot_loop_calls	carried	spill	invariant	store_only	call_save	call_sites
+r8i	r8i-e24a	7	M	1	perfasm	33.155			ScanPlan::matchAsciiFoldedUnanchoredAt	933	3208	ee9b680e	220c6323	ae5f310a	0xf0	16	48	96	24	3.06	-	2	0	3	2	0	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	M	2	perfasm	35.092			ScanPlan::matchAsciiFoldedUnanchoredAt	935	3216	ee9b680e	220c6323	ae5f310a	0x6c	12	44	206	45	7.04	matchesAsciiFolded	8	2	2	1	3	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	M	3	perfasm	36.721			ScanPlan::matchAsciiFoldedUnanchoredAt	994	3208	ee9b680e	220c6323	ae5f310a	0x6c	12	44	206	45	6.65	matchesAsciiFolded	8	2	2	1	3	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	F'	1	perfasm	34.060			ScanPlan::matchAsciiFoldedUnanchoredAt	944	3168	ee9b680e	cd403f5f	ae5f310a	0x69	9	41	189	42	6.83	matchesAsciiFolded	8	2	2	0	2	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	F'	2	perfasm	33.648			ScanPlan::matchAsciiFoldedUnanchoredAt	953	3152	ee9b680e	cd403f5f	ae5f310a	0xe0	0	32	96	24	3.27	-	2	0	3	2	0	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	F'	3	perfasm	32.779			ScanPlan::matchAsciiFoldedUnanchoredAt	1021	3168	ee9b680e	cd403f5f	ae5f310a	0x69	9	41	189	42	6.95	matchesAsciiFolded	8	2	2	0	2	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	7	A	1	perfasm	37.514			ScanPlan::matchAsciiFoldedUnanchoredAt	918	4056	c4260465	d7e419d2	ae5f310a	0xed	13	45	90	23	2.46	-	4	0	0	2	0	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	7	A	2	perfasm	35.028			ScanPlan::matchAsciiFoldedUnanchoredAt	913	4056	c4260465	d7e419d2	ae5f310a	0xed	13	45	90	23	2.61	-	4	0	0	2	0	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	7	A	3	perfasm	37.013			ScanPlan::matchAsciiFoldedUnanchoredAt	963	4064	c4260465	d7e419d2	ae5f310a	0x67	7	39	209	46	6.06	matchesAsciiFolded	11	4	0	1	1	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	7	F	1	perfasm	35.982			ScanPlan::matchAsciiFoldedUnanchoredAt	958	4152	c4260465	5d933bf8	ae5f310a	0x67	7	39	204	45	6.49	matchesAsciiFolded	11	4	0	0	2	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	7	F	2	perfasm	36.601			ScanPlan::matchAsciiFoldedUnanchoredAt	962	4144	c4260465	5d933bf8	ae5f310a	0x5df	31	31	282	72	2.86	re2CharacterWidth	0	4	12	0	0	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	7	F	3	perfasm	34.944			ScanPlan::matchAsciiFoldedUnanchoredAt	976	4152	c4260465	5d933bf8	ae5f310a	0x67	7	39	204	45	6.92	matchesAsciiFolded	11	4	0	0	2	matchesAsciiFolded:3/0;findRe2RunStop:8/1;re2CharacterWidth:2/0;ordinal:0/0;re2Match:0/6
+r8i	r8i-e24a	6	M	1	perfasm	37.237			ScanPlan::matchAsciiFoldedUnanchoredAt	981	3216	ee9b680e	220c6323	ae5f310a	0x6c	12	44	206	45	6.88	matchesAsciiFolded	8	2	2	1	3	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	6	M	2	perfasm	34.929			ScanPlan::matchAsciiFoldedUnanchoredAt	968	3216	ee9b680e	220c6323	ae5f310a	0x6c	12	44	206	45	7.11	matchesAsciiFolded	8	2	2	1	3	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	6	M	3	perfasm	36.655			ScanPlan::matchAsciiFoldedUnanchoredAt	947	3208	ee9b680e	220c6323	ae5f310a	0x6c	12	44	206	45	7.06	matchesAsciiFolded	8	2	2	1	3	matchesAsciiFolded:3/0;findRe2ByteStop:7/9;re2WalkNonAscii:7/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	6	F'	1	perfasm	38.241			ScanPlan::matchAsciiFoldedUnanchoredAt	1001	3152	ee9b680e	cd403f5f	ae5f310a	0xe0	0	32	96	24	2.85	-	2	0	3	2	0	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	6	F'	2	perfasm	34.448			ScanPlan::matchAsciiFoldedUnanchoredAt	952	3168	ee9b680e	cd403f5f	ae5f310a	0x69	9	41	189	42	6.78	matchesAsciiFolded	8	2	2	0	2	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	6	F'	3	perfasm	35.800			ScanPlan::matchAsciiFoldedUnanchoredAt	977	3152	ee9b680e	cd403f5f	ae5f310a	0xe0	0	32	96	24	2.97	-	2	0	3	2	0	matchesAsciiFolded:2/0;findRe2ByteStop:7/9;re2WalkNonAscii:8/5;ordinal:0/0;re2Match:0/0;vectorFactory:0/0;vectorFactory:0/0
+r8i	r8i-e24a	6	A	1	perfasm	35.732			ScanPlan::matchAsciiFoldedUnanchoredAt	929	4008	da602272	b28c25eb	ae5f310a	0x6d	13	45	245	58	8.41	matchesAsciiFolded	9	6	2	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	6	A	2	perfasm	35.351			ScanPlan::matchAsciiFoldedUnanchoredAt	929	4008	da602272	b28c25eb	ae5f310a	0x6d	13	45	245	58	7.48	matchesAsciiFolded	9	6	2	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	6	A	3	perfasm	36.522			ScanPlan::matchAsciiFoldedUnanchoredAt	951	4000	da602272	b28c25eb	ae5f310a	0x6d	13	45	209	47	6.85	matchesAsciiFolded	9	6	1	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	6	F	1	perfasm	35.238			ScanPlan::matchAsciiFoldedUnanchoredAt	938	4072	da602272	dc8096c8	ae5f310a	0x6d	13	45	210	47	6.28	matchesAsciiFolded	9	6	1	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	6	F	2	perfasm	35.323			ScanPlan::matchAsciiFoldedUnanchoredAt	889	4072	da602272	dc8096c8	ae5f310a	0x6d	13	45	210	47	7.76	matchesAsciiFolded	9	6	1	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	6	F	3	perfasm	37.942			ScanPlan::matchAsciiFoldedUnanchoredAt	948	4056	da602272	dc8096c8	ae5f310a	0x6d	13	45	246	58	7.14	matchesAsciiFolded	9	6	2	1	1	matchesAsciiFolded:4/0;ordinal:0/0;match:0/4
+r8i	r8i-e24a	1	M	1	perfasm	64.161			ScanPlan::matchUnanchoredAt	993	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	15.43	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	1	M	2	perfasm	64.594			ScanPlan::matchUnanchoredAt	984	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	14.98	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	1	M	3	perfasm	57.143			ScanPlan::matchUnanchoredAt	954	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	16.87	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	1	F'	1	perfasm	57.075			ScanPlan::matchUnanchoredAt	995	6504	77fad559	78405449	-	0x277	23	23	296	67	17.41	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	1	F'	2	perfasm	63.161			ScanPlan::matchUnanchoredAt	992	6504	77fad559	78405449	-	0x277	23	23	296	67	16.62	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	1	F'	3	perfasm	68.515			ScanPlan::matchUnanchoredAt	964	6504	77fad559	78405449	-	0x277	23	23	296	67	15.02	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	2	M	1	perfasm	66.688			ScanPlan::matchUnanchoredAt	981	6544	f43b076f	55d98ec9	-	0x332	18	18	288	65	16.5	-	2	9	5	1	0	re2WalkNonAscii:0/2;checkIndex:6/6;checkIndex:7/6;checkIndex:6/6;checkIndex:7/7;checkIndex:6/6;checkIndex:7/1;checkIndex:6/6;checkIndex:7/7;ordinal:0/0;re2Match:0/0;anyTrueHelper:0/0;getBits:0/0
+r8i	r8i-e24a	2	M	2	perfasm	68.099			ScanPlan::matchUnanchoredAt	1000	6544	f43b076f	55d98ec9	-	0x332	18	18	288	65	16.43	-	2	9	5	1	0	re2WalkNonAscii:0/2;checkIndex:6/6;checkIndex:7/6;checkIndex:6/6;checkIndex:7/7;checkIndex:6/6;checkIndex:7/1;checkIndex:6/6;checkIndex:7/7;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	2	M	3	perfasm	69.673			ScanPlan::matchUnanchoredAt	928	6744	f43b076f	55d98ec9	-	0x342	2	34	304	67	17.67	-	2	13	5	0	0	re2WalkNonAscii:0/2;checkIndex:6/7;checkIndex:8/5;checkIndex:6/7;checkIndex:8/7;checkIndex:6/7;checkIndex:8/1;checkIndex:6/7;checkIndex:8/7;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	2	F'	1	perfasm	64.307			ScanPlan::matchUnanchoredAt	982	6600	f43b076f	4a2699bb	-	0x236	22	22	298	65	18.14	-	2	12	5	0	0	re2WalkNonAscii:0/2;checkIndex:6/6;checkIndex:7/6;checkIndex:6/6;checkIndex:7/7;checkIndex:6/6;checkIndex:7/1;checkIndex:6/6;checkIndex:7/7;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	2	F'	2	perfasm	66.876			ScanPlan::matchUnanchoredAt	992	6600	f43b076f	4a2699bb	-	0x236	22	22	298	65	18.15	-	2	12	5	0	0	re2WalkNonAscii:0/2;checkIndex:6/6;checkIndex:7/6;checkIndex:6/6;checkIndex:7/7;checkIndex:6/6;checkIndex:7/1;checkIndex:6/6;checkIndex:7/7;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	2	F'	3	perfasm	66.600			ScanPlan::matchUnanchoredAt	955	6600	f43b076f	4a2699bb	-	0x236	22	22	298	65	19.34	-	2	12	5	0	0	re2WalkNonAscii:0/2;checkIndex:6/6;checkIndex:7/6;checkIndex:6/6;checkIndex:7/7;checkIndex:6/6;checkIndex:7/1;checkIndex:6/6;checkIndex:7/7;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	5	M	1	perfasm	62.380			ScanPlan::matchUnanchoredAt	985	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	15.97	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	5	M	2	perfasm	61.479			ScanPlan::matchUnanchoredAt	1018	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	15.85	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0;anyTrueHelper:0/0;getBits:0/0
+r8i	r8i-e24a	5	M	3	perfasm	60.709			ScanPlan::matchUnanchoredAt	1041	6424	77fad559	88c3a0ae	-	0x27e	30	30	283	65	16.05	-	2	5	9	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	5	F'	1	perfasm	64.055			ScanPlan::matchUnanchoredAt	1031	6504	77fad559	78405449	-	0x277	23	23	296	67	15.63	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0;anyTrueHelper:0/0;getBits:0/0
+r8i	r8i-e24a	5	F'	2	perfasm	59.199			ScanPlan::matchUnanchoredAt	1059	6504	77fad559	78405449	-	0x277	23	23	296	67	17.33	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0;prepare:1/1;prepare:1/1
+r8i	r8i-e24a	5	F'	3	perfasm	64.686			ScanPlan::matchUnanchoredAt	1041	6504	77fad559	78405449	-	0x277	23	23	296	67	15.64	-	2	5	10	0	0	re2WalkNonAscii:0/2;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;checkIndex:7/5;checkIndex:6/7;checkIndex:7/5;checkIndex:6/5;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	3	M	1	perfasm	35.695			UnanchoredCompiledScanTrinoRegexp/0x0000000044125400::matchUnanchoredAt	1495	4784	a230c124	ab93f3de	c011a365	0x570	16	16	286	66	3.84	re2RunWalkNonAscii	0	0	8	0	2	re2RunWalkNonAscii:0/2;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	3	M	2	perfasm	35.006			UnanchoredCompiledScanTrinoRegexp/0x0000000031125400::matchUnanchoredAt	1458	4784	a230c124	ab93f3de	c011a365	0x570	16	16	286	66	3.79	re2RunWalkNonAscii	0	0	8	0	2	re2RunWalkNonAscii:0/2;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	3	M	3	perfasm	34.644			UnanchoredCompiledScanTrinoRegexp/0x0000000076125400::matchUnanchoredAt	1416	4784	a230c124	ab93f3de	c011a365	0x500	0	32	399	99	4.25	re2RunWalkNonAscii	4	0	17	0	2	re2RunWalkNonAscii:0/2;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	3	F'	1	perfasm	34.539			UnanchoredCompiledScanTrinoRegexp/0x0000000051125400::matchUnanchoredAt	1512	4816	a230c124	b5ab55d2	c011a365	0x590	16	48	284	64	3.84	re2RunWalkNonAscii	0	0	7	0	4	re2RunWalkNonAscii:1/3;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	3	F'	2	perfasm	35.580			UnanchoredCompiledScanTrinoRegexp/0x0000000052125400::matchUnanchoredAt	1456	4816	a230c124	b5ab55d2	c011a365	0x590	16	48	284	64	3.95	re2RunWalkNonAscii	0	0	7	0	4	re2RunWalkNonAscii:1/3;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	3	F'	3	perfasm	32.991			UnanchoredCompiledScanTrinoRegexp/0x000000006f125400::matchUnanchoredAt	1475	4824	a230c124	b5ab55d2	c011a365	0x510	16	48	415	101	5.55	re2RunWalkNonAscii	4	0	18	0	3	re2RunWalkNonAscii:1/3;checkIndex:10/4;checkIndex:9/4;checkIndex:10/1;checkIndex:6/1;checkIndex:9/1;checkIndex:6/7
+r8i	r8i-e24a	10	M	1	perfasm	31.693			UnanchoredCompiledScanRe2/0x000000008516c000::search	1499	5824	dc8501a0	957ced36	-	0x7b0	16	48	316	70	4.07	re2RunWalkNonAscii,findRe2ByteStop	0	4	9	0	5	re2RunWalkNonAscii:0/2;findRe2ByteStop:0/0;containsRequiredLiteral:0/0;byteArray:0/0
+r8i	r8i-e24a	10	M	2	perfasm	30.930			UnanchoredCompiledScanRe2/0x000000004416c000::search	1520	5824	dc8501a0	957ced36	-	0x7b0	16	48	316	70	3.6	re2RunWalkNonAscii,findRe2ByteStop	0	4	9	0	5	re2RunWalkNonAscii:0/2;findRe2ByteStop:0/0;containsRequiredLiteral:0/0;byteArray:0/0
+r8i	r8i-e24a	10	M	3	perfasm	27.906			UnanchoredCompiledScanRe2/0x000000008f16c000::search	1456	5832	dc8501a0	957ced36	-	0x6d0	16	16	137	30	3.33	-	0	0	0	3	0	re2RunWalkNonAscii:0/2;containsRequiredLiteral:0/0;findRe2ByteStop:0/0;byteArray:0/0
+r8i	r8i-e24a	10	F'	1	perfasm	28.748			UnanchoredCompiledScanRe2/0x000000000816c000::search	1501	5880	dc8501a0	1fba199f	-	0x6e0	0	32	136	30	3.52	-	0	0	0	3	0	re2RunWalkNonAscii:0/2;containsRequiredLiteral:0/0;findRe2ByteStop:0/0;byteArray:0/0
+r8i	r8i-e24a	10	F'	2	perfasm	28.842			UnanchoredCompiledScanRe2/0x000000006916c000::search	1483	5896	dc8501a0	1fba199f	-	0x7bc	28	60	312	69	3.95	re2RunWalkNonAscii,findRe2ByteStop	0	4	8	0	4	re2RunWalkNonAscii:0/2;findRe2ByteStop:0/0;containsRequiredLiteral:0/0;byteArray:0/0
+r8i	r8i-e24a	10	F'	3	perfasm	32.804			UnanchoredCompiledScanRe2/0x000000002b16c000::search	1509	5896	dc8501a0	1fba199f	-	0x7bc	28	60	312	69	3.18	re2RunWalkNonAscii,findRe2ByteStop	0	4	8	0	4	re2RunWalkNonAscii:0/2;findRe2ByteStop:0/0;containsRequiredLiteral:0/0;byteArray:0/0;anyTrueHelper:0/0;getBits:0/0
+r8i	r8i-e24a	8	M	1	perfasm	35.900			ScanPlan::matchUnanchoredAt	1121	3960	fae9e062	86fc63d8	-	0x11f	31	31	641	145	11.56	re2WalkNonAscii	29	8	9	3	0	re2WalkNonAscii:0/2;findRe2ByteStop:9/0;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	8	M	2	perfasm	39.313			ScanPlan::matchUnanchoredAt	1124	3960	fae9e062	86fc63d8	-	0x11f	31	31	641	145	11.25	re2WalkNonAscii	29	8	9	3	0	re2WalkNonAscii:0/2;findRe2ByteStop:10/0;ordinal:0/0;re2Match:0/0;next:2/1;find:0/1;contains:0/0;next:0/0;contains:0/0;find:0/0;consume:0/0
+r8i	r8i-e24a	8	M	3	perfasm	39.979			ScanPlan::matchUnanchoredAt	1092	3816	fae9e062	86fc63d8	-	0x135	21	53	675	155	10.91	re2WalkNonAscii	26	8	10	3	0	re2WalkNonAscii:0/2;findRe2ByteStop:9/0;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	8	F'	1	perfasm	37.621			ScanPlan::matchUnanchoredAt	1089	4080	fae9e062	b830fa0c	-	0x176	22	54	252	58	5.82	-	0	6	5	0	0	re2WalkNonAscii:0/2;findRe2ByteStop:10/0;ordinal:0/0;re2Match:0/0;bOp:0/0;bOp:0/0
+r8i	r8i-e24a	8	F'	2	perfasm	36.226			ScanPlan::matchUnanchoredAt	1120	3928	fae9e062	b830fa0c	-	0x133	19	51	677	155	12.39	re2WalkNonAscii	26	8	10	3	0	re2WalkNonAscii:0/2;findRe2ByteStop:9/0;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	8	F'	3	perfasm	37.445			ScanPlan::matchUnanchoredAt	1086	4088	fae9e062	b830fa0c	-	0x124	4	36	708	160	11.19	re2WalkNonAscii	29	8	10	3	0	re2WalkNonAscii:0/2;findRe2ByteStop:9/0;ordinal:0/0;re2Match:0/0
+r8i	r8i-e24a	14	M	1	perfasm	19.424			ScanPlan::matchUnanchoredAt	886	5184	d5d1fb70	c97b770a	-	0x1fc	28	28	523	123	24.81	-	8	4	10	2	0	checkIndex:13/1;checkIndex:10/0;checkIndex:12/0;checkIndex:13/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	14	M	2	perfasm	19.733			ScanPlan::matchUnanchoredAt	899	5176	d5d1fb70	c97b770a	-	0x1fc	28	28	864	186	24.94	-	21	2	11	0	0	checkIndex:13/1;checkIndex:10/0;checkIndex:12/0;checkIndex:13/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	14	M	3	perfasm	19.582			ScanPlan::matchUnanchoredAt	909	5176	d5d1fb70	c97b770a	-	0x1fc	28	28	864	186	25.69	-	21	2	11	0	0	checkIndex:13/1;checkIndex:10/0;checkIndex:12/0;checkIndex:13/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	14	F'	1	perfasm	19.457			ScanPlan::matchUnanchoredAt	913	5464	d5d1fb70	bec9a0c1	-	0x1f3	19	19	609	134	26.4	-	17	4	7	2	0	checkIndex:13/1;checkIndex:10/1;checkIndex:13/1;checkIndex:14/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	14	F'	2	perfasm	19.409			ScanPlan::matchUnanchoredAt	934	5456	d5d1fb70	bec9a0c1	-	0x1f3	19	19	980	200	25.7	-	30	2	8	0	0	checkIndex:13/1;checkIndex:10/1;checkIndex:13/1;checkIndex:14/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	14	F'	3	perfasm	19.449			ScanPlan::matchUnanchoredAt	931	5456	d5d1fb70	bec9a0c1	-	0x1f3	19	19	980	200	25.4	-	30	2	8	0	0	checkIndex:13/1;checkIndex:10/1;checkIndex:13/1;checkIndex:14/1;checkIndex:10/1;ordinal:0/0;re2Match:1/0
+r8i	r8i-e24a	7	M	1	perfnorm	28.503	600.35	111.24																			
+r8i	r8i-e24a	7	M	2	perfnorm	28.626	599.77	111.68																			
+r8i	r8i-e24a	7	M	3	perfnorm	28.687	600.51	111.73																			
+r8i	r8i-e24a	7	F'	1	perfnorm	28.687	598.87	111.98																			
+r8i	r8i-e24a	7	F'	2	perfnorm	28.953	598.51	112.83																			
+r8i	r8i-e24a	7	F'	3	perfnorm	28.721	598.36	112.09																			
+r8i	r8i-e24a	7	A	1	perfnorm	29.508	618.74	115.16																			
+r8i	r8i-e24a	7	A	2	perfnorm	29.608	619.09	115.55																			
+r8i	r8i-e24a	7	A	3	perfnorm	29.856	618.45	116.48																			
+r8i	r8i-e24a	7	F	1	perfnorm	30.128	620.64	117.61																			
+r8i	r8i-e24a	7	F	2	perfnorm	30.147	620.57	117.68																			
+r8i	r8i-e24a	7	F	3	perfnorm	30.271	619.70	118.17																			
+r8i	r8i-e24a	6	M	1	perfnorm	29.490	602.31	115.08																			
+r8i	r8i-e24a	6	M	2	perfnorm	29.637	602.64	115.65																			
+r8i	r8i-e24a	6	M	3	perfnorm	29.784	602.88	116.22																			
+r8i	r8i-e24a	6	F'	1	perfnorm	29.982	600.23	116.99																			
+r8i	r8i-e24a	6	F'	2	perfnorm	29.748	600.57	116.13																			
+r8i	r8i-e24a	6	F'	3	perfnorm	29.790	599.80	116.26																			
+r8i	r8i-e24a	6	A	1	perfnorm	30.164	609.88	117.72																			
+r8i	r8i-e24a	6	A	2	perfnorm	30.130	610.49	117.57																			
+r8i	r8i-e24a	6	A	3	perfnorm	30.196	609.40	117.82																			
+r8i	r8i-e24a	6	F	1	perfnorm	29.996	610.19	117.06																			
+r8i	r8i-e24a	6	F	2	perfnorm	31.370	610.19	122.43																			
+r8i	r8i-e24a	6	F	3	perfnorm	30.826	611.55	120.29																			
+r8i	r8i-e24a	1	M	1	perfnorm	52.857	1017.58	206.23																			
+r8i	r8i-e24a	1	M	2	perfnorm	52.907	1017.97	206.67																			
+r8i	r8i-e24a	1	M	3	perfnorm	52.468	1018.24	204.81																			
+r8i	r8i-e24a	1	F'	1	perfnorm	53.110	1021.96	207.23																			
+r8i	r8i-e24a	1	F'	2	perfnorm	53.402	1022.66	208.47																			
+r8i	r8i-e24a	1	F'	3	perfnorm	52.701	1021.67	205.67																			
+r8i	r8i-e24a	2	M	1	perfnorm	54.136	1117.56	211.36																			
+r8i	r8i-e24a	2	M	2	perfnorm	53.547	1117.49	209.03																			
+r8i	r8i-e24a	2	M	3	perfnorm	52.979	1147.81	206.76																			
+r8i	r8i-e24a	2	F'	1	perfnorm	55.161	1133.59	215.33																			
+r8i	r8i-e24a	2	F'	2	perfnorm	53.781	1164.35	209.92																			
+r8i	r8i-e24a	2	F'	3	perfnorm	55.146	1134.54	215.28																			
+r8i	r8i-e24a	5	M	1	perfnorm	52.110	1018.26	203.52																			
+r8i	r8i-e24a	5	M	2	perfnorm	52.137	1018.09	203.08																			
+r8i	r8i-e24a	5	M	3	perfnorm	52.135	1018.48	203.67																			
+r8i	r8i-e24a	5	F'	1	perfnorm	52.100	1022.28	203.33																			
+r8i	r8i-e24a	5	F'	2	perfnorm	52.083	1022.26	203.21																			
+r8i	r8i-e24a	5	F'	3	perfnorm	52.236	1022.43	204.03																			
+r8i	r8i-e24a	3	M	1	perfnorm	29.629	520.97	115.68																			
+r8i	r8i-e24a	3	M	2	perfnorm	29.570	520.93	115.38																			
+r8i	r8i-e24a	3	M	3	perfnorm	30.067	521.44	117.36																			
+r8i	r8i-e24a	3	F'	1	perfnorm	29.833	519.43	116.43																			
+r8i	r8i-e24a	3	F'	2	perfnorm	29.739	519.93	116.06																			
+r8i	r8i-e24a	3	F'	3	perfnorm	29.773	520.11	116.16																			
+r8i	r8i-e24a	10	M	1	perfnorm	27.333	561.53	106.69																			
+r8i	r8i-e24a	10	M	2	perfnorm	27.250	561.27	106.24																			
+r8i	r8i-e24a	10	M	3	perfnorm	27.188	561.20	106.11																			
+r8i	r8i-e24a	10	F'	1	perfnorm	25.177	561.18	98.26																			
+r8i	r8i-e24a	10	F'	2	perfnorm	27.317	561.14	106.55																			
+r8i	r8i-e24a	10	F'	3	perfnorm	27.287	561.11	106.48																			
+r8i	r8i-e24a	8	M	1	perfnorm	31.280	666.75	122.07																			
+r8i	r8i-e24a	8	M	2	perfnorm	31.327	666.98	122.26																			
+r8i	r8i-e24a	8	M	3	perfnorm	31.470	669.57	122.59																			
+r8i	r8i-e24a	8	F'	1	perfnorm	31.413	668.07	122.60																			
+r8i	r8i-e24a	8	F'	2	perfnorm	31.393	668.03	122.51																			
+r8i	r8i-e24a	8	F'	3	perfnorm	31.373	667.93	122.44																			
+r8i	r8i-e24a	14	M	1	perfnorm	17.455	427.70	68.06																			
+r8i	r8i-e24a	14	M	2	perfnorm	17.503	427.20	68.26																			
+r8i	r8i-e24a	14	M	3	perfnorm	17.598	427.71	68.62																			
+r8i	r8i-e24a	14	F'	1	perfnorm	17.839	428.90	69.56																			
+r8i	r8i-e24a	14	F'	2	perfnorm	16.771	426.30	65.41																			
+r8i	r8i-e24a	14	F'	3	perfnorm	18.028	428.99	70.27																			
+r9g	r9g-e24a	7	M	1	perfasm	37.758			ScanPlan::matchAsciiFoldedUnanchoredAt	971	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	256	64	10.38	matchesAsciiFolded	11	6	1	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	7	M	2	perfasm	37.730			ScanPlan::matchAsciiFoldedUnanchoredAt	1006	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	256	64	9.73	matchesAsciiFolded	11	6	1	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	7	M	3	perfasm	37.709			ScanPlan::matchAsciiFoldedUnanchoredAt	1012	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	212	53	9.72	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	7	F'	1	perfasm	37.545			ScanPlan::matchAsciiFoldedUnanchoredAt	977	2552	ee9b680e	cd403f5f	ae5f310a	0x6c	12	44	200	50	10.17	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	7	F'	2	perfasm	38.352			ScanPlan::matchAsciiFoldedUnanchoredAt	1083	2552	ee9b680e	cd403f5f	ae5f310a	0x6c	12	44	200	50	9.83	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	7	F'	3	perfasm	37.545			ScanPlan::matchAsciiFoldedUnanchoredAt	1039	2536	ee9b680e	cd403f5f	ae5f310a	0xcc	12	12	532	133	10.17	findRe2ByteStop,re2WalkNonAscii	0	37	1	0	4	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	M	1	perfasm	39.208			ScanPlan::matchAsciiFoldedUnanchoredAt	968	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	212	53	9.45	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	M	2	perfasm	39.233			ScanPlan::matchAsciiFoldedUnanchoredAt	972	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	256	64	11.01	matchesAsciiFolded	11	6	1	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	M	3	perfasm	39.244			ScanPlan::matchAsciiFoldedUnanchoredAt	940	2536	ee9b680e	220c6323	ae5f310a	0x6c	12	44	212	53	8.85	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	F'	1	perfasm	39.402			ScanPlan::matchAsciiFoldedUnanchoredAt	960	2560	ee9b680e	cd403f5f	ae5f310a	0x6c	12	44	200	50	9.47	matchesAsciiFolded	11	6	0	0	0	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	F'	2	perfasm	39.367			ScanPlan::matchAsciiFoldedUnanchoredAt	992	2544	ee9b680e	cd403f5f	ae5f310a	0xcc	12	12	532	133	9.74	findRe2ByteStop,re2WalkNonAscii	0	37	1	0	4	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	6	F'	3	perfasm	39.305			ScanPlan::matchAsciiFoldedUnanchoredAt	952	2552	ee9b680e	cd403f5f	ae5f310a	0xcc	12	12	492	123	10.67	findRe2ByteStop,re2WalkNonAscii	0	37	0	0	4	matchesAsciiFolded:3/0;findRe2ByteStop:8/9;re2WalkNonAscii:8/8;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	M	1	perfasm	56.068			ScanPlan::matchUnanchoredAt	988	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	18.11	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	M	2	perfasm	55.980			ScanPlan::matchUnanchoredAt	1052	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	21.55	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	M	3	perfasm	56.598			ScanPlan::matchUnanchoredAt	993	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	19.55	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	F'	1	perfasm	55.197			ScanPlan::matchUnanchoredAt	1045	5504	77fad559	78405449	-	0x224	4	36	384	96	20.83	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	F'	2	perfasm	55.400			ScanPlan::matchUnanchoredAt	987	5496	77fad559	78405449	-	0x1f8	24	56	384	96	21.6	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	1	F'	3	perfasm	55.741			ScanPlan::matchUnanchoredAt	1056	5504	77fad559	78405449	-	0x224	4	36	384	96	19.78	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	2	M	1	perfasm	84.595			ScanPlan::matchUnanchoredAt	1044	4616	f43b076f	55d98ec9	-	0x308	8	8	416	104	33.33	-	28	14	0	8	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/1;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	2	M	2	perfasm	84.797			ScanPlan::matchUnanchoredAt	1013	4616	f43b076f	55d98ec9	-	0x308	8	8	416	104	30.82	-	28	14	0	8	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/1;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	2	M	3	perfasm	83.969			ScanPlan::matchUnanchoredAt	1018	4616	f43b076f	55d98ec9	-	0x308	8	8	416	104	32.54	-	28	14	0	8	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/1;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	2	F'	1	perfasm	85.753			ScanPlan::matchUnanchoredAt	981	4760	f43b076f	4a2699bb	-	0x1e4	4	36	424	106	33.43	-	26	22	0	6	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/2;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/2;ordinal:0/0;re2Match:0/0;bOp:0/0;bOp:0/0
+r9g	r9g-e24a	2	F'	2	perfasm	85.364			ScanPlan::matchUnanchoredAt	986	4760	f43b076f	4a2699bb	-	0x1e4	4	36	424	106	39.01	-	26	22	0	6	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/2;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	2	F'	3	perfasm	86.035			ScanPlan::matchUnanchoredAt	1016	4760	f43b076f	4a2699bb	-	0x1e4	4	36	424	106	33.4	-	26	22	0	6	0	re2WalkNonAscii:0/3;checkIndex:4/1;checkIndex:2/1;checkIndex:4/1;checkIndex:2/2;checkIndex:4/1;checkIndex:2/0;checkIndex:4/1;checkIndex:2/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	M	1	perfasm	55.581			ScanPlan::matchUnanchoredAt	1071	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	23.73	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	M	2	perfasm	55.470			ScanPlan::matchUnanchoredAt	988	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	20.63	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	M	3	perfasm	55.556			ScanPlan::matchUnanchoredAt	1086	5456	77fad559	88c3a0ae	-	0x2c4	4	4	372	93	22.53	-	7	11	0	8	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/2;checkIndex:7/2;checkIndex:5/2;checkIndex:6/2;checkIndex:4/2;checkIndex:7/2;checkIndex:4/2;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	F'	1	perfasm	55.310			ScanPlan::matchUnanchoredAt	998	5504	77fad559	78405449	-	0x224	4	36	384	96	19.24	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	F'	2	perfasm	55.076			ScanPlan::matchUnanchoredAt	991	5504	77fad559	78405449	-	0x224	4	36	384	96	20.95	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	5	F'	3	perfasm	55.043			ScanPlan::matchUnanchoredAt	1082	5504	77fad559	78405449	-	0x224	4	36	384	96	21.9	-	7	18	0	5	0	re2WalkNonAscii:10/10;checkIndex:6/2;checkIndex:6/3;checkIndex:7/2;checkIndex:5/3;checkIndex:6/2;checkIndex:4/3;checkIndex:7/2;checkIndex:4/3;ordinal:0/0;re2Match:0/0
+r9g	r9g-e24a	3	M	1	perfasm	26.204			UnanchoredCompiledScanTrinoRegexp/0x0000007e01125400::matchUnanchoredAt	1407	3472	a230c124	ab93f3de	c011a365	0x470	16	48	324	81	6.79	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0
+r9g	r9g-e24a	3	M	2	perfasm	24.116			UnanchoredCompiledScanTrinoRegexp/0x0000600001125400::matchUnanchoredAt	1401	3472	a230c124	ab93f3de	c011a365	0x470	16	48	324	81	9.06	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0
+r9g	r9g-e24a	3	M	3	perfasm	24.352			UnanchoredCompiledScanTrinoRegexp/0x000007ff01125400::matchUnanchoredAt	1412	3472	a230c124	ab93f3de	c011a365	0x470	16	48	324	81	7.81	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0
+r9g	r9g-e24a	3	F'	1	perfasm	24.561			UnanchoredCompiledScanTrinoRegexp/0x00001e0001125400::matchUnanchoredAt	1454	3480	a230c124	b5ab55d2	c011a365	0x470	16	48	312	78	6.23	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0
+r9g	r9g-e24a	3	F'	2	perfasm	22.766			UnanchoredCompiledScanTrinoRegexp/0x00000f0001125400::matchUnanchoredAt	1464	3480	a230c124	b5ab55d2	c011a365	0x470	16	48	312	78	8.17	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0
+r9g	r9g-e24a	3	F'	3	perfasm	25.807			UnanchoredCompiledScanTrinoRegexp/0x000007e001125400::matchUnanchoredAt	1414	3480	a230c124	b5ab55d2	c011a365	0x470	16	48	312	78	7.89	re2RunWalkNonAscii	0	12	2	0	10	re2RunWalkNonAscii:11/11;checkIndex:7/0;checkIndex:9/0;checkIndex:7/0;checkIndex:3/0;checkIndex:7/0;checkIndex:3/0;anyTrueHelper:0/0;getBits:0/0
+r9g	r9g-e24a	10	M	1	perfasm	25.125			UnanchoredCompiledScanRe2/0x000003fc0116c000::search	1453	5272	aa8bf788	2fcaa355	-	0x270	16	48	136	34	4.93	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;containsRequiredLiteral:8/0;findRe2ByteStop:14/14;byteArray:0/0
+r9g	r9g-e24a	10	M	2	perfasm	25.067			UnanchoredCompiledScanRe2/0x00003f800116c000::search	1411	5272	aa8bf788	2fcaa355	-	0x270	16	48	136	34	5.97	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;containsRequiredLiteral:8/0;findRe2ByteStop:14/14;byteArray:0/0
+r9g	r9g-e24a	10	M	3	perfasm	25.326			UnanchoredCompiledScanRe2/0x000000780116c000::search	1411	5272	aa8bf788	2fcaa355	-	0x270	16	48	136	34	5.49	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;findRe2ByteStop:14/14;containsRequiredLiteral:8/0;byteArray:0/0
+r9g	r9g-e24a	10	F'	1	perfasm	25.136			UnanchoredCompiledScanRe2/0x00000ff00116c000::search	1494	5360	aa8bf788	4d115353	-	0x270	16	48	136	34	5.36	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;containsRequiredLiteral:8/0;findRe2ByteStop:14/14;byteArray:0/0
+r9g	r9g-e24a	10	F'	2	perfasm	26.436			UnanchoredCompiledScanRe2/0x000070000116c000::search	1326	5360	aa8bf788	4d115353	-	0x270	16	48	136	34	4.85	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;findRe2ByteStop:14/14;containsRequiredLiteral:8/0;byteArray:0/0
+r9g	r9g-e24a	10	F'	3	perfasm	25.142			UnanchoredCompiledScanRe2/0x00007e000116c000::search	1488	5360	aa8bf788	4d115353	-	0x270	16	48	136	34	5.04	-	0	0	0	0	0	re2RunWalkNonAscii:14/14;containsRequiredLiteral:8/0;findRe2ByteStop:14/14;byteArray:0/0
+r9g	r9g-e24a	8	M	1	perfasm	33.852			ScanPlan::matchUnanchoredAt	1089	2768	fae9e062	86fc63d8	-	0x10c	12	12	496	124	7.03	re2WalkNonAscii	2	20	0	0	4	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0;bOp:0/0;next:1/0;find:0/1;contains:0/0;next:0/0;contains:0/0;find:0/0;consume:0/0
+r9g	r9g-e24a	8	M	2	perfasm	33.271			ScanPlan::matchUnanchoredAt	1095	2768	fae9e062	86fc63d8	-	0x10c	12	12	496	124	7.92	re2WalkNonAscii	2	20	0	0	4	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	8	M	3	perfasm	34.215			ScanPlan::matchUnanchoredAt	1044	2768	fae9e062	86fc63d8	-	0x110	16	16	564	141	7.83	re2WalkNonAscii	2	20	0	0	4	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	8	F'	1	perfasm	33.139			ScanPlan::matchUnanchoredAt	1087	2800	fae9e062	b830fa0c	-	0x17c	28	60	232	58	4.78	-	0	4	0	0	0	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	8	F'	2	perfasm	32.991			ScanPlan::matchUnanchoredAt	1057	2840	fae9e062	b830fa0c	-	0x10c	12	12	504	126	8.14	re2WalkNonAscii	2	26	0	0	2	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	8	F'	3	perfasm	33.334			ScanPlan::matchUnanchoredAt	1120	2800	fae9e062	b830fa0c	-	0x114	20	20	560	140	8.39	re2WalkNonAscii	2	20	0	0	4	re2WalkNonAscii:11/11;findRe2ByteStop:12/12;ordinal:0/0;re2Match:1/0;bOp:0/0;bOp:0/0
+r9g	r9g-e24a	14	M	1	perfasm	19.060			ScanPlan::matchUnanchoredAt	917	3480	d5d1fb70	c97b770a	-	0xc8	8	8	592	148	18.38	-	0	2	0	0	0	checkIndex:16/1;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	14	M	2	perfasm	19.401			ScanPlan::matchUnanchoredAt	948	3536	d5d1fb70	c97b770a	-	0xc8	8	8	368	92	19.47	-	0	5	0	0	0	checkIndex:16/1;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	14	M	3	perfasm	16.835			ScanPlan::matchUnanchoredAt	959	3424	d5d1fb70	c97b770a	-	0xd4	20	20	568	142	15.73	-	0	0	0	0	0	checkIndex:16/0;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:2/0
+r9g	r9g-e24a	14	F'	1	perfasm	16.887			ScanPlan::matchUnanchoredAt	986	3488	d5d1fb70	bec9a0c1	-	0xcc	12	12	340	85	12.98	-	0	2	0	0	0	checkIndex:16/1;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:1/0
+r9g	r9g-e24a	14	F'	2	perfasm	17.277			ScanPlan::matchUnanchoredAt	958	3536	d5d1fb70	bec9a0c1	-	0xc8	8	8	604	151	18.63	-	0	5	0	0	0	checkIndex:16/1;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:1/0;makeDummyVector:0/0;length:1/0;vectorFactory:0/0;ldOp:0/0;ldOp:0/0
+r9g	r9g-e24a	14	F'	3	perfasm	16.785			ScanPlan::matchUnanchoredAt	958	3488	d5d1fb70	bec9a0c1	-	0xcc	12	12	340	85	15.26	-	0	2	0	0	0	checkIndex:16/1;checkIndex:14/0;checkIndex:15/0;checkIndex:16/0;checkIndex:14/0;ordinal:0/0;re2Match:1/0;allocateInstance:1/1;makeDummyVector:0/0;vectorFactory:0/0;linkToSpecial:0/0;rvOp:0/0;apply:0/0;apply:0/0
+r9g	r9g-e24a	7	M	1	perfnorm	36.027	627.22	118.74																			
+r9g	r9g-e24a	7	M	2	perfnorm	35.994	627.13	118.62																			
+r9g	r9g-e24a	7	M	3	perfnorm	36.006	627.23	118.65																			
+r9g	r9g-e24a	7	F'	1	perfnorm	35.934	619.76	118.48																			
+r9g	r9g-e24a	7	F'	2	perfnorm	35.855	619.86	118.16																			
+r9g	r9g-e24a	7	F'	3	perfnorm	36.026	620.71	118.77																			
+r9g	r9g-e24a	6	M	1	perfnorm	37.727	632.40	124.33																			
+r9g	r9g-e24a	6	M	2	perfnorm	37.691	632.41	124.23																			
+r9g	r9g-e24a	6	M	3	perfnorm	37.463	632.74	123.59																			
+r9g	r9g-e24a	6	F'	1	perfnorm	37.602	625.10	123.92																			
+r9g	r9g-e24a	6	F'	2	perfnorm	37.477	626.08	123.52																			
+r9g	r9g-e24a	6	F'	3	perfnorm	37.660	623.17	124.12																			
+r9g	r9g-e24a	1	M	1	perfnorm	53.118	1062.29	175.17																			
+r9g	r9g-e24a	1	M	2	perfnorm	52.930	1061.65	174.48																			
+r9g	r9g-e24a	1	M	3	perfnorm	53.021	1062.33	174.74																			
+r9g	r9g-e24a	1	F'	1	perfnorm	52.673	1041.57	173.64																			
+r9g	r9g-e24a	1	F'	2	perfnorm	53.247	1041.17	175.48																			
+r9g	r9g-e24a	1	F'	3	perfnorm	52.498	1041.45	173.03																			
+r9g	r9g-e24a	2	M	1	perfnorm	80.294	1345.80	264.72																			
+r9g	r9g-e24a	2	M	2	perfnorm	80.346	1300.92	264.86																			
+r9g	r9g-e24a	2	M	3	perfnorm	80.241	1345.67	264.52																			
+r9g	r9g-e24a	2	F'	1	perfnorm	81.228	1314.09	267.80																			
+r9g	r9g-e24a	2	F'	2	perfnorm	81.856	1359.28	269.83																			
+r9g	r9g-e24a	2	F'	3	perfnorm	81.351	1314.47	268.18																			
+r9g	r9g-e24a	5	M	1	perfnorm	53.368	1062.41	175.91																			
+r9g	r9g-e24a	5	M	2	perfnorm	53.326	1062.30	175.69																			
+r9g	r9g-e24a	5	M	3	perfnorm	53.447	1062.25	175.86																			
+r9g	r9g-e24a	5	F'	1	perfnorm	52.861	1041.50	174.21																			
+r9g	r9g-e24a	5	F'	2	perfnorm	53.023	1041.83	174.85																			
+r9g	r9g-e24a	5	F'	3	perfnorm	52.962	1041.09	174.54																			
+r9g	r9g-e24a	3	M	1	perfnorm	23.078	484.01	76.05																			
+r9g	r9g-e24a	3	M	2	perfnorm	22.943	484.12	75.63																			
+r9g	r9g-e24a	3	M	3	perfnorm	23.041	484.48	75.96																			
+r9g	r9g-e24a	3	F'	1	perfnorm	22.728	483.81	74.92																			
+r9g	r9g-e24a	3	F'	2	perfnorm	22.792	483.44	75.13																			
+r9g	r9g-e24a	3	F'	3	perfnorm	22.840	483.53	75.29																			
+r9g	r9g-e24a	10	M	1	perfnorm	25.032	526.56	82.50																			
+r9g	r9g-e24a	10	M	2	perfnorm	25.034	526.63	82.52																			
+r9g	r9g-e24a	10	M	3	perfnorm	25.057	526.65	82.60																			
+r9g	r9g-e24a	10	F'	1	perfnorm	25.178	529.52	82.98																			
+r9g	r9g-e24a	10	F'	2	perfnorm	25.155	529.71	82.92																			
+r9g	r9g-e24a	10	F'	3	perfnorm	25.256	529.58	83.24																			
+r9g	r9g-e24a	8	M	1	perfnorm	32.509	612.23	107.17																			
+r9g	r9g-e24a	8	M	2	perfnorm	32.427	612.27	106.88																			
+r9g	r9g-e24a	8	M	3	perfnorm	32.424	612.26	106.88																			
+r9g	r9g-e24a	8	F'	1	perfnorm	32.109	613.16	105.83																			
+r9g	r9g-e24a	8	F'	2	perfnorm	31.930	613.12	105.25																			
+r9g	r9g-e24a	8	F'	3	perfnorm	31.957	613.24	105.34																			
+r9g	r9g-e24a	14	M	1	perfnorm	16.182	365.04	53.32																			
+r9g	r9g-e24a	14	M	2	perfnorm	16.133	365.14	53.18																			
+r9g	r9g-e24a	14	M	3	perfnorm	16.535	367.39	54.48																			
+r9g	r9g-e24a	14	F'	1	perfnorm	16.747	367.21	55.18																			
+r9g	r9g-e24a	14	F'	2	perfnorm	16.313	366.98	53.76																			
+r9g	r9g-e24a	14	F'	3	perfnorm	16.214	367.04	53.44																			
