@@ -92,6 +92,9 @@ final class Dfa
     private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 16;
     // The matching states one many-match byte scan holds for its caller to record.
     static final int MANY_MATCH_SCAN_STATES = 64;
+    // A search records its first matches through its own step, so a short text that matches a few
+    // times allocates no buffer.
+    static final int MANY_MATCH_UNBUFFERED_STOPS = 8;
     // Sidecar rows and entries are eight-byte aligned, so their low bits encode computed terminals.
     private static final long ABSOLUTE_POINTER_TAG_MASK = Long.BYTES - 1;
     private static final long ABSOLUTE_POINTER_MATCH_TAG = 1;
@@ -2638,10 +2641,11 @@ final class Dfa
         }
 
         // The byte scan's matched states: slot 0 holds the count, and the following slots the
-        // matched state offsets. Until the search's own step enters a matching state, there is no
-        // buffer, and the scan stops before a matching transition, so a text that never matches
-        // allocates none.
+        // matched state offsets. Until the search's own step has recorded
+        // MANY_MATCH_UNBUFFERED_STOPS matches, there is no buffer, and the scan stops before each
+        // matching transition, so a text that matches only a few times allocates none.
         int[] matchedStates = null;
+        int unbufferedStops = 0;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -2734,7 +2738,7 @@ final class Dfa
                     if (stateMatched) {
                         matched = true;
                         recordMatches(dfa.stateData(tables, stateOffset), matches);
-                        if (matchedStates == null) {
+                        if (matchedStates == null && ++unbufferedStops == MANY_MATCH_UNBUFFERED_STOPS) {
                             matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
                         }
                     }
