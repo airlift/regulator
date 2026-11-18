@@ -1,0 +1,46 @@
+BC-2 runner patch for the executeCollected check leg (timing only, never merge).
+Applies with `git apply` to tools/re2-benchmark/language/collection.py on the bc2-base and bc2-bench
+trees (82161752f, db88f7cdf; identical tools to origin/main 11b9291e1). bulk.py needs no change: the
+manifest keeps operations ["compile", "execute"].
+Use: run only the Q2 native twophase-ab legs with REGULATOR_BULK_EXECUTE_METHOD=executeCollected in the
+environment; every other leg runs without it. The JMH selector becomes
+  ^io.airlift.regulator.BenchmarkLanguageBulk\.executeCollected$
+and the result check accepts that benchmark name. A runner that calls JMH directly uses that selector
+with the same -p engine=trino -p workloadFile=... -p expectedResult=... -p maxMemoryMiB=16 arguments.
+
+--- a/tools/re2-benchmark/language/collection.py
++++ b/tools/re2-benchmark/language/collection.py
+@@ -696,7 +696,7 @@
+         samples = [[row["real_time"] / (inputs_per_iteration or 1)] for row in rows]
+         allocation = None
+     else:
+-        if len(data) != 1 or data[0]["benchmark"] != benchmark_class + "." + operation:
++        if len(data) != 1 or data[0]["benchmark"] != benchmark_class + "." + jmh_method(benchmark_class, operation):
+             raise ValueError("unexpected JMH row")
+         row = data[0]
+         if expected_jvm_arguments is not None and row.get("jvmArgs") != expected_jvm_arguments:
+@@ -753,6 +753,15 @@
+     return 2 if manifest.get("suite") == "language-bulk" else 1 + len(OPERATIONS)
+ 
+ 
++def jmh_method(benchmark_class, operation):
++    """BC-2 check leg only (timing branch, not for merge): REGULATOR_BULK_EXECUTE_METHOD=executeCollected times the
++    bulk execute operation through BenchmarkLanguageBulk.executeCollected, which runs System.gc() before each op."""
++    override = os.environ.get("REGULATOR_BULK_EXECUTE_METHOD")
++    if override and operation == "execute" and benchmark_class.endswith("BenchmarkLanguageBulk"):
++        return override
++    return operation
++
++
+ def benchmark_class(manifest):
+     return "io.airlift.regulator.BenchmarkLanguageBulk" if manifest.get("suite") == "language-bulk" else CLASS
+ 
+@@ -857,7 +866,7 @@
+                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
+                            "--benchmark_out_format=json", f"--benchmark_out={raw}"]
+             else:
+-                command = jmh_command(java, classpath, mode) + ["^" + benchmark_class(manifest) + r"\." + operation + "$",
++                command = jmh_command(java, classpath, mode) + ["^" + benchmark_class(manifest) + r"\." + jmh_method(benchmark_class(manifest), operation) + "$",
+                            "-p", f"engine={runner}", "-p", f"workloadFile={workload}",
+                            "-f", str(protocol["forks"]), "-wi", str(protocol["warmup_iterations"]),
+                            "-i", str(protocol["measurement_iterations"]), "-w", "1s", "-r", "1s",
