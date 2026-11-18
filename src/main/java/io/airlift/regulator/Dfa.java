@@ -90,8 +90,10 @@ final class Dfa
     private static final int SHORT_PAIRED_SEARCH_BYTES = 16;
     private static final int SHORT_PAIRED_SEARCH_LIMIT = 16;
     private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 16;
-    // The matching states one many-match byte scan holds for its caller to record.
-    static final int MANY_MATCH_SCAN_STATES = 64;
+    // The matching states one many-match byte scan holds for its caller to record. The buffer and
+    // its count stay under the 32 words aarch64 C2 clears inline, so allocating it costs stores
+    // rather than a call to the block zeroing stub.
+    static final int MANY_MATCH_SCAN_STATES = 60;
     // Sidecar rows and entries are eight-byte aligned, so their low bits encode computed terminals.
     private static final long ABSOLUTE_POINTER_TAG_MASK = Long.BYTES - 1;
     private static final long ABSOLUTE_POINTER_MATCH_TAG = 1;
