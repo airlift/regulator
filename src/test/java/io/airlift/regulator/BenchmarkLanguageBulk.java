@@ -22,6 +22,7 @@ import io.airlift.slice.Slice;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
@@ -366,6 +367,19 @@ public class BenchmarkLanguageBulk
         }
     }
 
+    /// Collects garbage before each operation, so a check leg frees superseded native pointer tables after every op.
+    /// Only executeCollected takes this state: an invocation-level setup makes JMH time each operation separately,
+    /// and the published methods keep their unchanged batch timing.
+    @State(Scope.Thread)
+    public static class CollectBeforeOperation
+    {
+        @Setup(Level.Invocation)
+        public void collect()
+        {
+            System.gc();
+        }
+    }
+
     /// What one workload model does with each source.
     private enum Operation
     {
@@ -417,6 +431,13 @@ public class BenchmarkLanguageBulk
 
     @Benchmark
     public long execute(BenchmarkData data)
+    {
+        return data.execute();
+    }
+
+    /// The execute operation after a garbage collection, for the budget-curve native-mode check leg.
+    @Benchmark
+    public long executeCollected(BenchmarkData data, CollectBeforeOperation collect)
     {
         return data.execute();
     }
