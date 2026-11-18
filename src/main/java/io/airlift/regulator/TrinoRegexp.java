@@ -585,8 +585,14 @@ public sealed class TrinoRegexp
             matcher.markSkipsForwardDfa();
         }
         long count = 0;
-        while (matcher.find()) {
-            count++;
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                count++;
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return count;
     }
@@ -756,10 +762,25 @@ public sealed class TrinoRegexp
         if (group != 0 && captureSearchFailsBeforeMatcher(source)) {
             return NO_MATCHES;
         }
+        return extractAllMatches(source, group);
+    }
+
+    // The all-match operation of extractAll: the matcher, its loop, and the operation's cleanup.
+    // Compiled with its matcher setup inlined, the operation is too large to inline, so it stays
+    // out of extractAll, which then stays small enough to inline into its caller whichever of the
+    // two C2 compiles first.
+    private List<Slice> extractAllMatches(Slice source, int group)
+    {
         RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         List<Slice> matches = new ArrayList<>();
-        while (matcher.find()) {
-            matches.add(matcher.group(group));
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                matches.add(matcher.group(group));
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return Collections.unmodifiableList(matches);
     }
@@ -784,9 +805,15 @@ public sealed class TrinoRegexp
         RegexpMatcher matcher = newGroupZeroMatcher(source);
         List<Slice> parts = new ArrayList<>();
         int previousEnd = 0;
-        while (matcher.find()) {
-            parts.add(source.slice(previousEnd, matcher.start() - previousEnd));
-            previousEnd = matcher.end();
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                parts.add(source.slice(previousEnd, matcher.start() - previousEnd));
+                previousEnd = matcher.end();
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         parts.add(source.slice(previousEnd, source.length() - previousEnd));
         return Collections.unmodifiableList(parts);
@@ -811,15 +838,29 @@ public sealed class TrinoRegexp
             return replacementPlan.build();
         }
 
-        // The loop is written out rather than calling replaceWithMatcher, so C2 compiles it into
-        // this method instead of reaching it through a call it declines to inline.
+        // The steps are written out rather than calling replaceWithMatcher, so C2 compiles them into
+        // this method instead of reaching them through a call it declines to inline.
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : re2.matcher(source, maximumCapturingGroup);
+        matcher.beginAllMatchOperation();
+        try {
+            addMatches(matcher, replacementPlan);
+        }
+        finally {
+            matcher.endAllMatchOperation();
+        }
+        return replacementPlan.build();
+    }
+
+    // The loop of a replacement, kept out of the method that runs it. A method whose own loop runs
+    // hot is compiled on its own, before its caller, and once that code is too large to inline,
+    // the caller calls it; with the loop here, a caller can inline replace.
+    private static void addMatches(RegexpMatcher matcher, TrinoReplacementPlan replacementPlan)
+    {
         while (matcher.find()) {
             replacementPlan.addMatch(matcher);
         }
-        return replacementPlan.build();
     }
 
     final TrinoReplacementPlan newReplacementPlan(Slice source, Slice replacement)
@@ -858,8 +899,12 @@ public sealed class TrinoRegexp
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : re2.matcher(source, maximumCapturingGroup);
-        while (matcher.find()) {
-            replacementPlan.addMatch(matcher);
+        matcher.beginAllMatchOperation();
+        try {
+            addMatches(matcher, replacementPlan);
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return replacementPlan.build();
     }
@@ -893,19 +938,25 @@ public sealed class TrinoRegexp
         DynamicSliceOutput output = new DynamicSliceOutput(source.length());
         int previousEnd = 0;
         boolean matched = false;
-        while (matcher.find()) {
-            matched = true;
-            output.writeBytes(source, previousEnd, matcher.start() - previousEnd);
-            List<Slice> groups = new ArrayList<>(matcher.groupCount());
-            for (int group = 1; group <= matcher.groupCount(); group++) {
-                groups.add(matcher.group(group));
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                matched = true;
+                output.writeBytes(source, previousEnd, matcher.start() - previousEnd);
+                List<Slice> groups = new ArrayList<>(matcher.groupCount());
+                for (int group = 1; group <= matcher.groupCount(); group++) {
+                    groups.add(matcher.group(group));
+                }
+                Slice replacementValue = replacement.apply(Collections.unmodifiableList(groups));
+                if (replacementValue == null) {
+                    return null;
+                }
+                output.appendBytes(replacementValue);
+                previousEnd = matcher.end();
             }
-            Slice replacementValue = replacement.apply(Collections.unmodifiableList(groups));
-            if (replacementValue == null) {
-                return null;
-            }
-            output.appendBytes(replacementValue);
-            previousEnd = matcher.end();
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         if (!matched) {
             return source;

@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import static io.airlift.regulator.CompiledPattern.DFA_QUIT_STREAK_LIMIT;
 import static io.airlift.regulator.TestRe2Api.assertNullInputFailures;
@@ -52,6 +53,8 @@ public class TestRustRegexp
     // Cyrillic letters, which are all word characters, the lead E2, whose characters include both
     // classes, and three continuation bytes: ж, Д, —, and U+2D80 among them.
     private static final List<byte[]> LEAD_TEXTS = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) 0xD0, (byte) 0xB6, (byte) 0xE2, (byte) 0x80, (byte) 0x94);
+    // One match of the Cyrillic dense-operation pattern and the space after it.
+    private static final String DENSE_CYRILLIC_WORD = "аааааббббббаааааббббббаааа ";
 
     @Test
     public void testParse()
@@ -637,5 +640,136 @@ public class TestRustRegexp
     private static String signature(Method method)
     {
         return method.getReturnType().getSimpleName() + " " + method.getName() + Arrays.toString(method.getParameterTypes());
+    }
+
+    @Test
+    public void testDenseFindsSwitchToMatchStartSet()
+    {
+        // An empty match that ends where the last match ended is skipped, after the switch as
+        // before it: here the word boundary at the end of each word.
+        Slice words = utf8Slice("ab cd ".repeat(16 * 1024 / 6).strip());
+        TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("(?-u:\\b)[a-z]*")), words, 0, words.length(), 1);
+
+        // A Unicode \\b beside text outside ASCII is decided from the text, so Cyrillic words switch
+        // as ASCII words do.
+        Slice cyrillic = utf8Slice("аб cd вг, ".repeat(16 * 1024 / 14));
+        TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("\\b\\w+\\b")), cyrillic, 0, cyrillic.length(), 1);
+
+        // A Unicode \\b quits on malformed text, so a malformed byte near the end stops the reverse
+        // pass, and every find stays on the find-by-find search.
+        byte[] malformed = Arrays.copyOf(words.getBytes(), words.length());
+        malformed[malformed.length - 10] = (byte) 0xFF;
+        Slice input = Slices.wrappedBuffer(malformed);
+        TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("\\b[a-z]+\\b")), input, 0, input.length(), 0);
+    }
+
+    @Test
+    public void testNestedDenseOperationsLeaveUnicodeWordSearchesTheLoan()
+    {
+        // Dense operations running inside one another each hold a match start set charged to the
+        // reverse DFA that lent the start-set DFA its memory, so the Unicode \b searches made
+        // inside them can use up what is left. Each \b beside Cyrillic text is decided from the
+        // decoded characters, so the searches ask for new states and for decoded word cache
+        // entries, and which request first finds no room depends on the free memory they start
+        // with. The searches start with each free memory from twice the least set an operation
+        // holds until they no longer use it up, in steps under the 192 bytes the decoded word
+        // caches first grow by, so each growth of those caches is at some step the first request
+        // that does not fit. Whichever request it is, the reverse DFA takes the loan back rather
+        // than resetting.
+        List<Slice> searches = unicodeWordSearches();
+        long leastFree = 2 * Dfa.matchStartSetBytes(RegexpMatcher.MATCH_START_SET_MINIMUM_REST_BYTES);
+        long step = 128;
+        long free = leastFree;
+        while (searchesTakeLoanBack(free, searches)) {
+            free += step;
+        }
+        assertThat(free).as("the searches never used up the free memory").isGreaterThan(leastFree);
+    }
+
+    // The searches of testNestedDenseOperationsLeaveUnicodeWordSearchesTheLoan: Cyrillic words of
+    // 14 to 23 letters а and б, each between two copies of a context: characters outside ASCII
+    // of every UTF-8 length, word characters among them, or a line feed.
+    private static List<Slice> unicodeWordSearches()
+    {
+        Random random = new Random(7);
+        List<Slice> searches = new ArrayList<>();
+        for (int count = 0; count < 6; count++) {
+            StringBuilder word = new StringBuilder();
+            int length = 14 + random.nextInt(10);
+            for (int i = 0; i < length; i++) {
+                word.append(random.nextBoolean() ? 'а' : 'б');
+            }
+            for (String context : List.of("！", "💰", "。", " é", " 中", "\n")) {
+                searches.add(utf8Slice(context + word + context));
+            }
+        }
+        return searches;
+    }
+
+    // Runs `searches` in order inside dense operations that leave the reverse DFA `free` bytes of
+    // free state memory, until one takes the start-set DFA's loan back, which unpublishes that
+    // DFA, and returns whether one did. Checks that the reverse DFA did not reset and that the
+    // operations returned their memory.
+    private static boolean searchesTakeLoanBack(long free, List<Slice> searches)
+    {
+        // The shape of TestRegexpMatcher.testDenseOperationLeavesLaterSearchesTheirMemory's
+        // pattern, in Cyrillic, with a small budget to keep the operations' inputs short.
+        RustRegexp pattern = RustRegexp.compile(utf8Slice("\\b(?:[аб]{4}а[аб]*|c+|d+|e+|f+)\\b"), RustRegexp.Options.defaults().setMaxMemory(1 << 20));
+        // The first dense operation builds the start-set DFA on its loan.
+        assertThat(TestRegexpMatcher.operationSpans(pattern.matcher(utf8Slice(DENSE_CYRILLIC_WORD.repeat(500))))).hasSize(500);
+        Prog reverse = pattern.reverseProgramIfComputedForDiagnostics();
+        assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH)).isNotNull();
+        Dfa.DfaInstance lender = reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        int resets = lender.resetCount();
+        List<RegexpMatcher> operations = new ArrayList<>();
+        boolean tookLoanBack = false;
+        try {
+            holdStartSetsUntilFree(pattern, lender, free, operations);
+            for (Slice search : searches) {
+                pattern.matcher(search).find();
+                if (reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH) == null) {
+                    tookLoanBack = true;
+                    break;
+                }
+            }
+        }
+        finally {
+            operations.reversed().forEach(RegexpMatcher::endAllMatchOperation);
+        }
+        assertThat(lender.resetCount()).as("resets with %s bytes free", free).isEqualTo(resets);
+        assertThat(lender.matchStartSetReservationForDiagnostics()).isZero();
+        return tookLoanBack;
+    }
+
+    // Starts dense operations of `pattern`, adding each to `operations` for the caller to end,
+    // until the start sets they hold leave `lender` `free` bytes of free state memory, or up to 7
+    // more, as sets grow in steps of 8 bytes. A set takes at least the least set, the one for the
+    // shortest rest that switches, and at most half the free memory. So while more than twice
+    // `free` is free, each operation leaves at least `free` and one least set, for the last
+    // operation to take the difference.
+    private static void holdStartSetsUntilFree(RustRegexp pattern, Dfa.DfaInstance lender, long free, List<RegexpMatcher> operations)
+    {
+        long leastSet = Dfa.matchStartSetBytes(RegexpMatcher.MATCH_START_SET_MINIMUM_REST_BYTES);
+        long available = lender.cacheSnapshot().availableStateMemory();
+        while (available - free >= Long.BYTES) {
+            long set = available <= 2 * free ? available - free : Math.min(available / 2, available - free - leastSet);
+            // The switch at the last of the first finds covers the rest from that find's end: the
+            // space after its word and the spaces added, the longest rest whose set fits.
+            int rest = RegexpMatcher.MATCH_START_SET_MINIMUM_REST_BYTES;
+            while (Dfa.matchStartSetBytes(rest + Long.SIZE) <= set) {
+                rest += Long.SIZE;
+            }
+            String words = DENSE_CYRILLIC_WORD.repeat(RegexpMatcher.MATCH_START_SET_SWITCH_FINDS);
+            RegexpMatcher operation = pattern.matcher(utf8Slice(words + " ".repeat(rest - 1)));
+            operation.beginAllMatchOperation();
+            operations.add(operation);
+            long reserved = lender.matchStartSetReservationForDiagnostics();
+            for (int find = 0; find < RegexpMatcher.MATCH_START_SET_SWITCH_FINDS; find++) {
+                assertThat(operation.find()).isTrue();
+            }
+            assertThat(lender.matchStartSetReservationForDiagnostics()).isEqualTo(reserved + Dfa.matchStartSetBytes(rest));
+            available = lender.cacheSnapshot().availableStateMemory();
+        }
+        assertThat(available).isGreaterThanOrEqualTo(free);
     }
 }

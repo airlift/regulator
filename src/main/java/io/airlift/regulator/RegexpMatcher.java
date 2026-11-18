@@ -42,6 +42,13 @@ public final class RegexpMatcher
     // CompiledPattern.nearRequiredLiteralScansInLoop.
     static final int NEAR_REQUIRED_LITERAL_BYTES = 256;
     static final int NEAR_REQUIRED_LITERAL_SCAN_LIMIT = 8;
+    // An all-match operation whose first MATCH_START_SET_SWITCH_FINDS group-zero cursor finds each
+    // advanced at most MATCH_START_SET_MAXIMUM_FIND_BYTES on average, with at least
+    // MATCH_START_SET_MINIMUM_REST_BYTES of the region left, switches the rest of its finds to a
+    // match start set; see beginAllMatchOperation and countGroupZeroCursorFind.
+    static final int MATCH_START_SET_SWITCH_FINDS = 64;
+    static final int MATCH_START_SET_MAXIMUM_FIND_BYTES = 64;
+    static final int MATCH_START_SET_MINIMUM_REST_BYTES = 4 * 1024;
 
     private final CompiledPattern pattern;
     private final int[] groups;
@@ -115,6 +122,17 @@ public final class RegexpMatcher
     // each match. Cleared at reset.
     private boolean skipsForwardDfa;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
+    // The group-zero cursor finds of the current all-match operation before its switch decision,
+    // and the region-relative start of the first one. Read only while matchStartSet is
+    // Dfa.MatchStartSet.UNDECIDED.
+    private int groupZeroCursorFinds;
+    private int groupZeroCursorFirstFindStart;
+    // The match start set that the current all-match operation's finds take after the switch;
+    // Dfa.MatchStartSet.UNDECIDED from the start of an operation that may switch until its
+    // decision, so that its group-zero cursor finds take findOnMatchStartSet, which counts them;
+    // or null. It is that operation's alone: released when a find fails, at reset, when a find
+    // falls back, and when the operation ends. A find outside an operation only tests it.
+    private Dfa.MatchStartSet matchStartSet;
     // The region-relative start of the occurrence of the pattern's long-window required literal
     // or one-of bytes that the last scan of the rest of the region found, or -1 when no scan has
     // run since the last reset or the last one found none. See restOfRegionLacksRequiredLiteral.
@@ -228,6 +246,9 @@ public final class RegexpMatcher
         }
         else {
             groupZeroForwardCursorInitialized = false;
+        }
+        if (matchStartSet != null) {
+            releaseMatchStartSet();
         }
         nextFindStart = 0;
         retryStart = 0;
@@ -417,6 +438,10 @@ public final class RegexpMatcher
         cursorDfaQuit = false;
         int regionLength = regionLength();
         if (nextFindStart > regionLength) {
+            // An empty match at the region end ended the operation, and its start set or count.
+            if (matchStartSet != null) {
+                releaseMatchStartSet();
+            }
             invalidateMatch();
             return false;
         }
@@ -521,7 +546,9 @@ public final class RegexpMatcher
         // cursor quit skips it, since its DFA would quit at the same byte.
         Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursorEnabled && !searchesInnerLiteral && !cursorDfaQuit ? groupZeroForwardCursor() : null;
         if (groupZeroForwardCursor != null && !(dfaQuitStreak >= CompiledPattern.DFA_QUIT_STREAK_LIMIT && groupZeroForwardCursor.quitsOnNonAscii())) {
-            long matchBoundary = pattern.findGroupZeroBoundary(
+            long matchBoundary = matchStartSet != null
+                    ? findOnMatchStartSet(groupZeroForwardCursor)
+                    : pattern.findGroupZeroBoundary(
                     groupZeroForwardCursor,
                     input,
                     regionStart,
@@ -625,6 +652,98 @@ public final class RegexpMatcher
         return true;
     }
 
+    /// Starts an all-match operation of the library's own: a loop of finds over the current region
+    /// that counts, extracts, splits, or replaces every match of an input no one changes until the
+    /// loop ends, which [#endAllMatchOperation] marks in a `finally`. Only such an operation may switch
+    /// to a match start set, which caches where matches start; finds a caller makes read the input
+    /// afresh each time, since the caller may change it between finds. An operation that may
+    /// switch, of a matcher of group zero alone on the group-zero cursor with no span search or
+    /// single-byte table, over a region long enough to leave the rest the switch needs, holds
+    /// [Dfa.MatchStartSet#UNDECIDED] until it decides, so that only its finds count toward the
+    /// switch; see [#countGroupZeroCursorFind].
+    void beginAllMatchOperation()
+    {
+        if (groups.length == 2 && enableGroupZeroForwardCursor && singleByteMatcher == null && spanSearch == null &&
+                regionLength() >= MATCH_START_SET_MINIMUM_REST_BYTES) {
+            groupZeroCursorFinds = 0;
+            matchStartSet = Dfa.MatchStartSet.UNDECIDED;
+        }
+    }
+
+    /// Ends the operation [#beginAllMatchOperation] started, on every exit, a callback's early
+    /// return or exception included, and releases its match start set.
+    void endAllMatchOperation()
+    {
+        if (matchStartSet != null) {
+            releaseMatchStartSet();
+        }
+    }
+
+    /// The find of the match start set, or, where it cannot answer, the group-zero cursor's
+    /// search, which takes the rest of the operation's finds. [Dfa.MatchStartSet#UNDECIDED]
+    /// answers no find, so before the operation decides, every find takes the cursor's search
+    /// and counts toward the switch, and the finds after a switch make no test for it.
+    private long findOnMatchStartSet(Dfa.GroupZeroForwardCursor groupZeroForwardCursor)
+    {
+        long matchBoundary = pattern.findOnMatchStartSet(matchStartSet, input, regionStart, regionEnd, regionStart + nextFindStart);
+        if (matchBoundary != Dfa.SEARCH_FAILED) {
+            return matchBoundary;
+        }
+        if (matchStartSet == Dfa.MatchStartSet.UNDECIDED) {
+            matchBoundary = pattern.findGroupZeroBoundary(groupZeroForwardCursor, input, regionStart, regionEnd, regionStart + nextFindStart);
+            if (matchBoundary >= 0) {
+                countGroupZeroCursorFind((int) matchBoundary);
+            }
+            return matchBoundary;
+        }
+        releaseMatchStartSet();
+        return pattern.findGroupZeroBoundary(groupZeroForwardCursor, input, regionStart, regionEnd, regionStart + nextFindStart);
+    }
+
+    /// Records a group-zero cursor find of an undecided operation, whose match ends at `end`: the
+    /// first one's start, and at the [#MATCH_START_SET_SWITCH_FINDS]th, the decision. It runs
+    /// before the find advances, so `nextFindStart` is where the find searched from.
+    private void countGroupZeroCursorFind(int end)
+    {
+        groupZeroCursorFinds++;
+        if (groupZeroCursorFinds == 1) {
+            groupZeroCursorFirstFindStart = nextFindStart;
+        }
+        else if (groupZeroCursorFinds == MATCH_START_SET_SWITCH_FINDS) {
+            matchStartSet = null;
+            switchToMatchStartSet(end);
+        }
+    }
+
+    /// Switches the rest of this all-match operation's finds, from `begin`, the region-relative end
+    /// of the last match, to a match start set when the finds so far were dense, the region's rest
+    /// is long enough to pay for a reverse pass over it, and the pattern qualifies. Each language's
+    /// rules for what follows a match, the advance past an empty match, a Rust search's skipped
+    /// empty matches, and a find after a failed one, stay in the callers of [#findGeneral]; only
+    /// the search for the leftmost-first match at or after a position changes. The set covers
+    /// the region's context, which every find of a group-zero cursor reads, so its assertions
+    /// decide as each find's would. An operation switches at most once, and only on a matcher
+    /// [#beginAllMatchOperation] lets count; a candidate cursor that answers finds ahead of the
+    /// group-zero cursor keeps answering them after a switch. A failed switch leaves nothing held.
+    private void switchToMatchStartSet(int begin)
+    {
+        if ((long) begin - groupZeroCursorFirstFindStart > (long) MATCH_START_SET_SWITCH_FINDS * MATCH_START_SET_MAXIMUM_FIND_BYTES ||
+                regionLength() - begin < MATCH_START_SET_MINIMUM_REST_BYTES ||
+                !pattern.switchesToMatchStartSet(input, regionStart + begin, regionEnd)) {
+            return;
+        }
+        matchStartSet = pattern.collectMatchStartSet(input, regionStart, regionEnd, regionStart + begin);
+    }
+
+    /// Releases the operation's match start set, or ends its count toward the switch.
+    private void releaseMatchStartSet()
+    {
+        if (matchStartSet != Dfa.MatchStartSet.UNDECIDED) {
+            matchStartSet.release();
+        }
+        matchStartSet = null;
+    }
+
     /// Settles `candidate`, the region-relative start of the candidate whose check quit in the
     /// candidate cursor's last search, and returns the cursor's result from there: the match
     /// starting at the candidate, or the cursor's search from the byte after it. Every start
@@ -721,6 +840,10 @@ public final class RegexpMatcher
     // A failed find leaves no match, and the next find searches again from retryStart.
     private boolean failFind()
     {
+        // A failed find ends the operation's start set, or its count toward the switch.
+        if (matchStartSet != null) {
+            releaseMatchStartSet();
+        }
         nextFindStart = retryStart;
         invalidateMatch();
         return false;
@@ -1089,6 +1212,11 @@ public final class RegexpMatcher
         return requiredLiteralScanCount;
     }
 
+    boolean holdsMatchStartSetForDiagnostics()
+    {
+        return matchStartSet != null && matchStartSet != Dfa.MatchStartSet.UNDECIDED;
+    }
+
     private void invalidateMatch()
     {
         hasMatch = false;
@@ -1117,9 +1245,10 @@ public final class RegexpMatcher
     /// buffer, the map of group names it keeps when it keeps fewer groups than its pattern, the
     /// workspace of each capture engine it has used, and its DFA cursors. The pattern and
     /// everything it holds, including the DFA caches the cursors read and the names themselves,
-    /// count once in the pattern's `retainedSizeInBytes()`, however many matchers share it; the
-    /// input belongs to the caller. Like the other methods, it reads this matcher's state and is
-    /// called by the thread that uses it.
+    /// count once in the pattern's `retainedSizeInBytes()`, however many matchers share it, as does
+    /// a match start set, which the pattern's reverse DFA budget charges while this matcher holds
+    /// it; the input belongs to the caller. Like the other methods, it reads this matcher's state
+    /// and is called by the thread that uses it.
     // Declared last, so that its constants follow those of the find methods.
     public long retainedSizeInBytes()
     {

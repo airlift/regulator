@@ -252,6 +252,16 @@ Within the budget, compilation and matching keep these limits:
   Searches of 64 bytes or more skip ahead by windows of at most 16 bytes. Their
   trie walks may follow 4,096 edges plus two per byte passed, checked after
   each failed walk, before the automaton takes the rest of the search.
+- A count, or a Trino extract-all, split, or replacement, whose dense finds
+  switch to a
+  [match start set](../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches)
+  holds a bitset of at most 1 MiB, one bit a byte of the rest of its region,
+  and only while the operation runs; a caller's own `find()` loop never
+  switches. The set is charged to the reverse longest-match DFA's free memory,
+  and only when it fits half of it. The many-match DFA that collects the
+  starts then borrows half of what is left, until that DFA needs the memory
+  for its own states and takes it back. The pattern's `retainedSizeInBytes()`
+  counts the set while it is held.
 - Every program with at most 32,767 output lists can use BitState, where RE2
   allows only programs of at most 512 instructions, so the text limit, not
   program size, decides which spans BitState captures. An anchored BitState
