@@ -2670,6 +2670,12 @@ final class Dfa
                 int position = textBegin;
                 int[] transitions = tables.transitions;
                 while (position < textEnd) {
+                    long stepped = stepSelfLoopRearmBytes(transitions, dfa.bytemap, bytes, position, textEnd - position, stateOffset);
+                    position = (int) (stepped >>> 32);
+                    stateOffset = (int) stepped;
+                    if (position == textEnd) {
+                        break;
+                    }
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
@@ -2806,6 +2812,12 @@ final class Dfa
                 int position = textBegin;
                 int[] transitions = tables.transitions;
                 while (position < textEnd) {
+                    long stepped = stepSelfLoopRearmBytes(transitions, dfa.bytemap, bytes, position, textEnd - position, stateOffset);
+                    position = (int) (stepped >>> 32);
+                    stateOffset = (int) stepped;
+                    if (position == textEnd) {
+                        break;
+                    }
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
