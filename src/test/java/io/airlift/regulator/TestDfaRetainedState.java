@@ -28,6 +28,8 @@ import static io.airlift.regulator.Dfa.DfaInstance.Kind.LONGEST_MATCH;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
+import static java.lang.Math.toIntExact;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -201,6 +203,139 @@ public class TestDfaRetainedState
     }
 
     @Test
+    public void testStateTableGrowthStopsAtRowsTheBudgetFills()
+    {
+        // The bit pattern's 1,025 states need 1,026 rows, row zero included, more than the 1,024
+        // rows its tables double to, so a doubling past them leaves about half the rows empty.
+        String pattern = "1[01]{9}$";
+        Slice bits = bitText(20_000);
+        Prog referenceProgram = compileProgram(pattern, 64 << 20);
+        referenceProgram.setDfaMemory(2 * (16 << 20));
+        searchBits(referenceProgram, bits);
+        Dfa.DfaInstance warm = referenceProgram.getCachedDfa(LONGEST_MATCH);
+        Dfa.CacheSnapshot warmCache = warm.cacheSnapshot();
+        assertThat(warmCache.stateCount()).isEqualTo(1_025);
+        assertThat(warmCache.stateCapacity()).isEqualTo(2_048);
+        int rowsInUse = warmCache.stateCount() + 1;
+        long doubledTablesCharge = warm.stateBudget() - warm.availableStateMemory();
+        long workingSetCharge = workingSetCharge(warm);
+        long fixedOverhead = (16 << 20) - warm.stateBudget();
+
+        // Budgets a little above the working set's charge, with tables of one row per state, but
+        // too small for the doubled tables, hold every state. The tables grow only by rows the
+        // budget can fill, so each row left empty has at least a reference row of budget behind
+        // it.
+        for (int marginPercent : List.of(6, 12)) {
+            long stateBudget = workingSetCharge * (100 + marginPercent) / 100;
+            assertThat(stateBudget).isLessThan(doubledTablesCharge);
+            Prog program = compileProgram(pattern, 64 << 20);
+            program.setDfaMemory(2 * (stateBudget + fixedOverhead));
+            searchBits(program, bits);
+            searchBits(program, bits);
+            Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
+            assertThat(dfa.stateBudget()).isEqualTo(stateBudget);
+            Dfa.CacheSnapshot cache = dfa.cacheSnapshot();
+            assertThat(cache.resetCount()).as("resets %s%% above the working set's charge", marginPercent).isZero();
+            assertThat(cache.stateCount()).isEqualTo(warmCache.stateCount());
+            assertEmptyRowsCanBeFilled(dfa, marginPercent + "% above the working set's charge");
+        }
+
+        // A budget above the working set's charge by 16 times its charge per row in use funds
+        // fewer than the 32 rows, a thirty-second of 1,024, that a growth must add, so the DFA
+        // resets rather than grow the tables by a few rows, which the next few states would
+        // outgrow.
+        long floorBudget = workingSetCharge + 16 * workingSetCharge / rowsInUse;
+        Prog floorProgram = compileProgram(pattern, 64 << 20);
+        floorProgram.setDfaMemory(2 * (floorBudget + fixedOverhead));
+        searchBits(floorProgram, bits);
+        Dfa.DfaInstance floorDfa = floorProgram.getCachedDfa(LONGEST_MATCH);
+        assertThat(floorDfa.stateBudget()).isEqualTo(floorBudget);
+        assertThat(floorDfa.cacheSnapshot().resetCount()).as("resets 16 rows' charge above the working set").isPositive();
+    }
+
+    @Test
+    public void testStateTableGrowthLeavesStateHashTableDoubling()
+    {
+        // The state hash table doubles whole once an insert would fill more than three-quarters of
+        // it. Over 1,535 bytes the pattern reaches 1,536 states, which fill a table of 2,048
+        // entries to that line. The budget is the working set's charge, with tables of one row per
+        // state, plus half the doubling, so the tables' growth from 1,292 rows stops at the line:
+        // a row past it would need the whole doubling beside its state. The budget comes from the
+        // reference DFA's charges, so the growth stops there in either object layout. A growth
+        // priced without the doubling, with compressed object pointers, reaches 1,565 rows for the
+        // 1,536 states and leaves 6,736 bytes against a 16,384-byte doubling; this check catches
+        // it.
+        String pattern = "[a-q][^u-z]{80}x";
+        Slice text = unmatchedStateExplosionText(1_535);
+        Prog referenceProgram = compileProgram(pattern, 64 << 20);
+        referenceProgram.setDfaMemory(2 * (16 << 20));
+        Dfa.search(referenceProgram, text, false, Prog.MatchKind.FIRST_MATCH, true);
+        Dfa.DfaInstance warm = referenceProgram.getCachedDfa(FIRST_MATCH);
+        int cacheTableCapacity = warm.stateMemorySnapshot().cacheTableCapacity();
+        assertThat(warm.cacheSnapshot().stateCount()).isEqualTo(1_536);
+        assertThat(cacheTableCapacity).isEqualTo(2_048);
+        long stateBudget = workingSetCharge(warm) + cacheTableDoublingMemory(cacheTableCapacity) / 2;
+        long fixedOverhead = (16 << 20) - warm.stateBudget();
+
+        Prog program = compileProgram(pattern, 64 << 20);
+        program.setDfaMemory(2 * (stateBudget + fixedOverhead));
+        Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true);
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        assertThat(dfa.stateBudget()).isEqualTo(stateBudget);
+        Dfa.CacheSnapshot cache = dfa.cacheSnapshot();
+        assertThat(cache.resetCount()).isZero();
+        assertThat(cache.stateCount()).isEqualTo(1_536);
+        assertThat(cache.stateCapacity())
+                .as("rows, row zero included, of tables grown to the state hash table's line")
+                .isEqualTo(cacheTableCapacity * 3 / 4 + 1);
+    }
+
+    // What the DFA charges, with its tables cut to one row per state, row zero included.
+    private static long workingSetCharge(Dfa.DfaInstance dfa)
+    {
+        Dfa.CacheSnapshot cache = dfa.cacheSnapshot();
+        return dfa.stateBudget() - dfa.availableStateMemory() - stateTableMemory(cache.stateCapacity(), dfa.nextSize) + stateTableMemory(cache.stateCount() + 1, dfa.nextSize);
+    }
+
+    // The bytes a state hash table of `cacheTableCapacity` entries adds when it doubles.
+    private static long cacheTableDoublingMemory(int cacheTableCapacity)
+    {
+        return sizeOfObjectArray(4 * cacheTableCapacity) - sizeOfObjectArray(2 * cacheTableCapacity);
+    }
+
+    // The budget left behind the rows the tables hold past the states: at least a reference row
+    // for each, a pointer row for each the DFA's pointer table does not hold, and the state hash
+    // table's doubling once when their states would fill it past three-quarters. A row's full
+    // price, its table bytes and an average state, is not checked: a bound at it falls inside the
+    // sizing's slack in some object layouts.
+    private static void assertEmptyRowsCanBeFilled(Dfa.DfaInstance dfa, String description)
+    {
+        Dfa.CacheSnapshot cache = dfa.cacheSnapshot();
+        long emptyRows = (long) cache.stateCapacity() - (cache.stateCount() + 1);
+        long pointerRowMemory = 0;
+        if (dfa.absolutePointerTransitionsAvailable()) {
+            long pointerRowBytes = (long) dfa.nextSize * Long.BYTES;
+            long pointerRows = dfa.absolutePointerTransitionSegment().byteSize() / pointerRowBytes;
+            pointerRowMemory = Math.max(0, cache.stateCapacity() - pointerRows) * pointerRowBytes;
+        }
+        int cacheTableCapacity = dfa.stateMemorySnapshot().cacheTableCapacity();
+        long cacheGrowthMemory = 0;
+        if (cache.stateCount() + emptyRows > cacheTableCapacity * 3L / 4) {
+            cacheGrowthMemory = cacheTableDoublingMemory(cacheTableCapacity);
+        }
+        assertThat(emptyRows * sizeOfObjectArray(dfa.nextSize + 1) + pointerRowMemory + cacheGrowthMemory)
+                .as("budget behind the empty rows, at least a reference row each, %s", description)
+                .isLessThanOrEqualTo(cache.availableStateMemory());
+    }
+
+    private static void searchBits(Prog program, Slice bits)
+    {
+        for (int offset = 0; offset < bits.length(); offset += 64) {
+            Dfa.search(program, bits.slice(offset, Math.min(64, bits.length() - offset)), false, Prog.MatchKind.LONGEST_MATCH, true);
+        }
+    }
+
+    @Test
     public void testPointerTableLeavesRoomForStateTableGrowth()
     {
         // A program of more than 256 instructions, so the state tables start below one row per
@@ -224,10 +359,10 @@ public class TestDfaRetainedState
         // A budget that holds four fifths of the warm DFA's Java state, counted with tables of one
         // row per instruction, and none of its pointer rows, so it cannot fund a state per
         // instruction beside a pointer table, and the budget, not the table's doubling, sizes the
-        // table in either object layout. The pointer table is first sized while the tables are
-        // small. It must leave the budget their next growth, which the states behind its rows
-        // fill, beside the reference row of a state behind each pointer row it adds, but not their
-        // growth to one row per instruction, which would sit unused at every reset.
+        // table in either object layout. The pointer table is first sized while the state tables
+        // are small. It must leave the budget the tables' next growth, to at least a row per
+        // pointer row, and a reference row behind each pointer row past the rows in use, but less
+        // than the tables' doubling would charge.
         Prog tight = compileProgram(pattern, 64 << 20);
         tight.setDfaMemory(2 * (javaStateMemory * 4 / 5 + fixedOverhead));
         Dfa.DfaInstance tightDfa = null;
@@ -240,21 +375,23 @@ public class TestDfaRetainedState
         }
         assertThat(tightDfa.absolutePointerTransitionMemory()).isPositive();
         Dfa.CacheSnapshot firstPointerTable = tightDfa.cacheSnapshot();
-        int grownStateCapacity = 2 * firstPointerTable.stateCapacity();
-        assertThat(grownStateCapacity).isLessThan(tightDfa.programStateCapacity());
+        int doubledStateCapacity = 2 * firstPointerTable.stateCapacity();
+        assertThat(doubledStateCapacity).isLessThan(tightDfa.programStateCapacity());
         long pointerRows = tightDfa.absolutePointerTransitionSegment().byteSize() / ((long) tightDfa.nextSize * Long.BYTES);
         long rowsInUse = firstPointerTable.stateCount() + 1L;
         assertThat(pointerRows).isLessThan(2 * rowsInUse);
         long firstTableMemory = stateTableMemory(firstPointerTable.stateCapacity(), tightDfa.nextSize);
         long addedReferenceRowMemory = (pointerRows - rowsInUse) * sizeOfObjectArray(tightDfa.nextSize + 1);
         assertThat(tightDfa.availableStateMemory())
-                .isGreaterThanOrEqualTo(stateTableMemory(grownStateCapacity, tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory)
-                .isLessThan(stateTableMemory(tightDfa.programStateCapacity(), tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory);
+                .isGreaterThanOrEqualTo(stateTableMemory(toIntExact(pointerRows), tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory)
+                .isLessThan(stateTableMemory(doubledStateCapacity, tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory);
 
         // A budget a little above what the warm DFA would hold with tables that started at one row
         // per instruction, its Java state and one pointer row per state, holds them all: the
         // pointer table must not take the budget the tables' growth needs, which would make the DFA
-        // reset on every pass, or give up its pointer table.
+        // reset on every pass, or give up its pointer table. The tables grow beside the pointer
+        // table only by rows the budget left can fill, each with a pointer row where the table
+        // holds none.
         for (int marginPercent = 2; marginPercent <= 6; marginPercent += 2) {
             long stateBudget = (javaStateMemory + pointerRowMemory) * (100 + marginPercent) / 100;
             Prog program = compileProgram(pattern, 64 << 20);
@@ -272,6 +409,7 @@ public class TestDfaRetainedState
             assertThat(dfa.absolutePointerTransitionsAvailable())
                     .as("pointer table %s%% above the warm DFA's memory", marginPercent)
                     .isTrue();
+            assertEmptyRowsCanBeFilled(dfa, marginPercent + "% above the warm DFA's memory, beside the pointer table");
         }
     }
 
@@ -310,8 +448,8 @@ public class TestDfaRetainedState
         return texts;
     }
 
-    // `length` pseudo-random bits. 4,096 reach every state of `1[01]{6}$`, and 200,000, searched
-    // 64 at a time, every state of `1[01]{11}$`.
+    // `length` pseudo-random bits. 4,096 reach every state of `1[01]{6}$`; searched 64 at a time,
+    // 20,000 reach every state of `1[01]{9}$`, and 200,000 every state of `1[01]{11}$`.
     private static Slice bitText(int length)
     {
         StringBuilder bits = new StringBuilder();
@@ -319,6 +457,20 @@ public class TestDfaRetainedState
             bits.append(Integer.bitCount(i * 0x9E37) & 1);
         }
         return Slices.utf8Slice(bits.toString());
+    }
+
+    // `length` pseudo-random bytes of the letters a to t, digits, spaces, newlines, and
+    // punctuation. Searched for `[a-q][^u-z]{80}x`, which none of it matches, each byte reaches a
+    // new state.
+    private static Slice unmatchedStateExplosionText(int length)
+    {
+        Random random = new Random(42);
+        byte[] alphabet = "abcdefghijklmnopqrst \n,.;0123456789".getBytes(US_ASCII);
+        byte[] input = new byte[length];
+        for (int index = 0; index < input.length; index++) {
+            input[index] = alphabet[random.nextInt(alphabet.length)];
+        }
+        return Slices.wrappedBuffer(input);
     }
 
     private static Object[] grownRowReachableFrom(Dfa.CacheTables tables, int nextSize)

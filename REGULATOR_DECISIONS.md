@@ -919,16 +919,58 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - A DFA's state and transition tables start with room for one state per
   instruction, at least 16 and at most what its budget's transitions hold, but
   never more than 256 states. A DFA whose one-row-per-instruction capacity is
-  above 256 starts its tables at 256, and they double as states arrive,
-  stopping once at the one-row-per-instruction capacity before doubling on, so
-  at any state count they are no larger than tables that started there. Each
-  growth is charged to the state budget before it is allocated, and a growth
-  that does not fit is handled as a full cache is: the cache resets, or the
-  budget rule gives the pointer table back. Most large
-  programs' DFAs never fill a row per instruction: 120 of the 146
-  larger-program DFAs among the published benchmark rows never pass 256
-  states. The initial tables are charged after the initialization gate passes,
-  so smaller ones leave more of the budget the gate reserved for states.
+  above 256 starts its tables at 256, and they grow as states arrive, at most
+  doubling and, under a finite budget, only by the rows the budget can fill,
+  stopping once at the one-row-per-instruction capacity before growing on, so at
+  any state count they are no larger than tables that started there. Most large
+  programs' DFAs never fill a row per instruction: 120 of the 146 larger-program
+  DFAs among the published benchmark rows never pass 256 states.
+- Under a finite budget a growth adds no more rows than the budget left beside
+  the new state can fill. Each new row is priced with the generation's average
+  Java state behind it, its retained memory beyond the tables divided by its
+  states, never below the smallest state's, and, past the rows a pointer table
+  already holds, with a pointer row too. The state hash table doubles whole once
+  an insert would fill more than three-quarters of it, so a growth funds rows
+  past that line only from what the doubling leaves. A growth priced without the
+  doubling would pass the line with rows no state could fill: in the suite's
+  case, `[a-q][^u-z]{80}x` reaches 1,536 states, and with compressed object
+  pointers such a growth would take its tables to 1,565 rows and leave 6,736
+  bytes against a 16,384-byte doubling; the suite checks that growth stops at
+  the line. A per-state share of the hash table at its load factor would not
+  prevent this: it spreads the doubling over the states that fill the doubled
+  table, while the state that crosses the line is charged all of it. Doubled
+  tables charged rows that no state would fill when the working set nearly fit:
+  Trino's URL search at 16 MiB, whose 4,186 states outgrew 4,096 rows, grew its
+  tables to about 7,300 rows, charging about 0.94 MB of empty rows, 18% of its
+  state budget, and reset once per count with its graph in reach. It now gives
+  its pointer table back and holds every state. At 8 MiB, where neither Trino's
+  nor RE2's URL search holds its graph, Trino's resets 5.3 times per count
+  instead of 7.7, and RE2's 2.3 times instead of 3, in counter runs.
+- A growth must add at least the floor, a thirty-second of the current rows,
+  rounded down but at least one, unless the program's capacity or the transition
+  limit caps the step. A growth the budget funds below the floor is handled,
+  with any growth that does not fit, as a full cache is: the cache resets, or
+  the budget rule gives the pointer table back. Every growth copies the tables,
+  so without the floor, growth near the budget's edge would recopy them a few
+  rows at a time; with it, tables of N rows are copied again only after N/32 new
+  states, and a growth the floor refuses leaves the budget for fewer rows than
+  that unused. In counter runs, a floor of an eighth or a sixteenth refused the
+  246 rows, to 4,342 with row zero, that RE2's URL search at 16 MiB could fund
+  at 4,096 rows, of which it needed 80, and it gave its pointer table back.
+- Each state-table growth is charged to the state budget before it is allocated.
+  The initial tables are charged after the initialization gate passes, so
+  smaller ones leave more of the budget the gate reserved for states.
+- Without compressed object pointers, which a JVM turns off above about a 32 GB
+  heap, a state in Trino's URL search costs about 34% more: its reference row
+  takes 616 bytes instead of 320, and with its row in the tables and its share
+  of the state hash table it costs about 1,320 bytes instead of 990. In counter
+  runs, the search then resets at 16 MiB, about 1.44 times per count, and
+  gives its pointer table back at 24 MiB, as it did with tables that doubled.
+- With compact object headers, an array's elements start 12 bytes in, but
+  `SizeOf` rounds the array header to 16 bytes, so the charge slightly
+  overstates the arrays. Array charges are the same as without compact headers,
+  instance charges follow the JVM's layout, and no change was made for compact
+  headers.
 - A capture NFA search has its own allowance, the forward share, beside the DFA
   caches'. A search tracks K slots, the caller's, up to the slots through the
   highest surviving CAPTURE, and reports the slots past that unset: a trailing
@@ -1614,20 +1656,24 @@ as the graph grows. Each allocation is limited so that the remaining budget can
 still hold the minimum Java state behind every additional pointer row and the
 state tables' next growth when that growth funds more rows. State tables that
 start smaller than one row per instruction have not yet paid for growing toward
-it, so the sizing reserves the tables' next growth, to twice their rows but at
-most one row per instruction, when the grown tables' rows would hold more
-states beside the table than the current ones, counting the minimum state
-behind each pointer row, and each pointer-table growth computes the reserve
-again. Each allocation at most doubles the table, so reserving a farther growth
-would change no table: once the next growth's rows are not all funded, a larger
-reserve funds fewer. Reserving the whole growth to one row per instruction left
-memory that a smaller budget could not use idle at every reset: 1.6 of 7.9 MB
-of state budget for one Trino URL pattern at 24 MiB. Without the reservation, a
-pointer table sized while the state tables are small would take the budget
-their growth needs, and a budget that holds the whole graph could reset on
-every pass or withhold the pointer table. The integer and object transition
-tables remain authoritative, and every zero entry delegates to the unchanged
-object continuation.
+it, so the sizing reserves the tables' next growth. That growth is sized by the
+rule for state tables in [Memory Budgets And DFA
+Caching](#memory-budgets-and-dfa-caching), from the budget left beside the
+pointer rows in use, with a pointer row for each new row, and is at most one row
+per instruction, so the reserve covers the growth that will happen rather than a
+doubling the budget could not fill. The sizing reserves it only when the grown
+tables' rows would hold more states beside the table than the current ones,
+counting the minimum state behind each pointer row, and each pointer-table
+growth computes the reserve again. Each allocation at most doubles the table, so
+reserving a farther growth would change no table: once the next growth's rows
+are not all funded, a larger reserve funds fewer. Reserving the whole growth to
+one row per instruction left memory that a smaller budget could not use idle at
+every reset: 1.6 of 7.9 MB of state budget for one Trino URL pattern at 24 MiB.
+Without the reservation, a pointer table sized while the state tables are small
+would take the budget their growth needs, and a budget that holds the whole
+graph could reset on every pass or withhold the pointer table. The integer and
+object transition tables remain authoritative, and every zero entry delegates to
+the unchanged object continuation.
 
 One process-wide choice, fixed when the DFA class initializes, selects the
 form: native memory when the containing module has native access enabled, the
@@ -1705,6 +1751,29 @@ and the next reset drops it; any other reset invalidates the record. Below the
 cutoff, the budget is exhausted as before and the DFA resets with its table.
 The table stays given back, as for a search that resets too often, below.
 
+State tables grow only by rows the budget can fill, as [Memory Budgets And DFA
+Caching](#memory-budgets-and-dfa-caching) describes. At the funding edge, where
+a new state needs a growth or a charge the budget cannot hold, that sizing comes
+first and the budget rule second:
+
+- A DFA that holds the table sizes a growth with a pointer row for each new row
+  past the table's rows. When the budget funds at least the floor, the tables
+  grow and the table stays: Trino's URL search at 24 MiB grows from 4,096 to
+  4,836 rows, row zero included, for its 4,186 states, and RE2's URL search at
+  16 MiB from 4,096 to 4,342 rows for its 4,175, where both used to give the
+  table back.
+- A growth the budget does not fund is a state the budget cannot hold, so the
+  rule weighs the table as for any other. When it gives the table back, the
+  growth is sized again from the budget with the refund, on object rows, and the
+  state takes it without a reset: Trino's URL search at 16 MiB fills 3,073 rows
+  beside the table, gives it back, grows to 5,495 rows, and holds all 4,186
+  states, where it used to reset once per count.
+- When the rule keeps the table or has none to give back, or the refund does not
+  fund the floor either, the DFA resets; where the rows reach the cutoff, the
+  rule records the reset as above. Paired rows, which exclude the table, use the
+  same refund-and-resize test: the growth is sized again with their refund, and
+  the DFA releases them when that refund holds the state, or resets.
+
 The rule reads only the graph, the rows in use and the generation's Java
 states, and weighs a table the cap or a failed allocation withholds as one
 held, so the heap and native forms make the same decision for the same graph.
@@ -1718,26 +1787,28 @@ back would make no room for another state.
 The trade is plain: a pattern whose input shifts once, to states the generation
 cannot hold beside its table, now runs on object rows for good where it used to
 pay one reset and keep the table, unless the refund cannot hold the state, when
-it still does, and a pattern that thrashes resets less. Counter runs, which
-count resets and states and time nothing, show both. Trino's URL search over
-its benchmark text at 24 MiB, a program of 9,515 instructions whose generation
-holds about 4,100 states beside the table but all 4,186 it needs on object
-rows, reset 12 times in 9 counts with a heap table and once or twice with a
-native one, when the cap happened to withhold the table; both forms now give
-the table back at state 4,096 and never reset. At 16 MiB both reset 9 times,
-where they had reset 44 and 13 times. uap-core, the user-agent patterns shared
-by the ua-parser projects, has a crawler rule that no longer resets at 16 MiB
-over its user-agent tests.
+it still does, and a pattern that thrashes resets less. Counter runs with tables
+that doubled, which count resets and states and time nothing, showed both.
+Trino's URL search over its benchmark text at 24 MiB, a program of 9,515
+instructions whose generation holds about 4,100 states beside the table but all
+4,186 it needs on object rows, reset 12 times in 9 counts with a heap table and
+once or twice with a native one, when the cap happened to withhold the table;
+with the rule, both forms gave the table back at state 4,096 and never reset. At
+16 MiB both reset 9 times, where they had reset 44 and 13 times. Funded growth
+changed both results: the search now keeps the table at 24 MiB, and at 16 MiB
+gives it back and holds every state. uap-core, the user-agent patterns shared by
+the ua-parser projects, has a crawler rule that no longer resets at 16 MiB over
+its user-agent tests.
 
-Object rows also pay for the state tables' growth, which doubles, so what
-giving the table back gains depends on where the doublings fall. On either side
-of the cutoff, object rows from the start held 32-44% more states per
-generation than the table did. A DFA whose rows cost less keeps the table,
-though object rows would hold more of its states. Where the rows cost up to
-about an eighth of its Java states, as over a few byte classes, object rows
-held 8-14% more states per generation. From about a sixth to a quarter, they
-held 11% to 40% more, the most on word lists over alphabets of 12 to 14 byte
-classes, and no lower cutoff parts the small gains from the large: a latin1
+Object rows also pay for the state tables' growth, so what giving the table back
+gains depends on where the growth falls. These counter runs had tables that
+doubled. On either side of the cutoff, object rows from the start held 32-44%
+more states per generation than the table did. A DFA whose rows cost less keeps
+the table, though object rows would hold more of its states. Where the rows cost
+up to about an eighth of its Java states, as over a few byte classes, object
+rows held 8-14% more states per generation. From about a sixth to a quarter,
+they held 11% to 40% more, the most on word lists over alphabets of 12 to 14
+byte classes, and no lower cutoff parts the small gains from the large: a latin1
 pattern whose rows cost 22% of its Java states gained 11%, while a word list
 whose rows cost the same gained 40%.
 
