@@ -31,11 +31,15 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 
 /// The public uap-core user-agent rules run the way an application runs them on Regulator, with
 /// [TestingUapCoreParser]: each section's rules in one [FilteredRe2], its atoms in one [Re2Set], and
@@ -73,6 +77,9 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 public class BenchmarkUapCore
 {
     private static final int CRAWLER_RULE_ID = 51;
+    private static final int ATOM_FRAGMENT_TEXT_COUNT = 20_000;
+    private static final long ATOM_FRAGMENT_SEED = 42;
+    private static final byte[] ATOM_FRAGMENT_ALPHABET = " /;()._-0123456789abcdefghijklmnopqrstuvwxyz".getBytes(US_ASCII);
 
     public enum Corpus
     {
@@ -83,6 +90,21 @@ public class BenchmarkUapCore
         /// The browser-test user agents in which browser rule 51 (zero-based), run by itself, finds a
         /// match: the crawlers.
         CRAWLERS,
+        /// Synthetic texts that drive the atom sets' DFAs into many more states than the small test
+        /// corpora reach. The {@value #ATOM_FRAGMENT_TEXT_COUNT} texts of
+        /// [TestingUapCoreParser#MAX_USER_AGENT_BYTES] bytes each come from a `java.util.Random`
+        /// seeded with {@value #ATOM_FRAGMENT_SEED} and the atoms of both sections, browser then OS,
+        /// each section's in atom-set order. Each step picks a random atom, then one of four modes at
+        /// random, and writes:
+        ///
+        /// 0. one random byte of `" /;()._-0123456789abcdefghijklmnopqrstuvwxyz"`
+        /// 1. a random non-empty prefix of the atom
+        /// 2. a random non-empty suffix of the atom
+        /// 3. the whole atom
+        ///
+        /// A text ends when it is full, cutting the last write short. The atoms are canonical, so the
+        /// texts are too.
+        ATOM_FRAGMENTS,
     }
 
     /// One thread's compiled crawler rule and sections, over the corpus [SharedParsers] holds.
@@ -129,7 +151,7 @@ public class BenchmarkUapCore
         {
             browserParser = new TestingUapCoreParser(Section.USER_AGENT, mebibytes(ruleMemoryMiB), mebibytes(atomSetMemoryMiB));
             osParser = new TestingUapCoreParser(Section.OS, mebibytes(ruleMemoryMiB), mebibytes(atomSetMemoryMiB));
-            userAgents = loadUserAgents(corpus, ruleMemoryMiB);
+            userAgents = loadUserAgents(corpus, ruleMemoryMiB, browserParser, osParser);
             // Canonicalizing depends only on the encoding, which both sections share, so one array
             // serves both atom sets.
             canonicalTexts = new Slice[userAgents.length];
@@ -244,8 +266,9 @@ public class BenchmarkUapCore
         return Re2.compile(Slices.utf8Slice(regex), Re2.Options.defaults().setMaxMemory(mebibytes(ruleMemoryMiB)));
     }
 
-    /// Returns the corpus's user agents in test-file order: all of them, or the crawlers among them.
-    private static Slice[] loadUserAgents(Corpus corpus, int ruleMemoryMiB)
+    /// Returns the corpus's texts: test user agents in file order, the crawlers among them, or the
+    /// generated fragments.
+    private static Slice[] loadUserAgents(Corpus corpus, int ruleMemoryMiB, TestingUapCoreParser browserParser, TestingUapCoreParser osParser)
     {
         return switch (corpus) {
             case UA_TESTS -> testUserAgents(Section.USER_AGENT);
@@ -254,6 +277,7 @@ public class BenchmarkUapCore
                 Re2 crawlerRule = compileCrawlerRule(ruleMemoryMiB);
                 yield Arrays.stream(testUserAgents(Section.USER_AGENT)).filter(userAgent -> crawlerRule.find(TestingUapCoreParser.cut(userAgent))).toArray(Slice[]::new);
             }
+            case ATOM_FRAGMENTS -> atomFragments(browserParser, osParser);
         };
     }
 
@@ -262,6 +286,39 @@ public class BenchmarkUapCore
         return section.testCases().stream()
                 .map(testCase -> Slices.utf8Slice(testCase.getString("user_agent_string")))
                 .toArray(Slice[]::new);
+    }
+
+    /// Returns the texts of [Corpus#ATOM_FRAGMENTS], generated as it describes from the atoms of
+    /// the two sections' parsers.
+    static Slice[] atomFragments(TestingUapCoreParser browserParser, TestingUapCoreParser osParser)
+    {
+        List<byte[]> atoms = new ArrayList<>();
+        for (TestingUapCoreParser parser : List.of(browserParser, osParser)) {
+            for (Slice atom : parser.atoms()) {
+                atoms.add(atom.getBytes());
+            }
+        }
+        Random random = new Random(ATOM_FRAGMENT_SEED);
+        Slice[] texts = new Slice[ATOM_FRAGMENT_TEXT_COUNT];
+        for (int textIndex = 0; textIndex < texts.length; textIndex++) {
+            byte[] text = new byte[TestingUapCoreParser.MAX_USER_AGENT_BYTES];
+            int length = 0;
+            while (length < text.length) {
+                byte[] atom = atoms.get(random.nextInt(atoms.size()));
+                int mode = random.nextInt(4);
+                if (mode == 0) {
+                    text[length++] = ATOM_FRAGMENT_ALPHABET[random.nextInt(ATOM_FRAGMENT_ALPHABET.length)];
+                    continue;
+                }
+                int from = mode == 2 ? random.nextInt(atom.length) : 0;
+                int to = mode == 1 ? 1 + random.nextInt(atom.length) : atom.length;
+                int count = Math.min(to - from, text.length - length);
+                System.arraycopy(atom, from, text, length, count);
+                length += count;
+            }
+            texts[textIndex] = Slices.wrappedBuffer(text);
+        }
+        return texts;
     }
 
     public static void main(String[] args)

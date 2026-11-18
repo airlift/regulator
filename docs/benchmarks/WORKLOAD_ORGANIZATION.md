@@ -223,8 +223,9 @@ Apache-2.0 license;
 [`uap-core/README.md`](../../src/test/resources/io/airlift/regulator/uap-core/README.md)
 carries their notice. It runs each section as a whole rule collection through
 `FilteredRe2` and `Re2Set`, an operation none of the six populations covers,
-over the user agents of uap-core's `tests/test_ua.yaml` and `tests/test_os.yaml`.
-It is diagnostic evidence, not a publication row.
+over the user agents of uap-core's `tests/test_ua.yaml` and `tests/test_os.yaml`
+and a synthetic corpus of atom fragments. It is diagnostic evidence, not a
+publication row.
 
 Classify by purpose. The public report publishes every campaign row except a
 short hide list in `benchmark-report/scripts/publication_data.py`. Hide
