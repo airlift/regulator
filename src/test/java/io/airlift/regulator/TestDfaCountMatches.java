@@ -430,11 +430,11 @@ public class TestDfaCountMatches
     @Test
     public void testPointerTableThrashingKeepsDfa()
     {
-        // These texts reach about 2,700 DFA states. A 2 MiB budget holds them all on object rows,
-        // where the DFA never resets, but not beside the pointer table, which a fresh DFA keeps
-        // through its first two resets, a native table whenever the collector runs. A count that
-        // resets too often while the DFA has the table gives the table back instead of bailing,
-        // and later finds do not fall back to the NFA.
+        // These texts reach about 2,700 DFA states. A 1.75 MiB budget holds them all on object
+        // rows, where the DFA never resets, but not beside the pointer table. A fresh DFA keeps
+        // the table through its first two resets, and keeps a native table there whenever the
+        // collector runs. A count that resets too often while the DFA has the table gives the
+        // table back instead of bailing, and later finds do not fall back to the NFA.
         Slice patternText = utf8Slice("[ab]*a[ab]{12}c");
         Re2 reference = Re2.compile(patternText);
         Random random = new Random(1);
@@ -454,7 +454,7 @@ public class TestDfaCountMatches
 
         for (Slice input : List.of(manyMatches, longSearch)) {
             // The first finds build the table without a reset.
-            Re2 pattern = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(2L << 20));
+            Re2 pattern = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(1792L << 10));
             RegexpMatcher firstMatches = pattern.matcher(input);
             for (int match = 0; match < 80; match++) {
                 assertThat(firstMatches.find()).isTrue();

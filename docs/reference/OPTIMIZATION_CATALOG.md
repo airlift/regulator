@@ -1407,37 +1407,49 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   and by regex-automata, whose lazy DFA appends each new state's row to one
   flat transition table that starts empty and is charged by its length
   ([hybrid/dfa.rs][ra-hybrid]). Regulator: flat Java state tables that start
-  at up to 256 rows and double, each growth charged before it is allocated and
-  never larger, at the same state count, than tables that started at one row
-  per instruction, with pointer-table sizing that reserves the next
-  state-table growth when it funds more rows, computed again at each
+  at up to 256 rows and grow, at most doubling and, under a finite budget,
+  only by the rows the budget can fill, each growth charged before it is
+  allocated and never larger, at the same state count, than tables that
+  started at one row per instruction, with pointer-table sizing that reserves
+  the next state-table growth when it funds more rows, computed again at each
   pointer-table growth ([#229]); base RE2 [O-DFA-003].
 - **Where:** `Dfa.DfaInstance.programStateCapacity`,
   `Dfa.DfaInstance.allocateCachedState`,
+  `Dfa.DfaInstance.fundedStateCapacity`,
   `Dfa.DfaInstance.reservedStateTableGrowthMemory`,
   `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.sizeAbsolutePointerTransitionGrowth`
-- **Applies when:** Every DFA whose one-row-per-instruction capacity, at least
-  16 and at most what its budget's transitions hold, is above 256: a program
-  of more than 256 instructions under a budget that holds 256 states. Other
-  DFAs' tables start at that capacity. A growth that does not fit the state
-  budget is handled as a full cache is, by a reset or by giving the pointer
-  table back, and while the tables are smaller than one row per instruction,
-  the pointer table reserves their next growth when that growth funds more
-  rows
+- **Applies when:** Tables start small in every DFA whose
+  one-row-per-instruction capacity, at least 16 and at most what its budget's
+  transitions hold, is above 256: a program of more than 256 instructions
+  under a budget that holds 256 states. Other DFAs' tables start at that
+  capacity. Every DFA under a finite budget grows its tables only by the rows
+  the budget can fill. A growth the budget funds in fewer than a thirty-second
+  of the current rows, unless the program's capacity or the transition limit
+  caps the step, or that does not fit the state budget, is handled as a full
+  cache is, by a reset or by giving the pointer table back. While the tables
+  are smaller than one row per instruction, the pointer table reserves their
+  next growth when that growth funds more rows
 - **What it does:** A DFA's state, transition, and self-loop exit tables start
-  with room for at most 256 states and double as states arrive, stopping once
-  at the one-row-per-instruction capacity before doubling on toward the
-  budget's limit, so at every state count they are no larger than tables that
-  started there, and a reset returns them to their starting size. Most large
-  programs' DFAs never fill a row per instruction: 120 of the 146
-  larger-program DFAs among the published benchmark rows never pass 256
-  states. The table change alone cut the memory retained by 192 large-program
-  benchmark rows at a 96 MiB budget from 1,035.5 to 822.9 MiB, and
-  with the setup gate's [worst-case state
-  sizing](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching) to
-  788.9 MiB, with the same state counts and no resets; timings at that budget
-  stayed within noise ([#229]).
+  with room for at most 256 states and grow as states arrive, at most
+  doubling, stopping once at the one-row-per-instruction capacity before
+  growing on toward the budget's limit, so at every state count they are no
+  larger than tables that started there, and a reset returns them to their
+  starting size. Under a finite budget, the budget funds a growth only by the
+  rows it can fill, each with the generation's average Java state behind it, a
+  pointer row when the table needs one, and the state hash table's doubling
+  when the rows pass the table's three-quarters line, so a working set a
+  little past a doubling fits without paying for empty rows. In counter runs,
+  Trino's URL search stopped resetting once per count at 16 MiB and kept its
+  pointer table at 24 MiB, as RE2's URL search did at 16 MiB; at 8 MiB the two
+  reset 5.3 and 2.3 times per count instead of 7.7 and 3. Most large programs'
+  DFAs never fill a row per instruction: 120 of the 146 larger-program DFAs
+  among the published benchmark rows never pass 256 states. The table change
+  alone cut the memory retained by 192 large-program benchmark rows at a 96
+  MiB budget from 1,035.5 to 822.9 MiB, and with the setup gate's [worst-case
+  state sizing](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching)
+  to 788.9 MiB, with the same state counts and no resets; timings at that
+  budget stayed within noise ([#229]).
 
 ### Many-match states that hold their own matches
 

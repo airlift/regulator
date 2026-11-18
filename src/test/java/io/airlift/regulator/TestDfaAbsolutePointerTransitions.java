@@ -45,9 +45,9 @@ public class TestDfaAbsolutePointerTransitions
             assertThat(enabled.output()).contains("OK enabled flat-paired-rows=" + flatPairedRows);
             assertThat(enabled.output()).doesNotContain("restricted method");
 
-            // The budget rule makes the same decision for the same graph in either form, so the
-            // word list resets as often, the input shift keeps as many states, and each split
-            // budget runs out at the same word and decides alike.
+            // The budget rule reads only the rows in use and the Java states, so the word list
+            // resets as often in either form, and the input shift keeps as many states. The split
+            // budgets can run out a word apart, so each probe checks their decisions itself.
             assertThat(budgetReleaseRecord(enabled.output()))
                     .as("budget release with native access, flat-paired-rows=%s", flatPairedRows)
                     .isEqualTo(budgetReleaseRecord(disabled.output()));

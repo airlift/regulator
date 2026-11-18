@@ -6548,16 +6548,35 @@ final class Dfa
 
         long tableBytes()
         {
-            return entries == null ? 0 : sizeOfObjectArray(entries.length);
+            return entries == null ? 0 : tableBytes(capacity());
+        }
+
+        // The bytes of a table of `capacity` entries, each a key and a value.
+        static long tableBytes(int capacity)
+        {
+            return sizeOfObjectArray(Math.multiplyExact(capacity, 2));
         }
 
         int capacityAfterInsert()
         {
-            int capacity = capacity();
-            if (capacity != 0 && size + 1 <= (capacity * 3L) / 4) {
-                return capacity;
+            return capacityHolding(size + 1L);
+        }
+
+        // The capacity at which the table holds `entryCount` entries: its own, or
+        // `INITIAL_CAPACITY` when empty, doubled until `entryCount` does not pass its size limit.
+        int capacityHolding(long entryCount)
+        {
+            int capacity = Math.max(capacity(), INITIAL_CAPACITY);
+            while (entryCount > sizeLimit(capacity)) {
+                capacity = Math.multiplyExact(capacity, 2);
             }
-            return capacity == 0 ? INITIAL_CAPACITY : Math.multiplyExact(capacity, 2);
+            return capacity;
+        }
+
+        // The most entries a table of `capacity` holds: three-quarters of it.
+        static long sizeLimit(int capacity)
+        {
+            return (capacity * 3L) / 4;
         }
 
         PreparedInsertion prepareInsert(StateKey key, StateData value, int newCapacity)
@@ -7108,9 +7127,10 @@ final class Dfa
         private static final int MINIMUM_INITIAL_STATES = 20;
         // The most states the tables of a new or reset DFA hold before they grow. A DFA starts
         // with room for one state per instruction, at least 16 and at most what its budget holds,
-        // but never more than this; one that starts here doubles its tables as states arrive,
-        // each growth charged to the state budget, so a large program's DFA does not prepay
-        // tables it may never fill.
+        // but never more than this; one that starts here grows its tables as states arrive, at
+        // most doubling them and, under a finite budget, only by the rows it can fill, each growth
+        // charged to the state budget, so a large program's DFA does not prepay tables it may
+        // never fill.
         static final int MAXIMUM_INITIAL_STATE_CAPACITY = 256;
         // The most a forward DFA charges for its start-byte tables: the candidates, one entry per
         // byte value, and the nibble tables, the literal filter, or the class filter, which
@@ -7135,15 +7155,25 @@ final class Dfa
         private static final int MANY_MATCH_SEARCH_SKIPPED_SEARCHES = 1 << 16;
         // The budget rule in `releaseAbsolutePointerTransitionsForBudget` gives the pointer table
         // back once the bytes of its rows in use reach the generation's retained Java state memory
-        // divided by this. Object rows also pay for the state tables' growth, which doubles, so
-        // what they gain depends on where the doublings fall. In counter runs, object rows held
-        // 32-44% more states per generation than the table on either side of a quarter. Below it
-        // they held 8-14% more where the rows cost up to about an eighth of the Java states, and
-        // 11% to 40% more from about a sixth to a quarter, the most on word lists over alphabets
-        // of 12 to 14 byte classes. A lower cutoff would also give the table back where object
-        // rows gain little, such as a latin1 pattern whose rows cost 22% of its Java states and
-        // whose object rows held 11% more.
+        // divided by this. Object rows also pay for the state tables' growth, so what they gain
+        // depends on where the growth falls. In counter runs with tables that doubled, object
+        // rows held 32-44% more states per generation than the table on either side of a quarter.
+        // Below it they held 8-14% more where the rows cost up to about an eighth of the Java
+        // states, and 11% to 40% more from about a sixth to a quarter, the most on word lists over
+        // alphabets of 12 to 14 byte classes. A lower cutoff would also give the table back where
+        // object rows gain little, such as a latin1 pattern whose rows cost 22% of its Java
+        // states and whose object rows held 11% more.
         private static final int BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR = 4;
+        // A state-table growth the budget funds in fewer rows than the current capacity divided by
+        // this exhausts the budget instead, as `fundedStateCapacity` describes. Every growth copies
+        // the tables, so near the budget's edge steps of one row would recopy them for each new
+        // state. With this floor, a growth of tables of N rows adds at least N/32 rows, rounded
+        // down but at least one, unless the program's capacity or the transition limit caps the
+        // step, so the tables are copied again only after that many new states. A growth the floor
+        // refuses leaves the budget for fewer rows than that unused. In counter runs, an eighth or
+        // a sixteenth refused the 246 rows, to 4,342 with row zero, that RE2's URL search at 16 MiB
+        // could fund at 4,096 rows, which it needed 80 of, and it gave its pointer table back.
+        private static final int STATE_TABLE_GROWTH_MINIMUM_STEP_DIVISOR = 32;
 
         private static final VarHandle TABLES;
         private static final VarHandle COUNT_BAIL_SKIPS_REMAINING;
@@ -7247,8 +7277,8 @@ final class Dfa
         // The state capacity of the tables a reset publishes.
         private final int initialStateCapacity;
         // One state per instruction, at least 16, at most what the budget's transitions hold. Growth
-        // from a smaller initial capacity stops here once before it doubles on, so the tables never
-        // exceed the size they would have had starting here.
+        // from a smaller initial capacity stops here once before it grows on, at most doubling, so
+        // the tables never exceed the size they would have had starting here.
         private final int programStateCapacity;
         int nextFreeOffset;
         private long pairedTransitionMemory;
@@ -7512,30 +7542,120 @@ final class Dfa
         }
 
         // The growth, not yet charged, of state tables of `stateCapacity` rows that pointer-table
-        // sizing reserves: their next growth, to twice the rows but at most `programStateCapacity`,
-        // when the grown tables' rows hold more states than the current ones beside the pointer
-        // table that `memory` funds, each pointer row past `paidRowCount` with the minimum Java
-        // state behind it; otherwise none. Every pointer-table allocation and growth computes it
-        // again, and both cap the table at twice its rows, so a farther growth never changes the
-        // table: when the next growth's rows are not all funded, a larger reserve funds fewer.
+        // sizing reserves. `fundedStateCapacity` sizes it from `memory`, the budget for the table's
+        // rows, less a pointer row for each of the `paidRowCount` rows in use, with a pointer row
+        // for each new row. The growth is reserved only when the grown tables' rows hold more
+        // states beside the pointer table `memory` funds than the current ones, counting the
+        // minimum Java state behind each pointer row past `paidRowCount`; otherwise the reserve is
+        // none. Every pointer-table allocation and growth computes it again, and both cap the table
+        // at twice its rows, so reserving a farther growth would change no table: once the next
+        // growth's rows are not all funded, a larger reserve funds fewer.
         private long reservedStateTableGrowthMemory(long memory, long paidRowCount, int stateCapacity)
         {
             if (stateCapacity >= programStateCapacity) {
                 return 0;
             }
-            int grownStateCapacity = (int) Math.min(2L * stateCapacity, programStateCapacity);
+            long stateMemory = memory - Math.multiplyExact(paidRowCount, pointerRowBytes());
+            int grownStateCapacity = fundedStateCapacity(stateMemory, stateCapacity, paidRowCount);
+            if (grownStateCapacity <= stateCapacity) {
+                return 0;
+            }
             long growthMemory = stateTableMemory(grownStateCapacity) - stateTableMemory(stateCapacity);
-            long fundedRowCount = compatiblePointerRowCount(memory, paidRowCount, stateCapacity);
-            return compatiblePointerRowCount(memory - growthMemory, paidRowCount, grownStateCapacity) > fundedRowCount ? growthMemory : 0;
+            long fundedPointerRowCount = compatiblePointerRowCount(memory, paidRowCount, stateCapacity);
+            return compatiblePointerRowCount(memory - growthMemory, paidRowCount, grownStateCapacity) > fundedPointerRowCount ? growthMemory : 0;
+        }
+
+        // The most rows full state tables of `stateCapacity` rows may grow to: twice the rows, at
+        // most `maxTransitionsLength / nextSize` rows, and, while the tables are below
+        // `programStateCapacity`, at most that. A limit no larger than `stateCapacity` means the
+        // tables cannot grow.
+        private int stateCapacityLimit(int stateCapacity)
+        {
+            long stateCapacityLimit = Math.min(2L * stateCapacity, maxTransitionsLength / nextSize);
+            if (stateCapacity < programStateCapacity) {
+                stateCapacityLimit = Math.min(stateCapacityLimit, programStateCapacity);
+            }
+            return toIntExact(stateCapacityLimit);
+        }
+
+        // The capacity full state tables of `stateCapacity` rows grow to: `stateCapacityLimit`,
+        // but under a finite budget no more rows than `memory` fills, each new row with the
+        // generation's average Java state behind it, and each past the first `pointerRowCount`
+        // rows with a pointer row too; a growth on object rows passes `Long.MAX_VALUE`. Doubling
+        // alone would charge rows no state fills when the working set nearly fits, and the DFA
+        // would reset with its graph in reach. A growth the budget fills in fewer rows than the
+        // minimum step, `stateCapacity` divided by `STATE_TABLE_GROWTH_MINIMUM_STEP_DIVISOR` but at
+        // least one row, or what `stateCapacityLimit` still permits when that is less, is not
+        // funded, and the capacity stays `stateCapacity`: the budget is exhausted.
+        private int fundedStateCapacity(long memory, int stateCapacity, long pointerRowCount)
+        {
+            int stateCapacityLimit = stateCapacityLimit(stateCapacity);
+            if (stateBudget == Long.MAX_VALUE || stateCapacityLimit <= stateCapacity) {
+                return Math.max(stateCapacityLimit, stateCapacity);
+            }
+            if (pointerRowCount != Long.MAX_VALUE) {
+                // A heap table's array header and class offsets are charged once, outside its
+                // rows, and are added back so they do not shrink the growth. The heap and native
+                // forms can still run out of budget at different states, since a heap table sized
+                // from the same budget can hold fewer rows.
+                memory += absolutePointerTableBytes(0);
+            }
+            long addedRowCount = (long) stateCapacityLimit - stateCapacity;
+            // The average Java state the generation holds, what it retains beyond the backing
+            // memory per state, never below the smallest.
+            long javaStateBytes = stateObjectMemory(0);
+            if (stateCount > 0) {
+                javaStateBytes = Math.max(javaStateBytes, (retainedStateMemory - stateBackingMemory()) / stateCount);
+            }
+            long rowBytes = stateTableRowBytes() + javaStateBytes;
+            long paidPointerRowCount = Math.min(addedRowCount, Math.max(0, pointerRowCount - stateCapacity));
+            long fundedRowCount = Math.min(addedRowCount, fundedStateRowCount(memory, rowBytes, paidPointerRowCount));
+            // The state hash table is in the backing memory, not the average state, and doubles
+            // whole once an insert would fill more than three-quarters of it, charged to the state
+            // that crosses that line. Rows past the line are funded only from what the doubling
+            // leaves, or their states could not be inserted. Pricing the table's bytes per state
+            // at its load factor would spread the doubling over the states that fill the doubled
+            // table and fund too little of it when the growth crosses the line by a few rows. Each
+            // row's state is one entry, the reserved row zero none, and the doubling an allocating
+            // state needs for itself is already charged.
+            long fullTableStateCount = stateCapacity - 1L;
+            int stateCacheCapacity = cache.capacityHolding(Math.max(fullTableStateCount, stateCount + 1L));
+            long rowsBelowCacheGrowth = StateCache.sizeLimit(stateCacheCapacity) - fullTableStateCount;
+            if (fundedRowCount > rowsBelowCacheGrowth) {
+                long cacheGrowthMemory = StateCache.tableBytes(cache.capacityHolding(fullTableStateCount + fundedRowCount)) - StateCache.tableBytes(stateCacheCapacity);
+                fundedRowCount = Math.max(rowsBelowCacheGrowth, Math.min(addedRowCount, fundedStateRowCount(memory - cacheGrowthMemory, rowBytes, paidPointerRowCount)));
+            }
+            long minimumStep = Math.min(addedRowCount, Math.max(1, stateCapacity / STATE_TABLE_GROWTH_MINIMUM_STEP_DIVISOR));
+            if (fundedRowCount < minimumStep) {
+                return stateCapacity;
+            }
+            return toIntExact(stateCapacity + fundedRowCount);
+        }
+
+        // The new state-table rows `memory` funds at `rowBytes` each, the first
+        // `paidPointerRowCount` of them beside existing pointer rows and the rest with a pointer
+        // row too.
+        private long fundedStateRowCount(long memory, long rowBytes, long paidPointerRowCount)
+        {
+            long rowCount = Math.max(memory, 0) / rowBytes;
+            if (rowCount > paidPointerRowCount) {
+                rowCount = paidPointerRowCount + (memory - paidPointerRowCount * rowBytes) / (rowBytes + pointerRowBytes());
+            }
+            return rowCount;
         }
 
         // The most pointer rows, at most `rowLimit`, that fit in `memory` with the minimum Java
         // state behind every row past `paidRowCount`.
         private long compatiblePointerRowCount(long memory, long paidRowCount, long rowLimit)
         {
-            long rowBytes = Math.multiplyExact((long) nextSize, Long.BYTES);
             long minimumStateMemory = stateObjectMemory(0);
-            return Math.min(rowLimit, Math.addExact(memory, Math.multiplyExact(paidRowCount, minimumStateMemory)) / Math.addExact(rowBytes, minimumStateMemory));
+            return Math.min(rowLimit, Math.addExact(memory, Math.multiplyExact(paidRowCount, minimumStateMemory)) / Math.addExact(pointerRowBytes(), minimumStateMemory));
+        }
+
+        // The bytes of one pointer-table row: an entry per byte class.
+        private long pointerRowBytes()
+        {
+            return (long) nextSize * Long.BYTES;
         }
 
         // The charge for state tables of `stateCapacity` rows: transitions, state data, state
@@ -7543,6 +7663,13 @@ final class Dfa
         private long stateTableMemory(int stateCapacity)
         {
             return sizeOfIntArray(stateCapacity * nextSize) + 2 * sizeOfObjectArray(stateCapacity) + sizeOfLongArray(stateCapacity);
+        }
+
+        // The payload of one state-table row, without the arrays' headers and alignment: its
+        // transitions, its state data and state reference slots, and its self-loop exit byte set.
+        private long stateTableRowBytes()
+        {
+            return (long) nextSize * Integer.BYTES + 2 * REFERENCE_BYTES + Long.BYTES;
         }
 
         private CacheTables newCacheTables(int stateCapacity)
@@ -8525,49 +8652,62 @@ final class Dfa
             beginStateAllocationForTesting();
             CacheTables tables = this.tables;
             int[] transitions = tables.transitions;
-            long stateMemory = stateObjectMemory(instructions.length);
-            long newTransitionsLength = transitions.length;
-            int newStateCapacity = transitions.length / nextSize;
-            if (nextFreeOffset + nextSize > transitions.length) {
-                newTransitionsLength = Math.min((long) transitions.length * 2, maxTransitionsLength);
-                long programTransitionsLength = (long) programStateCapacity * nextSize;
-                if (transitions.length < programTransitionsLength) {
-                    newTransitionsLength = Math.min(newTransitionsLength, programTransitionsLength);
-                }
-                if (newTransitionsLength <= transitions.length || newTransitionsLength < nextFreeOffset + nextSize) {
+            AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
+            int newCacheTableCapacity = cache.capacityAfterInsert();
+            // The state's own charge, with the state hash table's growth for it. Growth sizing
+            // prices the first new row with an average state too, so it keeps one average state of
+            // headroom, which is conservative.
+            long ownStateMemory = stateObjectMemory(instructions.length) + StateCache.tableBytes(newCacheTableCapacity) - cache.tableBytes();
+            int stateCapacity = transitions.length / nextSize;
+            int newStateCapacity = stateCapacity;
+            boolean stateTablesFull = nextFreeOffset + nextSize > transitions.length;
+            if (stateTablesFull) {
+                if (stateCapacityLimit(stateCapacity) <= stateCapacity) {
                     return null; // budget exhausted
                 }
-                newStateCapacity = toIntExact(newTransitionsLength / nextSize);
-                stateMemory += stateTableMemory(newStateCapacity) - stateTableMemory(tables.stateData.length);
+                // Size growth before any refund. If the state does not fit, it is sized again below
+                // with the refund of paired rows or the pointer table.
+                long growthMemory = availableStateMemory - ownStateMemory;
+                long pointerRowCount = existingPointers == null ? Long.MAX_VALUE : existingPointers.entryCapacity() / nextSize;
+                newStateCapacity = fundedStateCapacity(growthMemory, stateCapacity, pointerRowCount);
             }
-
-            int newCacheTableCapacity = cache.capacityAfterInsert();
-            stateMemory += sizeOfObjectArray(Math.multiplyExact(newCacheTableCapacity, 2)) - cache.tableBytes();
+            boolean stateTableGrowthUnfunded = stateTablesFull && newStateCapacity == stateCapacity;
+            long stateMemory = ownStateMemory + stateTableMemory(newStateCapacity) - stateTableMemory(stateCapacity);
 
             AbsolutePointerGrowthSize absolutePointerGrowthSize = null;
             boolean absolutePointerGrowthUnfunded = false;
-            AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
-            if (existingPointers != null && nextFreeOffset + nextSize > existingPointers.entryCapacity()) {
+            if (existingPointers != null && !stateTableGrowthUnfunded && nextFreeOffset + nextSize > existingPointers.entryCapacity()) {
                 absolutePointerGrowthSize = sizeAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory, newStateCapacity);
                 absolutePointerGrowthUnfunded = absolutePointerGrowthSize == null;
             }
             long absolutePointerMemory = absolutePointerGrowthSize == null ? 0 : absolutePointerGrowthSize.memoryDelta();
             boolean releasePairedTransitions = false;
             boolean releaseAbsolutePointers = false;
-            if (absolutePointerGrowthUnfunded || availableStateMemory - absolutePointerMemory < stateMemory) {
-                // Paired rows and a pointer table exclude each other, so an unfunded pointer
-                // growth never releases paired rows.
-                releasePairedTransitions = tables.hasPairedRows() &&
-                        availableStateMemory + pairedTransitionMemory - absolutePointerMemory >= stateMemory;
+            if (stateTableGrowthUnfunded || absolutePointerGrowthUnfunded || availableStateMemory - absolutePointerMemory < stateMemory) {
+                // The state does not fit. Paired rows and a pointer table exclude each other, so the
+                // refund that may hold it is of one or the other; a DFA with neither has a zero
+                // refund, which cannot hold a state that did not fit. With the refund, the state
+                // needs no pointer row, and full tables grow by the object rows the budget with the
+                // refund fills.
+                long refundMemory = tables.hasPairedRows() ? pairedTransitionMemory : existingPointers == null ? 0 : existingPointers.allocatedBytes();
+                long refundedMemory = availableStateMemory + refundMemory;
+                int refundedStateCapacity = stateTablesFull ? fundedStateCapacity(refundedMemory - ownStateMemory, stateCapacity, Long.MAX_VALUE) : stateCapacity;
+                long refundedStateMemory = ownStateMemory + stateTableMemory(refundedStateCapacity) - stateTableMemory(stateCapacity);
+                // Full tables the refund does not grow have no row for the state.
+                boolean refundHoldsState = (!stateTablesFull || refundedStateCapacity > stateCapacity) && refundedMemory >= refundedStateMemory;
+                releasePairedTransitions = tables.hasPairedRows() && refundHoldsState;
                 if (!releasePairedTransitions) {
-                    if (!releaseAbsolutePointerTransitionsForBudget(stateMemory)) {
+                    if (!releaseAbsolutePointerTransitionsForBudget(refundHoldsState)) {
                         return null;
                     }
                     // The table is dropped as a withheld growth drops it, with its charge refunded.
                     absolutePointerGrowthSize = new AbsolutePointerGrowthSize(0, 0, -existingPointers.allocatedBytes());
                     releaseAbsolutePointers = true;
                 }
+                newStateCapacity = refundedStateCapacity;
+                stateMemory = refundedStateMemory;
             }
+            int newTransitionsLength = newStateCapacity * nextSize;
 
             int[] newTransitions = transitions;
             StateData[] newStateData = tables.stateData;
@@ -8576,7 +8716,7 @@ final class Dfa
             if (newTransitionsLength != transitions.length) {
                 int oldLength = transitions.length;
                 beginTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
-                newTransitions = Arrays.copyOf(transitions, toIntExact(newTransitionsLength));
+                newTransitions = Arrays.copyOf(transitions, newTransitionsLength);
                 Arrays.fill(newTransitions, oldLength, newTransitions.length, T_UNCOMPUTED);
                 endTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
                 beginTestingFailurePoint(TestingFailurePoint.STATE_DATA_ARRAY_GROWTH);
@@ -9552,11 +9692,10 @@ final class Dfa
         // heap array, header included, and of its class offsets.
         private long absolutePointerTableBytes(long rowCount)
         {
-            long entryCount = Math.multiplyExact(rowCount, nextSize);
             if (HEAP_POINTER_TABLES) {
-                return sizeOfLongArray(toIntExact(entryCount)) + sizeOfLongArray(bytemap.length);
+                return sizeOfLongArray(toIntExact(Math.multiplyExact(rowCount, nextSize))) + sizeOfLongArray(bytemap.length);
             }
-            return Math.multiplyExact(entryCount, Long.BYTES);
+            return Math.multiplyExact(rowCount, pointerRowBytes());
         }
 
         // Each byte's class times the bytes in a pointer-table entry: the byte offset of its
@@ -11136,9 +11275,11 @@ final class Dfa
             return tables.absolutePointerTransitions != null || absolutePointerTransitionsWithheld;
         }
 
-        // Called under the cache mutation lock when the budget cannot hold a new state of
-        // `stateMemory` and no paired rows' refund holds it, whether the state tables or the
-        // pointer table would have to grow for it or the state alone does not fit. The budget rule
+        // Called under the cache mutation lock when the budget cannot hold a new state and no
+        // paired rows' refund holds it, whether the state tables or the pointer table would have
+        // to grow for it or the state alone does not fit. `refundHoldsState` is whether the
+        // current tables hold the table and its refunded charge holds the state, with full state
+        // tables grown by the object rows the budget with the refund fills. The budget rule
         // gives the pointer table back once the bytes of its rows in use, reserved row zero
         // included, reach the generation's retained Java state memory divided by
         // `BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR`: the table's charge then takes room that
@@ -11148,15 +11289,15 @@ final class Dfa
         // held; a DFA that only requested a table, such as one on paired rows, has none to give
         // back.
         //
-        // Returns true when the current tables hold the table and its refunded charge holds the
-        // state: the caller publishes the state's tables without the table, refunds its charge,
-        // keeps every state, and goes on with object rows, so a pattern whose input shifts once
-        // runs on object rows for good. Otherwise, when a withheld table has no charge to refund or
-        // the refund cannot hold the state, the DFA resets: the first such state only records that
-        // reset, and when the next state the budget cannot hold follows before any other reset and
-        // is such a state too, it gives the table back for the next reset to drop. Any other reset
-        // invalidates the record.
-        private boolean releaseAbsolutePointerTransitionsForBudget(long stateMemory)
+        // Returns true when the rule gives the table back and `refundHoldsState`: the caller
+        // publishes the state's tables without the table, refunds its charge, keeps every state,
+        // and goes on with object rows, so a pattern whose input shifts once runs on object rows
+        // for good. Otherwise, when a withheld table has no charge to refund or the refund cannot
+        // hold the state, the DFA resets: the first such state only records that reset, and when
+        // the next state the budget cannot hold follows before any other reset and is such a state
+        // too, it gives the table back for the next reset to drop. Any other reset invalidates the
+        // record.
+        private boolean releaseAbsolutePointerTransitionsForBudget(boolean refundHoldsState)
         {
             if (absolutePointerTransitionsReleased || !holdsOrWithholdsAbsolutePointerTransitions()) {
                 return false;
@@ -11165,8 +11306,7 @@ final class Dfa
             if (rowMemory * BUDGET_RELEASE_JAVA_STATE_MEMORY_DIVISOR < retainedStateMemory) {
                 return false;
             }
-            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
-            if (absolutePointers != null && availableStateMemory + absolutePointers.allocatedBytes() >= stateMemory) {
+            if (refundHoldsState) {
                 return true;
             }
             if (budgetReleaseResetCount == resetCount) {
