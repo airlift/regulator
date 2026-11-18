@@ -1,0 +1,3485 @@
+[
+ {
+  "job": "D1",
+  "fork": "A-perfasm-1",
+  "leg": "A",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 74.77399342423169,
+  "jvm_ok": true,
+  "std": [
+   [
+    863,
+    37,
+    580608
+   ]
+  ],
+  "osr": [
+   [
+    861,
+    162160,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 863",
+  "hot_share": 93.84,
+  "hot_method_share": 93.92,
+  "hot_id": 863,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7fd08ff1455b",
+   "mod64": 27,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 93.84,
+   "ins_share": 94.39,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x88]",
+    "mov edx,DWORD PTR [rsp+0x28]",
+    "cmp edx,DWORD PTR [rsp+0x30]",
+    "mov r9,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov ecx,DWORD PTR [rsp+0x90]",
+    "mov r10,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x88],r8d",
+    "mov QWORD PTR [rsp+0x18],r9",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7fd08ff1455b",
+     42,
+     93.8
+    ],
+    [
+     "0x7fd08ff14565",
+     96,
+     91.2
+    ],
+    [
+     "0x7fd08ff14465",
+     387,
+     93.9
+    ],
+    [
+     "0x7fd08ff1431e",
+     1068,
+     94.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfasm-2",
+  "leg": "A",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 74.57467540529522,
+  "jvm_ok": true,
+  "std": [
+   [
+    883,
+    38,
+    614400
+   ]
+  ],
+  "osr": [
+   [
+    881,
+    162174,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 883",
+  "hot_share": 94.85,
+  "hot_method_share": 94.86,
+  "hot_id": 883,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7fa54ff140db",
+   "mod64": 27,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 94.84,
+   "ins_share": 97.76,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x88]",
+    "mov edx,DWORD PTR [rsp+0x28]",
+    "cmp edx,DWORD PTR [rsp+0x30]",
+    "mov r9,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov ecx,DWORD PTR [rsp+0x90]",
+    "mov r10,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x88],r8d",
+    "mov QWORD PTR [rsp+0x18],r9",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7fa54ff140db",
+     42,
+     94.8
+    ],
+    [
+     "0x7fa54ff140e5",
+     96,
+     92.2
+    ],
+    [
+     "0x7fa54ff13fe5",
+     387,
+     94.9
+    ],
+    [
+     "0x7fa54ff13e9e",
+     1068,
+     94.9
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfasm-3",
+  "leg": "A",
+  "prof": "perfasm",
+  "n": 3,
+  "us": 74.47662266880754,
+  "jvm_ok": true,
+  "std": [
+   [
+    861,
+    38,
+    605184
+   ]
+  ],
+  "osr": [
+   [
+    859,
+    162142,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 861",
+  "hot_share": 95.59,
+  "hot_method_share": 95.61,
+  "hot_id": 861,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f0e23f140db",
+   "mod64": 27,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 95.59,
+   "ins_share": 96.39,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x88]",
+    "mov edx,DWORD PTR [rsp+0x28]",
+    "cmp edx,DWORD PTR [rsp+0x30]",
+    "mov r9,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov ecx,DWORD PTR [rsp+0x90]",
+    "mov r10,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x88],r8d",
+    "mov QWORD PTR [rsp+0x18],r9",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f0e23f140db",
+     42,
+     95.6
+    ],
+    [
+     "0x7f0e23f140e5",
+     96,
+     93.1
+    ],
+    [
+     "0x7f0e23f13fe5",
+     387,
+     95.6
+    ],
+    [
+     "0x7f0e23f13e9e",
+     1068,
+     95.7
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfasm-4",
+  "leg": "A",
+  "prof": "perfasm",
+  "n": 4,
+  "us": 74.51554748368768,
+  "jvm_ok": true,
+  "std": [
+   [
+    841,
+    40,
+    624640
+   ]
+  ],
+  "osr": [
+   [
+    838,
+    162131,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 841",
+  "hot_share": 94.15,
+  "hot_method_share": 94.21,
+  "hot_id": 841,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f55c3f1298e",
+   "mod64": 14,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 94.14,
+   "ins_share": 94.75,
+   "rsp_loads": [
+    "mov r9d,DWORD PTR [rsp+0x7c]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov rdi,QWORD PTR [rsp+0x20]",
+    "mov r10,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x84]",
+    "mov r10,QWORD PTR [rsp+0x60]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x7c],r9d",
+    "mov QWORD PTR [rsp+0x20],rdi",
+    "mov DWORD PTR [rsp+0x28],ebx"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f55c3f1298e",
+     42,
+     94.1
+    ],
+    [
+     "0x7f55c3f12996",
+     95,
+     91.7
+    ],
+    [
+     "0x7f55c3f128dc",
+     345,
+     94.2
+    ],
+    [
+     "0x7f55c3f1279e",
+     1061,
+     94.2
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfasm-1",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 118.51395657255831,
+  "jvm_ok": true,
+  "std": [
+   [
+    840,
+    40,
+    480256
+   ]
+  ],
+  "osr": [
+   [
+    838,
+    162540,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 840",
+  "hot_share": 86.93,
+  "hot_method_share": 86.97,
+  "hot_id": 840,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f5dd7f0fe57",
+   "mod64": 23,
+   "n": 49,
+   "bytes_per_iter": 1,
+   "ipb": 49.0,
+   "cyc_share": 86.97,
+   "ins_share": 88.54,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r8d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov ecx,DWORD PTR [rsp+0x34]",
+    "movsxd r10,DWORD PTR [rsp+0x34]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x34],r11d",
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rsi",
+    "mov DWORD PTR [rsp+0x30],r8d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r10d"
+   ],
+   "spill_slots": [
+    "[rsp+0x34]"
+   ],
+   "candidates": [
+    [
+     "0x7f5dd7f0fe57",
+     49,
+     87.0
+    ],
+    [
+     "0x7f5dd7f0fe5f",
+     100,
+     84.0
+    ],
+    [
+     "0x7f5dd7f1000e",
+     90,
+     0.0
+    ],
+    [
+     "0x7f5dd7f10007",
+     95,
+     0.0
+    ],
+    [
+     "0x7f5dd7f0ffd5",
+     110,
+     0.0
+    ],
+    [
+     "0x7f5dd7f0fdd8",
+     249,
+     87.0
+    ],
+    [
+     "0x7f5dd7f10013",
+     328,
+     0.0
+    ],
+    [
+     "0x7f5dd7f10007",
+     335,
+     0.0
+    ],
+    [
+     "0x7f5dd7f10162",
+     266,
+     0.0
+    ],
+    [
+     "0x7f5dd7f0fc9e",
+     953,
+     87.1
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfasm-2",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 76.1889188275511,
+  "jvm_ok": true,
+  "std": [
+   [
+    875,
+    54,
+    555008
+   ]
+  ],
+  "osr": [
+   [
+    872,
+    162195,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 875",
+  "hot_share": 94.09,
+  "hot_method_share": 94.13,
+  "hot_id": 875,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7fa8d7f11cd7",
+   "mod64": 23,
+   "n": 48,
+   "bytes_per_iter": 1,
+   "ipb": 48.0,
+   "cyc_share": 94.07000000000001,
+   "ins_share": 94.31,
+   "rsp_loads": [
+    "mov r11d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov r8d,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rax,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rax",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],r8d",
+    "mov DWORD PTR [rsp+0x38],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7fa8d7f11cd7",
+     48,
+     94.1
+    ],
+    [
+     "0x7fa8d7f11ce1",
+     98,
+     90.2
+    ],
+    [
+     "0x7fa8d7f11e8e",
+     97,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11e87",
+     102,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11e55",
+     117,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11c58",
+     254,
+     94.1
+    ],
+    [
+     "0x7fa8d7f11e93",
+     328,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11e87",
+     335,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11fe1",
+     265,
+     0.0
+    ],
+    [
+     "0x7fa8d7f11b1e",
+     955,
+     94.1
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfasm-3",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 3,
+  "us": 117.41379267091165,
+  "jvm_ok": true,
+  "std": [
+   [
+    869,
+    45,
+    541696
+   ]
+  ],
+  "osr": [
+   [
+    866,
+    161884,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 869",
+  "hot_share": 93.13,
+  "hot_method_share": 93.15,
+  "hot_id": 869,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7fdbfbf15657",
+   "mod64": 23,
+   "n": 49,
+   "bytes_per_iter": 1,
+   "ipb": 49.0,
+   "cyc_share": 93.16,
+   "ins_share": 95.0,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r8d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov ecx,DWORD PTR [rsp+0x34]",
+    "movsxd r10,DWORD PTR [rsp+0x34]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x34],r11d",
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rsi",
+    "mov DWORD PTR [rsp+0x30],r8d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r10d"
+   ],
+   "spill_slots": [
+    "[rsp+0x34]"
+   ],
+   "candidates": [
+    [
+     "0x7fdbfbf15657",
+     49,
+     93.2
+    ],
+    [
+     "0x7fdbfbf1565f",
+     100,
+     90.2
+    ],
+    [
+     "0x7fdbfbf1580e",
+     90,
+     0.0
+    ],
+    [
+     "0x7fdbfbf15807",
+     95,
+     0.0
+    ],
+    [
+     "0x7fdbfbf157d5",
+     110,
+     0.0
+    ],
+    [
+     "0x7fdbfbf155d8",
+     249,
+     93.2
+    ],
+    [
+     "0x7fdbfbf15813",
+     328,
+     0.0
+    ],
+    [
+     "0x7fdbfbf15807",
+     335,
+     0.0
+    ],
+    [
+     "0x7fdbfbf15962",
+     266,
+     0.0
+    ],
+    [
+     "0x7fdbfbf1549e",
+     953,
+     93.2
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfasm-4",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 4,
+  "us": 75.6789020345506,
+  "jvm_ok": true,
+  "std": [
+   [
+    827,
+    39,
+    516475
+   ]
+  ],
+  "osr": [
+   [
+    825,
+    162203,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 827",
+  "hot_share": 94.33,
+  "hot_method_share": 94.36,
+  "hot_id": 827,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f1de3f1115c",
+   "mod64": 28,
+   "n": 41,
+   "bytes_per_iter": 1,
+   "ipb": 41.0,
+   "cyc_share": 94.31,
+   "ins_share": 96.04,
+   "rsp_loads": [
+    "mov r9d,DWORD PTR [rsp+0x90]",
+    "mov r8d,DWORD PTR [rsp+0x28]",
+    "cmp r8d,DWORD PTR [rsp+0x30]",
+    "mov r10,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov r11d,DWORD PTR [rsp+0x98]",
+    "mov r11,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x90],r9d",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f1de3f1115c",
+     41,
+     94.3
+    ],
+    [
+     "0x7f1de3f11167",
+     95,
+     88.4
+    ],
+    [
+     "0x7f1de3f1131e",
+     90,
+     0.0
+    ],
+    [
+     "0x7f1de3f11317",
+     95,
+     0.0
+    ],
+    [
+     "0x7f1de3f112e5",
+     110,
+     0.0
+    ],
+    [
+     "0x7f1de3f1105c",
+     285,
+     94.4
+    ],
+    [
+     "0x7f1de3f11323",
+     350,
+     0.0
+    ],
+    [
+     "0x7f1de3f11317",
+     357,
+     0.0
+    ],
+    [
+     "0x7f1de3f11480",
+     288,
+     0.0
+    ],
+    [
+     "0x7f1de3f10f1e",
+     942,
+     94.4
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfasm-1",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 63.579884993819974,
+  "jvm_ok": true,
+  "std": [
+   [
+    859,
+    4436,
+    13316
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    823,
+    true,
+    23,
+    162490
+   ],
+   [
+    824,
+    false,
+    128,
+    320125
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 859",
+  "hot_share": 94.0,
+  "hot_method_share": 94.16,
+  "hot_id": 859,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f280ff13040",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 94.01,
+   "ins_share": 95.28,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f280ff12fb6",
+     20,
+     0.0
+    ],
+    [
+     "0x7f280ff13040",
+     33,
+     94.0
+    ],
+    [
+     "0x7f280ff13334",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfasm-2",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 63.541321593492775,
+  "jvm_ok": true,
+  "std": [
+   [
+    915,
+    4438,
+    13322
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    877,
+    true,
+    23,
+    162488
+   ],
+   [
+    878,
+    false,
+    125,
+    326294
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 915",
+  "hot_share": 95.41,
+  "hot_method_share": 95.52,
+  "hot_id": 915,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7ff20ff136c0",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 95.42999999999999,
+   "ins_share": 96.3,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7ff20ff13636",
+     20,
+     0.0
+    ],
+    [
+     "0x7ff20ff136c0",
+     33,
+     95.4
+    ],
+    [
+     "0x7ff20ff139b4",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfasm-3",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 3,
+  "us": 63.67755878273309,
+  "jvm_ok": true,
+  "std": [
+   [
+    866,
+    4436,
+    13316
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    828,
+    true,
+    23,
+    162170
+   ],
+   [
+    829,
+    false,
+    125,
+    321161
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 866",
+  "hot_share": 91.55,
+  "hot_method_share": 91.7,
+  "hot_id": 866,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f93fbf148c0",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 91.57,
+   "ins_share": 92.61,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f93fbf14836",
+     20,
+     0.0
+    ],
+    [
+     "0x7f93fbf148c0",
+     33,
+     91.6
+    ],
+    [
+     "0x7f93fbf14bb4",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfasm-4",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 4,
+  "us": 63.593042324138295,
+  "jvm_ok": true,
+  "std": [
+   [
+    895,
+    4608,
+    13832
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    858,
+    true,
+    23,
+    162563
+   ],
+   [
+    859,
+    false,
+    125,
+    317054
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 895",
+  "hot_share": 93.02,
+  "hot_method_share": 93.12,
+  "hot_id": 895,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f8e67f131c0",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 93.05,
+   "ins_share": 93.88,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f8e67f13136",
+     20,
+     0.0
+    ],
+    [
+     "0x7f8e67f131c0",
+     33,
+     93.0
+    ],
+    [
+     "0x7f8e67f134b4",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfasm-1",
+  "leg": "F3",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 114.44275143824319,
+  "jvm_ok": true,
+  "std": [
+   [
+    790,
+    39,
+    565625
+   ]
+  ],
+  "osr": [
+   [
+    788,
+    162201,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 790",
+  "hot_share": 96.68,
+  "hot_method_share": 96.7,
+  "hot_id": 790,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f7eb7f10912",
+   "mod64": 18,
+   "n": 52,
+   "bytes_per_iter": 1,
+   "ipb": 52.0,
+   "cyc_share": 96.68,
+   "ins_share": 97.72,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x2c]",
+    "cmp r10d,DWORD PTR [rsp+0x34]",
+    "mov rax,QWORD PTR [rsp+0x20]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "mov ecx,DWORD PTR [rsp+0x3c]",
+    "mov ebx,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x40]",
+    "mov rdi,QWORD PTR [rsp+0x60]",
+    "mov r11,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x68]",
+    "movsxd r10,DWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x68],r11d",
+    "mov DWORD PTR [rsp+0x2c],edx",
+    "mov QWORD PTR [rsp+0x60],rdi",
+    "mov QWORD PTR [rsp+0x40],rsi",
+    "mov DWORD PTR [rsp+0x30],ebx",
+    "mov DWORD PTR [rsp+0x3c],ecx",
+    "mov DWORD PTR [rsp+0x28],ebp",
+    "mov DWORD PTR [rsp+0x38],r14d",
+    "mov QWORD PTR [rsp+0x20],rax"
+   ],
+   "spill_slots": [
+    "[rsp+0x68]"
+   ],
+   "candidates": [
+    [
+     "0x7f7eb7f10912",
+     52,
+     96.7
+    ],
+    [
+     "0x7f7eb7f10915",
+     104,
+     94.1
+    ],
+    [
+     "0x7f7eb7f10ae1",
+     90,
+     0.0
+    ],
+    [
+     "0x7f7eb7f10ada",
+     95,
+     0.0
+    ],
+    [
+     "0x7f7eb7f10aa5",
+     110,
+     0.0
+    ],
+    [
+     "0x7f7eb7f10864",
+     285,
+     96.7
+    ],
+    [
+     "0x7f7eb7f10ae6",
+     337,
+     0.0
+    ],
+    [
+     "0x7f7eb7f10ada",
+     344,
+     0.0
+    ],
+    [
+     "0x7f7eb7f10c41",
+     275,
+     0.0
+    ],
+    [
+     "0x7f7eb7f1071e",
+     916,
+     96.7
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfasm-2",
+  "leg": "F3",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 115.15816529294332,
+  "jvm_ok": true,
+  "std": [
+   [
+    876,
+    39,
+    646144
+   ]
+  ],
+  "osr": [
+   [
+    874,
+    162267,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 876",
+  "hot_share": 91.95,
+  "hot_method_share": 92.03,
+  "hot_id": 876,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f39a3f12d92",
+   "mod64": 18,
+   "n": 52,
+   "bytes_per_iter": 1,
+   "ipb": 52.0,
+   "cyc_share": 91.99,
+   "ins_share": 94.86,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x2c]",
+    "cmp r10d,DWORD PTR [rsp+0x34]",
+    "mov rax,QWORD PTR [rsp+0x20]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "mov ecx,DWORD PTR [rsp+0x3c]",
+    "mov ebx,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x40]",
+    "mov rdi,QWORD PTR [rsp+0x60]",
+    "mov r11,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x68]",
+    "movsxd r10,DWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x68],r11d",
+    "mov DWORD PTR [rsp+0x2c],edx",
+    "mov QWORD PTR [rsp+0x60],rdi",
+    "mov QWORD PTR [rsp+0x40],rsi",
+    "mov DWORD PTR [rsp+0x30],ebx",
+    "mov DWORD PTR [rsp+0x3c],ecx",
+    "mov DWORD PTR [rsp+0x28],ebp",
+    "mov DWORD PTR [rsp+0x38],r14d",
+    "mov QWORD PTR [rsp+0x20],rax"
+   ],
+   "spill_slots": [
+    "[rsp+0x68]"
+   ],
+   "candidates": [
+    [
+     "0x7f39a3f12d92",
+     52,
+     92.0
+    ],
+    [
+     "0x7f39a3f12d95",
+     104,
+     89.8
+    ],
+    [
+     "0x7f39a3f12f61",
+     90,
+     0.0
+    ],
+    [
+     "0x7f39a3f12f5a",
+     95,
+     0.0
+    ],
+    [
+     "0x7f39a3f12f25",
+     110,
+     0.0
+    ],
+    [
+     "0x7f39a3f12ce4",
+     285,
+     92.0
+    ],
+    [
+     "0x7f39a3f12f66",
+     337,
+     0.0
+    ],
+    [
+     "0x7f39a3f12f5a",
+     344,
+     0.0
+    ],
+    [
+     "0x7f39a3f130c1",
+     275,
+     0.0
+    ],
+    [
+     "0x7f39a3f12b9e",
+     916,
+     92.1
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfasm-3",
+  "leg": "F3",
+  "prof": "perfasm",
+  "n": 3,
+  "us": 73.2314665811585,
+  "jvm_ok": true,
+  "std": [
+   [
+    850,
+    40,
+    440320
+   ]
+  ],
+  "osr": [
+   [
+    847,
+    162076,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 850",
+  "hot_share": 98.53,
+  "hot_method_share": 98.58,
+  "hot_id": 850,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f546ff0fb5b",
+   "mod64": 27,
+   "n": 45,
+   "bytes_per_iter": 1,
+   "ipb": 45.0,
+   "cyc_share": 98.53999999999999,
+   "ins_share": 99.51,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x38]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "cmp ebp,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],r10d",
+    "mov QWORD PTR [rsp+0x60],rsi",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r8d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f546ff0fb5b",
+     45,
+     98.5
+    ],
+    [
+     "0x7f546ff0fb60",
+     99,
+     94.3
+    ],
+    [
+     "0x7f546ff0fd0e",
+     91,
+     0.0
+    ],
+    [
+     "0x7f546ff0fd07",
+     96,
+     0.0
+    ],
+    [
+     "0x7f546ff0fcd5",
+     111,
+     0.0
+    ],
+    [
+     "0x7f546ff0fad4",
+     249,
+     98.6
+    ],
+    [
+     "0x7f546ff0fd13",
+     335,
+     0.0
+    ],
+    [
+     "0x7f546ff0fd07",
+     342,
+     0.0
+    ],
+    [
+     "0x7f546ff0fe68",
+     274,
+     0.0
+    ],
+    [
+     "0x7f546ff0f99e",
+     955,
+     98.6
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfasm-4",
+  "leg": "F3",
+  "prof": "perfasm",
+  "n": 4,
+  "us": 115.99284013461488,
+  "jvm_ok": true,
+  "std": [
+   [
+    854,
+    37,
+    550912
+   ]
+  ],
+  "osr": [
+   [
+    853,
+    162175,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 854",
+  "hot_share": 88.1,
+  "hot_method_share": 88.11,
+  "hot_id": 854,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f46cff11512",
+   "mod64": 18,
+   "n": 52,
+   "bytes_per_iter": 1,
+   "ipb": 52.0,
+   "cyc_share": 88.09,
+   "ins_share": 89.53,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x2c]",
+    "cmp r10d,DWORD PTR [rsp+0x34]",
+    "mov rax,QWORD PTR [rsp+0x20]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "mov ecx,DWORD PTR [rsp+0x3c]",
+    "mov ebx,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x40]",
+    "mov rdi,QWORD PTR [rsp+0x60]",
+    "mov r11,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x68]",
+    "movsxd r10,DWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x68],r11d",
+    "mov DWORD PTR [rsp+0x2c],edx",
+    "mov QWORD PTR [rsp+0x60],rdi",
+    "mov QWORD PTR [rsp+0x40],rsi",
+    "mov DWORD PTR [rsp+0x30],ebx",
+    "mov DWORD PTR [rsp+0x3c],ecx",
+    "mov DWORD PTR [rsp+0x28],ebp",
+    "mov DWORD PTR [rsp+0x38],r14d",
+    "mov QWORD PTR [rsp+0x20],rax"
+   ],
+   "spill_slots": [
+    "[rsp+0x68]"
+   ],
+   "candidates": [
+    [
+     "0x7f46cff11512",
+     52,
+     88.1
+    ],
+    [
+     "0x7f46cff11515",
+     104,
+     86.0
+    ],
+    [
+     "0x7f46cff116e1",
+     90,
+     0.0
+    ],
+    [
+     "0x7f46cff116da",
+     95,
+     0.0
+    ],
+    [
+     "0x7f46cff116a5",
+     110,
+     0.0
+    ],
+    [
+     "0x7f46cff11464",
+     285,
+     88.1
+    ],
+    [
+     "0x7f46cff116e6",
+     337,
+     0.0
+    ],
+    [
+     "0x7f46cff116da",
+     344,
+     0.0
+    ],
+    [
+     "0x7f46cff11841",
+     275,
+     0.0
+    ],
+    [
+     "0x7f46cff1131e",
+     916,
+     88.1
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfnorm-1",
+  "leg": "A",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 72.37215572928238,
+  "cycles": 285811.7263650981,
+  "instructions": 1381310.8114390175,
+  "r0403": 6.516549286764288,
+  "jvm_ok": true,
+  "std": [
+   [
+    758,
+    32,
+    763609
+   ]
+  ],
+  "osr": [
+   [
+    755,
+    162297,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 758 (no samples in perfnorm)",
+  "hot_id": 758,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f9b73f0dcdb",
+   "mod64": 27,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x88]",
+    "mov edx,DWORD PTR [rsp+0x28]",
+    "cmp edx,DWORD PTR [rsp+0x30]",
+    "mov r9,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov ecx,DWORD PTR [rsp+0x90]",
+    "mov r10,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x88],r8d",
+    "mov QWORD PTR [rsp+0x18],r9",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f9b73f0dcdb",
+     42,
+     0.0
+    ],
+    [
+     "0x7f9b73f0dce5",
+     96,
+     0.0
+    ],
+    [
+     "0x7f9b73f0dbe5",
+     387,
+     0.0
+    ],
+    [
+     "0x7f9b73f0da9e",
+     1068,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.722281688388003,
+  "ipb_run": 42.15426060299736,
+  "ipc": 4.8329396033055705,
+  "floor": 1376256.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfnorm-2",
+  "leg": "A",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 74.51111600946177,
+  "cycles": 292490.02327162534,
+  "instructions": 1379869.1664070922,
+  "r0403": 6.395972231262484,
+  "jvm_ok": true,
+  "std": [
+   [
+    763,
+    67,
+    1274112
+   ]
+  ],
+  "osr": [
+   [
+    760,
+    162348,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 763 (no samples in perfnorm)",
+  "hot_id": 763,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7fb103f1200d",
+   "mod64": 13,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x7c]",
+    "mov r9d,DWORD PTR [rsp+0x28]",
+    "cmp r9d,DWORD PTR [rsp+0x2c]",
+    "mov rdi,QWORD PTR [rsp+0x20]",
+    "mov r11,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x84]",
+    "mov r11,QWORD PTR [rsp+0x60]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x7c],r8d",
+    "mov QWORD PTR [rsp+0x20],rdi",
+    "mov DWORD PTR [rsp+0x28],r9d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7fb103f1200d",
+     42,
+     0.0
+    ],
+    [
+     "0x7fb103f12015",
+     94,
+     0.0
+    ],
+    [
+     "0x7fb103f11f5c",
+     340,
+     0.0
+    ],
+    [
+     "0x7fb103f11e1e",
+     1067,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.926087135974894,
+  "ipb_run": 42.11026508810706,
+  "ipc": 4.717662335872754,
+  "floor": 1376256.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "A-perfnorm-3",
+  "leg": "A",
+  "prof": "perfnorm",
+  "n": 3,
+  "us": 74.72108379764188,
+  "cycles": 293549.4141692411,
+  "instructions": 1379531.441666646,
+  "r0403": 6.339184318663156,
+  "jvm_ok": true,
+  "std": [
+   [
+    775,
+    70,
+    1277419
+   ]
+  ],
+  "osr": [
+   [
+    771,
+    273128,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 775 (no samples in perfnorm)",
+  "hot_id": 775,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7ff427f1170d",
+   "mod64": 13,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x7c]",
+    "mov r9d,DWORD PTR [rsp+0x28]",
+    "cmp r9d,DWORD PTR [rsp+0x2c]",
+    "mov rdi,QWORD PTR [rsp+0x20]",
+    "mov r11,QWORD PTR [rsp+0x18]",
+    "mov r11d,DWORD PTR [rsp+0x84]",
+    "mov r11,QWORD PTR [rsp+0x60]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x7c],r8d",
+    "mov QWORD PTR [rsp+0x20],rdi",
+    "mov DWORD PTR [rsp+0x28],r9d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7ff427f1170d",
+     42,
+     0.0
+    ],
+    [
+     "0x7ff427f11715",
+     94,
+     0.0
+    ],
+    [
+     "0x7ff427f1165c",
+     340,
+     0.0
+    ],
+    [
+     "0x7ff427f1151e",
+     1067,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.958417180457797,
+  "ipb_run": 42.09995854695575,
+  "ipc": 4.699486270721357,
+  "floor": 1376256.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfnorm-1",
+  "leg": "C",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 72.71925310180922,
+  "cycles": 284861.03109182563,
+  "instructions": 1346284.4395363021,
+  "r0403": 5.418780328625456,
+  "jvm_ok": true,
+  "std": [
+   [
+    762,
+    39,
+    594428
+   ]
+  ],
+  "osr": [
+   [
+    759,
+    200423,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 762 (no samples in perfnorm)",
+  "hot_id": 762,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f4323f105dc",
+   "mod64": 28,
+   "n": 41,
+   "bytes_per_iter": 1,
+   "ipb": 41.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r9d,DWORD PTR [rsp+0x90]",
+    "mov r8d,DWORD PTR [rsp+0x28]",
+    "cmp r8d,DWORD PTR [rsp+0x30]",
+    "mov r10,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x60]",
+    "mov r11d,DWORD PTR [rsp+0x98]",
+    "mov r11,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x90],r9d",
+    "mov DWORD PTR [rsp+0x28],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f4323f105dc",
+     41,
+     0.0
+    ],
+    [
+     "0x7f4323f105e7",
+     95,
+     0.0
+    ],
+    [
+     "0x7f4323f1079e",
+     90,
+     0.0
+    ],
+    [
+     "0x7f4323f10797",
+     95,
+     0.0
+    ],
+    [
+     "0x7f4323f10765",
+     110,
+     0.0
+    ],
+    [
+     "0x7f4323f104dc",
+     285,
+     0.0
+    ],
+    [
+     "0x7f4323f107a3",
+     349,
+     0.0
+    ],
+    [
+     "0x7f4323f10797",
+     356,
+     0.0
+    ],
+    [
+     "0x7f4323f10900",
+     287,
+     0.0
+    ],
+    [
+     "0x7f4323f1039e",
+     941,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.693268771112843,
+  "ipb_run": 41.08534056202094,
+  "ipc": 4.726109550247061,
+  "floor": 1343488.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfnorm-2",
+  "leg": "C",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 112.94846309509073,
+  "cycles": 447092.5387923954,
+  "instructions": 1616158.2506499805,
+  "r0403": 6.608959062039277,
+  "jvm_ok": true,
+  "std": [
+   [
+    798,
+    43,
+    742400
+   ]
+  ],
+  "osr": [
+   [
+    795,
+    205264,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 798 (no samples in perfnorm)",
+  "hot_id": 798,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f229bf115d7",
+   "mod64": 23,
+   "n": 49,
+   "bytes_per_iter": 1,
+   "ipb": 49.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r10d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r8d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov ecx,DWORD PTR [rsp+0x34]",
+    "movsxd r10,DWORD PTR [rsp+0x34]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x34],r11d",
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rsi",
+    "mov DWORD PTR [rsp+0x30],r8d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r10d"
+   ],
+   "spill_slots": [
+    "[rsp+0x34]"
+   ],
+   "candidates": [
+    [
+     "0x7f229bf115d7",
+     49,
+     0.0
+    ],
+    [
+     "0x7f229bf115df",
+     100,
+     0.0
+    ],
+    [
+     "0x7f229bf1178e",
+     90,
+     0.0
+    ],
+    [
+     "0x7f229bf11787",
+     95,
+     0.0
+    ],
+    [
+     "0x7f229bf11755",
+     110,
+     0.0
+    ],
+    [
+     "0x7f229bf11558",
+     249,
+     0.0
+    ],
+    [
+     "0x7f229bf11793",
+     328,
+     0.0
+    ],
+    [
+     "0x7f229bf11787",
+     335,
+     0.0
+    ],
+    [
+     "0x7f229bf118e2",
+     266,
+     0.0
+    ],
+    [
+     "0x7f229bf1141e",
+     953,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  },
+  "cpb": 13.64418148170152,
+  "ipb_run": 49.32123567657411,
+  "ipc": 3.614818209704979,
+  "floor": 1605632.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "C-perfnorm-3",
+  "leg": "C",
+  "prof": "perfnorm",
+  "n": 3,
+  "us": 72.9116303200608,
+  "cycles": 284344.338246128,
+  "instructions": 1575894.1735826524,
+  "r0403": 8.368453873287333,
+  "jvm_ok": true,
+  "std": [
+   [
+    767,
+    70,
+    383096
+   ]
+  ],
+  "osr": [
+   [
+    764,
+    161792,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 767 (no samples in perfnorm)",
+  "hot_id": 767,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f7f9ff118d7",
+   "mod64": 23,
+   "n": 48,
+   "bytes_per_iter": 1,
+   "ipb": 48.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r11d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov r8d,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rax,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rax",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],r8d",
+    "mov DWORD PTR [rsp+0x38],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f7f9ff118d7",
+     48,
+     0.0
+    ],
+    [
+     "0x7f7f9ff118e1",
+     98,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11a8e",
+     97,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11a87",
+     102,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11a55",
+     117,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11858",
+     254,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11a93",
+     328,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11a87",
+     335,
+     0.0
+    ],
+    [
+     "0x7f7f9ff11be1",
+     265,
+     0.0
+    ],
+    [
+     "0x7f7f9ff1171e",
+     955,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.677500556827637,
+  "ipb_run": 48.092473559040904,
+  "ipc": 5.54220345410416,
+  "floor": 1572864.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfnorm-1",
+  "leg": "F1",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 61.315469452037625,
+  "cycles": 241825.48009516683,
+  "instructions": 544696.212435117,
+  "r0403": 4.041135646798891,
+  "jvm_ok": true,
+  "std": [
+   [
+    812,
+    4608,
+    13832
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    774,
+    true,
+    23,
+    162816
+   ],
+   [
+    777,
+    false,
+    125,
+    865280
+   ]
+  ],
+  "hot": "inferred: last standard tier-4 searchMany compile 812 (no samples in perfnorm)",
+  "hot_id": 812,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f37b7f0f840",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f37b7f0f7b6",
+     20,
+     0.0
+    ],
+    [
+     "0x7f37b7f0f840",
+     33,
+     0.0
+    ],
+    [
+     "0x7f37b7f0fb38",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 7.379927981419886,
+  "ipb_run": 16.62280921738028,
+  "ipc": 2.252435153734668,
+  "floor": 540672.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfnorm-2",
+  "leg": "F1",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 61.295427322579826,
+  "cycles": 240788.2121389397,
+  "instructions": 544074.0475670228,
+  "r0403": 0.23715959298987038,
+  "jvm_ok": true,
+  "std": [
+   [
+    818,
+    4608,
+    13832
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    782,
+    true,
+    41,
+    355533
+   ],
+   [
+    786,
+    false,
+    128,
+    1247232
+   ]
+  ],
+  "hot": "inferred: last standard tier-4 searchMany compile 818 (no samples in perfnorm)",
+  "hot_id": 818,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7ff6cff10440",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7ff6cff103b6",
+     20,
+     0.0
+    ],
+    [
+     "0x7ff6cff10440",
+     33,
+     0.0
+    ],
+    [
+     "0x7ff6cff10738",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 7.348273075529166,
+  "ipb_run": 16.603822252411586,
+  "ipc": 2.259554330895073,
+  "floor": 540672.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F1-perfnorm-3",
+  "leg": "F1",
+  "prof": "perfnorm",
+  "n": 3,
+  "us": 61.27615984081502,
+  "cycles": 241093.416796677,
+  "instructions": 544227.5550117572,
+  "r0403": 3.917740845560516,
+  "jvm_ok": true,
+  "std": [
+   [
+    813,
+    4553,
+    13667
+   ]
+  ],
+  "osr": [],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    773,
+    true,
+    23,
+    162689
+   ],
+   [
+    775,
+    false,
+    95,
+    309248
+   ]
+  ],
+  "hot": "inferred: last standard tier-4 searchMany compile 813 (no samples in perfnorm)",
+  "hot_id": 813,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7ffb03f0dd40",
+   "mod64": 0,
+   "n": 33,
+   "bytes_per_iter": 2,
+   "ipb": 16.5,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "cmp eax,DWORD PTR [rsp]",
+    "cmp eax,DWORD PTR [rsp]"
+   ],
+   "rsp_stores": [],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7ffb03f0dcb6",
+     20,
+     0.0
+    ],
+    [
+     "0x7ffb03f0dd40",
+     33,
+     0.0
+    ],
+    [
+     "0x7ffb03f0e034",
+     20,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 7.357587182515777,
+  "ipb_run": 16.608506927849035,
+  "ipc": 2.257330632427531,
+  "floor": 540672.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfnorm-1",
+  "leg": "F3",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 71.50984142127187,
+  "cycles": 280562.3636826825,
+  "instructions": 1479538.1817007412,
+  "r0403": 6.09771763694125,
+  "jvm_ok": true,
+  "std": [
+   [
+    784,
+    40,
+    573964
+   ]
+  ],
+  "osr": [
+   [
+    782,
+    180294,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 784 (no samples in perfnorm)",
+  "hot_id": 784,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f605bf11cdb",
+   "mod64": 27,
+   "n": 45,
+   "bytes_per_iter": 1,
+   "ipb": 45.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x38]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "cmp ebp,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],r10d",
+    "mov QWORD PTR [rsp+0x60],rsi",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r8d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f605bf11cdb",
+     45,
+     0.0
+    ],
+    [
+     "0x7f605bf11ce0",
+     99,
+     0.0
+    ],
+    [
+     "0x7f605bf11e8e",
+     91,
+     0.0
+    ],
+    [
+     "0x7f605bf11e87",
+     96,
+     0.0
+    ],
+    [
+     "0x7f605bf11e55",
+     111,
+     0.0
+    ],
+    [
+     "0x7f605bf11c54",
+     249,
+     0.0
+    ],
+    [
+     "0x7f605bf11e93",
+     335,
+     0.0
+    ],
+    [
+     "0x7f605bf11e87",
+     342,
+     0.0
+    ],
+    [
+     "0x7f605bf11fe8",
+     274,
+     0.0
+    ],
+    [
+     "0x7f605bf11b1e",
+     955,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.562083852620926,
+  "ipb_run": 45.151922048972814,
+  "ipc": 5.273473470497656,
+  "floor": 1474560.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfnorm-2",
+  "leg": "F3",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 73.18353821971833,
+  "cycles": 288030.59768585657,
+  "instructions": 1576071.75567895,
+  "r0403": 8.580933144431075,
+  "jvm_ok": true,
+  "std": [
+   [
+    762,
+    104,
+    567941
+   ]
+  ],
+  "osr": [
+   [
+    760,
+    162315,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 762 (no samples in perfnorm)",
+  "hot_id": 762,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f9d4bf0ecd7",
+   "mod64": 23,
+   "n": 48,
+   "bytes_per_iter": 1,
+   "ipb": 48.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r11d,DWORD PTR [rsp+0x38]",
+    "mov ebx,DWORD PTR [rsp+0x28]",
+    "cmp ebx,DWORD PTR [rsp+0x2c]",
+    "mov r8d,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rax,QWORD PTR [rsp+0x58]",
+    "mov r13,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],ebx",
+    "mov QWORD PTR [rsp+0x60],r13",
+    "mov QWORD PTR [rsp+0x58],rax",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],r8d",
+    "mov DWORD PTR [rsp+0x38],r11d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f9d4bf0ecd7",
+     48,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ece1",
+     98,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ee8e",
+     97,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ee87",
+     102,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ee55",
+     117,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ec58",
+     254,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ee93",
+     320,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0ee87",
+     327,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0efe1",
+     256,
+     0.0
+    ],
+    [
+     "0x7f9d4bf0eb1e",
+     937,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.789996267268572,
+  "ipb_run": 48.09789293453827,
+  "ipc": 5.471890029537446,
+  "floor": 1572864.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D1",
+  "fork": "F3-perfnorm-3",
+  "leg": "F3",
+  "prof": "perfnorm",
+  "n": 3,
+  "us": 71.72018829392741,
+  "cycles": 280174.64236522425,
+  "instructions": 1477384.8896477078,
+  "r0403": 5.951417845160265,
+  "jvm_ok": true,
+  "std": [
+   [
+    816,
+    72,
+    848675
+   ]
+  ],
+  "osr": [
+   [
+    814,
+    162332,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 816 (no samples in perfnorm)",
+  "hot_id": 816,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f7aaff11a5b",
+   "mod64": 27,
+   "n": 45,
+   "bytes_per_iter": 1,
+   "ipb": 45.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x38]",
+    "mov ebp,DWORD PTR [rsp+0x28]",
+    "cmp ebp,DWORD PTR [rsp+0x2c]",
+    "mov ecx,DWORD PTR [rsp+0x20]",
+    "mov edi,DWORD PTR [rsp+0x3c]",
+    "mov r9d,DWORD PTR [rsp+0x30]",
+    "mov rsi,QWORD PTR [rsp+0x60]",
+    "mov rdx,QWORD PTR [rsp+0x18]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x28],r10d",
+    "mov QWORD PTR [rsp+0x60],rsi",
+    "mov DWORD PTR [rsp+0x30],r9d",
+    "mov DWORD PTR [rsp+0x3c],edi",
+    "mov DWORD PTR [rsp+0x20],ecx",
+    "mov DWORD PTR [rsp+0x38],r8d"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f7aaff11a5b",
+     45,
+     0.0
+    ],
+    [
+     "0x7f7aaff11a60",
+     99,
+     0.0
+    ],
+    [
+     "0x7f7aaff11c0e",
+     91,
+     0.0
+    ],
+    [
+     "0x7f7aaff11c07",
+     96,
+     0.0
+    ],
+    [
+     "0x7f7aaff11bd5",
+     111,
+     0.0
+    ],
+    [
+     "0x7f7aaff119d4",
+     249,
+     0.0
+    ],
+    [
+     "0x7f7aaff11c13",
+     335,
+     0.0
+    ],
+    [
+     "0x7f7aaff11c07",
+     342,
+     0.0
+    ],
+    [
+     "0x7f7aaff11d68",
+     274,
+     0.0
+    ],
+    [
+     "0x7f7aaff1189e",
+     955,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  },
+  "cpb": 8.550251537024666,
+  "ipb_run": 45.08620879051843,
+  "ipc": 5.2730856624842195,
+  "floor": 1474560.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D2",
+  "fork": "C-perfasm-1",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 138.1752398460522,
+  "jvm_ok": true,
+  "std": [
+   [
+    802,
+    31,
+    529408
+   ]
+  ],
+  "osr": [
+   [
+    798,
+    190898,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 802",
+  "hot_share": 94.95,
+  "hot_method_share": 94.95,
+  "hot_id": 802,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f4aeff0f3c4",
+   "mod64": 4,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 60.21,
+   "ins_share": 67.91,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x40]",
+    "cmp r8d,DWORD PTR [rsp+0x50]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov r11,QWORD PTR [rsp+0x28]",
+    "mov r8d,DWORD PTR [rsp+0x54]",
+    "mov ebp,DWORD PTR [rsp+0x74]",
+    "movsxd r8,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x88]"
+   ],
+   "rsp_stores": [
+    "mov QWORD PTR [rsp+0x18],rdx",
+    "mov DWORD PTR [rsp+0x40],ecx",
+    "mov DWORD PTR [rsp+0x54],r8d"
+   ],
+   "spill_slots": [
+    "[rsp+0x54]"
+   ],
+   "candidates": [
+    [
+     "0x7f4aeff0f3c4",
+     42,
+     60.2
+    ],
+    [
+     "0x7f4aeff0f3c7",
+     136,
+     91.5
+    ],
+    [
+     "0x7f4aeff0f2dc",
+     237,
+     95.0
+    ],
+    [
+     "0x7f4aeff0f677",
+     418,
+     0.0
+    ],
+    [
+     "0x7f4aeff0f19e",
+     1051,
+     95.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D2",
+  "fork": "C-perfasm-2",
+  "leg": "C",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 113.91236708559185,
+  "jvm_ok": true,
+  "std": [
+   [
+    752,
+    40,
+    454210
+   ]
+  ],
+  "osr": [
+   [
+    748,
+    162085,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 752",
+  "hot_share": 90.85,
+  "hot_method_share": 90.86,
+  "hot_id": 752,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f77c3f0e0f2",
+   "mod64": 50,
+   "n": 41,
+   "bytes_per_iter": 1,
+   "ipb": 41.0,
+   "cyc_share": 47.33,
+   "ins_share": 60.94,
+   "rsp_loads": [
+    "mov r11d,DWORD PTR [rsp+0x40]",
+    "cmp r11d,DWORD PTR [rsp+0x50]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov r10,QWORD PTR [rsp+0x28]",
+    "mov ebx,DWORD PTR [rsp+0x58]",
+    "mov r10,QWORD PTR [rsp+0x68]"
+   ],
+   "rsp_stores": [
+    "mov QWORD PTR [rsp+0x18],rdx",
+    "mov DWORD PTR [rsp+0x40],ebx"
+   ],
+   "spill_slots": [],
+   "candidates": [
+    [
+     "0x7f77c3f0e0f2",
+     41,
+     47.3
+    ],
+    [
+     "0x7f77c3f0e0f5",
+     135,
+     83.6
+    ],
+    [
+     "0x7f77c3f0e05c",
+     195,
+     90.9
+    ],
+    [
+     "0x7f77c3f0e389",
+     400,
+     0.0
+    ],
+    [
+     "0x7f77c3f0df1e",
+     1074,
+     90.9
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": true
+  }
+ },
+ {
+  "job": "D2",
+  "fork": "F1-perfasm-1",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 1,
+  "us": 149.82123991113338,
+  "jvm_ok": true,
+  "std": [
+   [
+    797,
+    44,
+    308224
+   ]
+  ],
+  "osr": [
+   [
+    792,
+    161950,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    786,
+    false,
+    9692,
+    30064
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 797",
+  "hot_share": 46.62,
+  "hot_method_share": 91.82,
+  "hot_id": 797,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f038bf10450",
+   "mod64": 16,
+   "n": 44,
+   "bytes_per_iter": 2,
+   "ipb": 22.0,
+   "cyc_share": 31.45,
+   "ins_share": 34.57,
+   "rsp_loads": [
+    "mov r11,QWORD PTR [rsp+0x60]",
+    "mov ebp,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "mov ecx,DWORD PTR [rsp+0x54]",
+    "mov ecx,DWORD PTR [rsp+0x54]",
+    "movsxd r11,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x60]",
+    "add r11d,DWORD PTR [rsp+0x5c]",
+    "movsxd r11,DWORD PTR [rsp+0x5c]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "mov r11d,DWORD PTR [rsp+0x54]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x5c],ebp",
+    "mov DWORD PTR [rsp+0x5c],edi",
+    "mov DWORD PTR [rsp+0x54],r11d"
+   ],
+   "spill_slots": [
+    "[rsp+0x5c]"
+   ],
+   "candidates": [
+    [
+     "0x7f038bf103a9",
+     24,
+     2.7
+    ],
+    [
+     "0x7f038bf10450",
+     44,
+     31.4
+    ],
+    [
+     "0x7f038bf1053e",
+     26,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D2",
+  "fork": "F1-perfasm-2",
+  "leg": "F1",
+  "prof": "perfasm",
+  "n": 2,
+  "us": 144.06535624059217,
+  "jvm_ok": true,
+  "std": [
+   [
+    806,
+    189,
+    1498112
+   ]
+  ],
+  "osr": [
+   [
+    803,
+    870946,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    790,
+    false,
+    8324,
+    25789
+   ]
+  ],
+  "hot": "c2, level 4, io.airlift.regulator.Dfa::searchMany, version 4, compile id 806",
+  "hot_share": 47.86,
+  "hot_method_share": 92.41,
+  "hot_id": 806,
+  "hot_osr": false,
+  "loop": {
+   "start": "0x7f97d3f0fac0",
+   "mod64": 0,
+   "n": 41,
+   "bytes_per_iter": 2,
+   "ipb": 20.5,
+   "cyc_share": 32.82,
+   "ins_share": 34.57,
+   "rsp_loads": [
+    "mov r9,QWORD PTR [rsp+0x68]",
+    "mov ebp,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x40]",
+    "mov r9d,DWORD PTR [rsp+0x54]",
+    "movsxd rbx,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "add edi,DWORD PTR [rsp+0x5c]",
+    "movsxd rbx,DWORD PTR [rsp+0x5c]",
+    "mov rbp,QWORD PTR [rsp+0x40]",
+    "mov r9d,DWORD PTR [rsp+0x54]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x5c],ebp",
+    "mov DWORD PTR [rsp+0x54],r9d"
+   ],
+   "spill_slots": [
+    "[rsp+0x5c]"
+   ],
+   "candidates": [
+    [
+     "0x7f97d3f0fa14",
+     24,
+     2.7
+    ],
+    [
+     "0x7f97d3f0fac0",
+     41,
+     32.8
+    ],
+    [
+     "0x7f97d3f0fb9f",
+     26,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  }
+ },
+ {
+  "job": "D2",
+  "fork": "C-perfnorm-1",
+  "leg": "C",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 136.48255832320544,
+  "cycles": 541827.6662732783,
+  "instructions": 2145043.3976654056,
+  "r0403": 23.1426336430262,
+  "jvm_ok": true,
+  "std": [
+   [
+    727,
+    32,
+    450560
+   ]
+  ],
+  "osr": [
+   [
+    724,
+    162329,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 727 (no samples in perfnorm)",
+  "hot_id": 727,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7fbb8bf089c4",
+   "mod64": 4,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x40]",
+    "cmp r8d,DWORD PTR [rsp+0x50]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov r11,QWORD PTR [rsp+0x28]",
+    "mov r8d,DWORD PTR [rsp+0x54]",
+    "mov ebp,DWORD PTR [rsp+0x74]",
+    "movsxd r8,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x88]"
+   ],
+   "rsp_stores": [
+    "mov QWORD PTR [rsp+0x18],rdx",
+    "mov DWORD PTR [rsp+0x40],ecx",
+    "mov DWORD PTR [rsp+0x54],r8d"
+   ],
+   "spill_slots": [
+    "[rsp+0x54]"
+   ],
+   "candidates": [
+    [
+     "0x7fbb8bf089c4",
+     42,
+     0.0
+    ],
+    [
+     "0x7fbb8bf089c7",
+     136,
+     0.0
+    ],
+    [
+     "0x7fbb8bf088dc",
+     237,
+     0.0
+    ],
+    [
+     "0x7fbb8bf08c77",
+     418,
+     0.0
+    ],
+    [
+     "0x7fbb8bf0879e",
+     1051,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  },
+  "cpb": 16.535268135781198,
+  "ipb_run": 65.46152946976946,
+  "ipc": 3.958903413735103,
+  "floor": 1376256.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D2",
+  "fork": "C-perfnorm-2",
+  "leg": "C",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 137.36819935245836,
+  "cycles": 544776.0556183176,
+  "instructions": 2144202.90295627,
+  "r0403": 23.478600877966848,
+  "jvm_ok": true,
+  "std": [
+   [
+    732,
+    39,
+    470016
+   ]
+  ],
+  "osr": [
+   [
+    726,
+    165564,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "not referenced",
+  "helper_tasks": [],
+  "hot": "inferred: last standard tier-4 searchMany compile 732 (no samples in perfnorm)",
+  "hot_id": 732,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f4623f07944",
+   "mod64": 4,
+   "n": 42,
+   "bytes_per_iter": 1,
+   "ipb": 42.0,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8d,DWORD PTR [rsp+0x40]",
+    "cmp r8d,DWORD PTR [rsp+0x50]",
+    "mov rdx,QWORD PTR [rsp+0x18]",
+    "mov r11,QWORD PTR [rsp+0x28]",
+    "mov r8d,DWORD PTR [rsp+0x54]",
+    "mov ebp,DWORD PTR [rsp+0x74]",
+    "movsxd r8,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x88]"
+   ],
+   "rsp_stores": [
+    "mov QWORD PTR [rsp+0x18],rdx",
+    "mov DWORD PTR [rsp+0x40],ecx",
+    "mov DWORD PTR [rsp+0x54],r8d"
+   ],
+   "spill_slots": [
+    "[rsp+0x54]"
+   ],
+   "candidates": [
+    [
+     "0x7f4623f07944",
+     42,
+     0.0
+    ],
+    [
+     "0x7f4623f07947",
+     136,
+     0.0
+    ],
+    [
+     "0x7f4623f0785c",
+     237,
+     0.0
+    ],
+    [
+     "0x7f4623f07bf7",
+     418,
+     0.0
+    ],
+    [
+     "0x7f4623f0771e",
+     1051,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  },
+  "cpb": 16.62524583796135,
+  "ipb_run": 65.43587960681977,
+  "ipc": 3.9359345566732236,
+  "floor": 1376256.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D2",
+  "fork": "F1-perfnorm-1",
+  "leg": "F1",
+  "prof": "perfnorm",
+  "n": 1,
+  "us": 137.43916329652183,
+  "cycles": 542818.9994619555,
+  "instructions": 1948478.3695591139,
+  "r0403": 21.533037486026757,
+  "jvm_ok": true,
+  "std": [
+   [
+    736,
+    143,
+    658432
+   ]
+  ],
+  "osr": [
+   [
+    730,
+    162018,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    725,
+    false,
+    10726,
+    33299
+   ]
+  ],
+  "hot": "inferred: last standard tier-4 searchMany compile 736 (no samples in perfnorm)",
+  "hot_id": 736,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f7e37f0cb40",
+   "mod64": 0,
+   "n": 41,
+   "bytes_per_iter": 2,
+   "ipb": 20.5,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r8,QWORD PTR [rsp+0x68]",
+    "mov ebp,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x40]",
+    "mov ebx,DWORD PTR [rsp+0x54]",
+    "movsxd r8,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "add r9d,DWORD PTR [rsp+0x5c]",
+    "movsxd r8,DWORD PTR [rsp+0x5c]",
+    "mov rbp,QWORD PTR [rsp+0x40]",
+    "mov r9d,DWORD PTR [rsp+0x54]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x5c],ebp",
+    "mov DWORD PTR [rsp+0x54],r9d"
+   ],
+   "spill_slots": [
+    "[rsp+0x5c]"
+   ],
+   "candidates": [
+    [
+     "0x7f7e37f0ca93",
+     24,
+     0.0
+    ],
+    [
+     "0x7f7e37f0cb40",
+     41,
+     0.0
+    ],
+    [
+     "0x7f7e37f0cc22",
+     26,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  },
+  "cpb": 16.56552122381456,
+  "ipb_run": 59.46284086789288,
+  "ipc": 3.589554476704857,
+  "floor": 671744.0,
+  "floor_ok": true
+ },
+ {
+  "job": "D2",
+  "fork": "F1-perfnorm-2",
+  "leg": "F1",
+  "prof": "perfnorm",
+  "n": 2,
+  "us": 146.78004403809288,
+  "cycles": 578909.2159955978,
+  "instructions": 1986513.1258170493,
+  "r0403": 26.637314495578764,
+  "jvm_ok": true,
+  "std": [
+   [
+    737,
+    147,
+    446871
+   ]
+  ],
+  "osr": [
+   [
+    731,
+    223179,
+    "275"
+   ]
+  ],
+  "events": [],
+  "helper_inline": "<inline_success reason='inline (hot)'/>",
+  "helper_tasks": [
+   [
+    725,
+    true,
+    22245,
+    69288
+   ],
+   [
+    726,
+    false,
+    43131,
+    134544
+   ]
+  ],
+  "hot": "inferred: last standard tier-4 searchMany compile 737 (no samples in perfnorm)",
+  "hot_id": 737,
+  "hot_osr": false,
+  "match_jaccard": 1.0,
+  "loop": {
+   "start": "0x7f2c4bf0e950",
+   "mod64": 16,
+   "n": 41,
+   "bytes_per_iter": 2,
+   "ipb": 20.5,
+   "cyc_share": 0.0,
+   "ins_share": 0.0,
+   "rsp_loads": [
+    "mov r11,QWORD PTR [rsp+0x60]",
+    "mov ebp,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "mov ecx,DWORD PTR [rsp+0x54]",
+    "movsxd r11,DWORD PTR [rsp+0x54]",
+    "mov rbp,QWORD PTR [rsp+0x60]",
+    "add r11d,DWORD PTR [rsp+0x5c]",
+    "movsxd r11,DWORD PTR [rsp+0x5c]",
+    "mov rbp,QWORD PTR [rsp+0x68]",
+    "mov r11d,DWORD PTR [rsp+0x54]"
+   ],
+   "rsp_stores": [
+    "mov DWORD PTR [rsp+0x5c],ebp",
+    "mov DWORD PTR [rsp+0x54],r11d"
+   ],
+   "spill_slots": [
+    "[rsp+0x5c]"
+   ],
+   "candidates": [
+    [
+     "0x7f2c4bf0e8a5",
+     24,
+     0.0
+    ],
+    [
+     "0x7f2c4bf0e950",
+     41,
+     0.0
+    ],
+    [
+     "0x7f2c4bf0ea35",
+     26,
+     0.0
+    ]
+   ],
+   "picked_is_innermost": null,
+   "state_in_register": false
+  },
+  "cpb": 17.666907226428155,
+  "ipb_run": 60.623569513459756,
+  "ipc": 3.4314760776448847,
+  "floor": 671744.0,
+  "floor_ok": true
+ }
+]

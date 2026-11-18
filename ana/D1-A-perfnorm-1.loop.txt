@@ -1,0 +1,43 @@
+# D1/A-perfnorm-1 inferred: last standard tier-4 searchMany compile 758 (no samples in perfnorm)
+  0.00%   0.00%  0x7f9b73f0dcdb: mov      r8d,DWORD PTR [rsp+0x88]
+  0.00%   0.00%  0x7f9b73f0dce3: mov      ecx,eax
+  0.00%   0.00%  0x7f9b73f0dce5: mov      edx,DWORD PTR [rsp+0x28]
+  0.00%   0.00%  0x7f9b73f0dce9: cmp      edx,DWORD PTR [rsp+0x30]
+  0.00%   0.00%  0x7f9b73f0dced: jge      0x00007f9b73f0deb2
+  0.00%   0.00%  0x7f9b73f0dcf3: mov      r9,QWORD PTR [rsp+0x18]
+  0.00%   0.00%  0x7f9b73f0dcf8: mov      DWORD PTR [rsp+0x88],r8d
+  0.00%   0.00%  0x7f9b73f0dd00: mov      eax,ecx
+  0.00%   0.00%  0x7f9b73f0dd02: mov      r14d,r10d
+  0.00%   0.00%  0x7f9b73f0dd05: mov      ecx,DWORD PTR [r9+0xf4]
+  0.00%   0.00%  0x7f9b73f0dd0c: mov      QWORD PTR [rsp+0x18],r9
+  0.00%   0.00%  0x7f9b73f0dd11: lea      r11d,[rdx+0x1]
+  0.00%   0.00%  0x7f9b73f0dd15: mov      DWORD PTR [rsp+0x28],r11d
+  0.00%   0.00%  0x7f9b73f0dd1a: mov      r10,QWORD PTR [rsp+0x60]
+  0.00%   0.00%  0x7f9b73f0dd1f: movzx    r8d,BYTE PTR [r10+rdx*1+0x10]
+  0.00%   0.00%  0x7f9b73f0dd25: mov      r10d,DWORD PTR [r12+rcx*8+0xc]
+  0.00%   0.00%  0x7f9b73f0dd2a: cmp      r8d,r10d
+  0.00%   0.00%  0x7f9b73f0dd2d: jae      0x00007f9b73f0e48f
+  0.00%   0.00%  0x7f9b73f0dd33: lea      r10,[r12+rcx*8]
+  0.00%   0.00%  0x7f9b73f0dd37: movzx    r11d,BYTE PTR [r10+r8*1+0x10]
+  0.00%   0.00%  0x7f9b73f0dd3d: lea      r10d,[r14+r11*1]
+  0.00%   0.00%  0x7f9b73f0dd41: mov      ecx,DWORD PTR [rsp+0x90]
+  0.00%   0.00%  0x7f9b73f0dd48: mov      r9d,DWORD PTR [r12+rcx*8+0xc]
+  0.00%   0.00%  0x7f9b73f0dd4d: cmp      r10d,r9d
+  0.00%   0.00%  0x7f9b73f0dd50: jae      0x00007f9b73f0e4d4
+  0.00%   0.00%  0x7f9b73f0dd56: movsxd   r10,r11d
+  0.00%   0.00%  0x7f9b73f0dd59: movsxd   r11,r14d
+  0.00%   0.00%  0x7f9b73f0dd5c: add      r11,r10
+  0.00%   0.00%  0x7f9b73f0dd5f: mov      r10,QWORD PTR [rsp+0x68]
+  0.00%   0.00%  0x7f9b73f0dd64: mov      r11d,DWORD PTR [r10+r11*4+0x10]
+  0.00%   0.00%  0x7f9b73f0dd69: cmp      r11d,0xfffffffd
+  0.00%   0.00%  0x7f9b73f0dd6d: je       0x00007f9b73f0e543
+  0.00%   0.00%  0x7f9b73f0dd73: cmp      r11d,0x80000000
+  0.00%   0.00%  0x7f9b73f0dd7a: je       0x00007f9b73f0e5a0
+  0.00%   0.00%  0x7f9b73f0dd80: cmp      r11d,0xffffffff
+  0.00%   0.00%  0x7f9b73f0dd84: je       0x00007f9b73f0e5fc
+  0.00%   0.00%  0x7f9b73f0dd8a: cmp      r11d,0xfffffffe
+  0.00%   0.00%  0x7f9b73f0dd8e: je       0x00007f9b73f0e61c
+  0.00%   0.00%  0x7f9b73f0dd94: mov      r10d,r11d
+  0.00%   0.00%  0x7f9b73f0dd97: and      r10d,0xbfffffff
+  0.00%   0.00%  0x7f9b73f0dd9e: test     r11d,0x40000000
+  0.00%   0.00%  0x7f9b73f0dda5: je       0x00007f9b73f0dcdb

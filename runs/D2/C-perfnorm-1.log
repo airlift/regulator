@@ -1,0 +1,60 @@
+job D2 bundle c revision 94cf51bf6abebf14c71616a11e29b9bf96d330ac host  cpu Intel(R) Xeon(R) 6975P-C
+jdk OpenJDK 64-Bit Server VM Temurin-25.0.4+7 (build 25.0.4+7-LTS, mixed mode, sharing)
+row ^io.airlift.regulator.BenchmarkPatternCollections\.matchingSetPatternIdsMatchDense$ prof perfnorm:events=cycles,instructions,r0403
+jvmArgs --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D2/C-perfnorm-1.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D2/C-perfnorm-1.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense
+# Parameters: (patternCount = 16, sourceLength = 32768)
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfNormProfiler 
+# Profilers consume stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   2: 
+# Warmup Iteration   3: 
+# Warmup Iteration   4: 
+# Warmup Iteration   5: 
+# Warmup Iteration   6: 
+# Warmup Iteration   7: 
+# Warmup Iteration   8: 
+# Warmup Iteration   9: 
+# Warmup Iteration  10: 
+Iteration   1:  0x00007fbb844978ae:   movabs rdi,0x7fbb583a7e50           ;   {metadata(method data for {method} {0x00007fbb58098e18} 'writeObject0' '(Ljava/lang/Object;Z)V' in 'java/io/ObjectOutputStream')}
+Iteration   2: 
+Iteration   3: Compiled method (c1) 14575  831       1       java.nio.Buffer::limit (5 bytes)
+Iteration   4: 
+Iteration   5:            ;   {runtime_call MacroAssembler::debug64(char*, long, long*)}
+Iteration   6: 
+Iteration   7: 
+Iteration   8: 
+Iteration   9: 
+Iteration  10: 
+# Processing profiler results: LinuxPerfNormProfiler 
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:CPI":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:IPC":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:cycles":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:instructions":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:r0403":
+# Run complete. Total time: 00:00:22
+Benchmark                                                                 (patternCount)  (sourceLength)  Mode  Cnt        Score       Error      Units
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense                           16           32768  avgt   10   136482.558 ± 10760.304      ns/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:CPI                       16           32768  avgt             0.253              clks/insn
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:IPC                       16           32768  avgt             3.959              insns/clk
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:cycles                    16           32768  avgt        541827.666                   #/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:instructions              16           32768  avgt       2145043.398                   #/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:r0403                     16           32768  avgt            23.143                   #/op
+Benchmark result is saved to /home/ec2-user/runs/D2/C-perfnorm-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user  930210 Nov 18 09:10 /home/ec2-user/runs/D2/C-perfnorm-1.console.zst
+-rw-rw-r--. 1 ec2-user ec2-user    7026 Nov 18 09:10 /home/ec2-user/runs/D2/C-perfnorm-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    4217 Nov 18 09:10 /home/ec2-user/runs/D2/C-perfnorm-1.log
+-rw-rw-r--. 1 ec2-user ec2-user 1089962 Nov 18 09:10 /home/ec2-user/runs/D2/C-perfnorm-1.xml.zst
+rc 0 ok 1

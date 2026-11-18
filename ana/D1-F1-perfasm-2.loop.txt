@@ -1,0 +1,34 @@
+# D1/F1-perfasm-2 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 915
+  0.08%   0.12%  0x7ff20ff136c0: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.01%   0.00%  0x7ff20ff136c6: cmp      eax,edi
+  0.00%   0.00%  0x7ff20ff136c8: jae      0x00007ff20ff13771
+  0.00%   0.00%  0x7ff20ff136ce: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.04%   0.10%  0x7ff20ff136d4: lea      eax,[rsi+r8*1]
+  0.86%   1.65%  0x7ff20ff136d8: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ff20ff136db: jae      0x00007ff20ff137e0
+ 13.25%  19.60%  0x7ff20ff136e1: movsxd   r8,r8d
+  0.06%   0.08%  0x7ff20ff136e4: movsxd   r9,esi
+  0.02%   0.01%  0x7ff20ff136e7: add      r9,r8
+  0.28%   0.25%  0x7ff20ff136ea: vmovq    r8,xmm10
+  0.04%   0.04%  0x7ff20ff136ef: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+ 32.98%  24.77%  0x7ff20ff136f4: test     r9d,0xc0000000
+  0.00%   0.00%  0x7ff20ff136fb: jne      0x00007ff20ff13332
+  0.22%   0.15%  0x7ff20ff13701: lea      r8d,[r11+0x1]
+  0.02%   0.03%  0x7ff20ff13705: movsxd   rsi,r11d
+  0.09%   0.21%  0x7ff20ff13708: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.03%   0.09%  0x7ff20ff1370e: cmp      eax,edi
+  0.00%   0.00%  0x7ff20ff13710: jae      0x00007ff20ff13777
+  0.01%   0.00%  0x7ff20ff13712: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.07%   0.07%  0x7ff20ff13717: lea      eax,[rsi+r9*1]
+  0.78%   1.65%  0x7ff20ff1371b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ff20ff1371e: jae      0x00007ff20ff137e6
+ 12.82%  21.64%  0x7ff20ff13724: movsxd   rax,esi
+  0.11%   0.12%  0x7ff20ff13727: movsxd   rsi,r9d
+  0.03%   0.05%  0x7ff20ff1372a: add      rax,rsi
+  0.36%   0.36%  0x7ff20ff1372d: vmovq    rsi,xmm10
+  0.03%   0.03%  0x7ff20ff13732: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+ 33.00%  25.00%  0x7ff20ff13736: test     esi,0xc0000000
+  0.00%   0.00%  0x7ff20ff1373c: jne      0x00007ff20ff13338
+  0.19%   0.27%  0x7ff20ff13742: add      r11d,0x2
+  0.05%   0.01%  0x7ff20ff13746: cmp      r11d,ebp
+  0.00%   0.00%  0x7ff20ff13749: jl       0x00007ff20ff136c0

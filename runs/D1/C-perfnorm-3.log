@@ -1,0 +1,60 @@
+job D1 bundle c revision 94cf51bf6abebf14c71616a11e29b9bf96d330ac host  cpu Intel(R) Xeon(R) 6975P-C
+jdk OpenJDK 64-Bit Server VM Temurin-25.0.4+7 (build 25.0.4+7-LTS, mixed mode, sharing)
+row ^io.airlift.regulator.BenchmarkPatternCollections\.matchingSetPatternIds$ prof perfnorm:events=cycles,instructions,r0403
+jvmArgs --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D1/C-perfnorm-3.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D1/C-perfnorm-3.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds
+# Parameters: (patternCount = 16, sourceLength = 32768)
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfNormProfiler 
+# Profilers consume stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   2: DWORD PTR [rdx+0x8]
+# Warmup Iteration   3: 
+# Warmup Iteration   4: 
+# Warmup Iteration   5: 
+# Warmup Iteration   6: 
+# Warmup Iteration   7: 
+# Warmup Iteration   8:            ;   {runtime_call MacroAssembler::debug64(char*, long, long*)}
+# Warmup Iteration   9: 
+# Warmup Iteration  10: 
+Iteration   1: 
+Iteration   2: 
+Iteration   3: 
+Iteration   4: 71864.858 ns/op
+Iteration   5: 
+Iteration   6: 
+Iteration   7:            ;   {runtime_call MacroAssembler::debug64(char*, long, long*)}
+Iteration   8: 71854.857 ns/op
+Iteration   9: 
+Iteration  10: 71675.463 ns/op
+# Processing profiler results: LinuxPerfNormProfiler 
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:CPI":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:IPC":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:cycles":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:instructions":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:r0403":
+# Run complete. Total time: 00:00:23
+Benchmark                                                       (patternCount)  (sourceLength)  Mode  Cnt        Score      Error      Units
+BenchmarkPatternCollections.matchingSetPatternIds                           16           32768  avgt   10    72911.630 ± 4577.940      ns/op
+BenchmarkPatternCollections.matchingSetPatternIds:CPI                       16           32768  avgt             0.180             clks/insn
+BenchmarkPatternCollections.matchingSetPatternIds:IPC                       16           32768  avgt             5.542             insns/clk
+BenchmarkPatternCollections.matchingSetPatternIds:cycles                    16           32768  avgt        284344.338                  #/op
+BenchmarkPatternCollections.matchingSetPatternIds:instructions              16           32768  avgt       1575894.174                  #/op
+BenchmarkPatternCollections.matchingSetPatternIds:r0403                     16           32768  avgt             8.368                  #/op
+Benchmark result is saved to /home/ec2-user/runs/D1/C-perfnorm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user  934638 Nov 18 09:06 /home/ec2-user/runs/D1/C-perfnorm-3.console.zst
+-rw-rw-r--. 1 ec2-user ec2-user    6978 Nov 18 09:06 /home/ec2-user/runs/D1/C-perfnorm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    3927 Nov 18 09:06 /home/ec2-user/runs/D1/C-perfnorm-3.log
+-rw-rw-r--. 1 ec2-user ec2-user 1097064 Nov 18 09:06 /home/ec2-user/runs/D1/C-perfnorm-3.xml.zst
+rc 0 ok 1

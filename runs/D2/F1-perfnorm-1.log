@@ -1,0 +1,57 @@
+job D2 bundle 1 revision 8883e814455c9d917200eb9f74b22562f31d69ec host  cpu Intel(R) Xeon(R) 6975P-C
+jdk OpenJDK 64-Bit Server VM Temurin-25.0.4+7 (build 25.0.4+7-LTS, mixed mode, sharing)
+row ^io.airlift.regulator.BenchmarkPatternCollections\.matchingSetPatternIdsMatchDense$ prof perfnorm:events=cycles,instructions,r0403
+jvmArgs --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D2/F1-perfnorm-1.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation -XX:LogFile=/home/ec2-user/runs/D2/F1-perfnorm-1.xml -XX:+PrintAssembly -XX:PrintAssemblyOptions=intel
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense
+# Parameters: (patternCount = 16, sourceLength = 32768)
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfNormProfiler 
+# Profilers consume stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   3: 
+# Warmup Iteration   4: 
+# Warmup Iteration   5: 
+# Warmup Iteration   7: 
+# Warmup Iteration   8: 
+# Warmup Iteration   9: 
+# Warmup Iteration  10: 
+Iteration   1: 136516.119 ns/op
+Iteration   2: 
+Iteration   3: 
+Iteration   4: 
+Iteration   5: 
+Iteration   6: 
+Iteration   7: 
+Iteration   8: 
+Iteration   9: 
+Iteration  10: 135221.826 ns/op
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:CPI":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:IPC":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:cycles":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:instructions":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:r0403":
+# Run complete. Total time: 00:00:22
+Benchmark                                                                 (patternCount)  (sourceLength)  Mode  Cnt        Score      Error      Units
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense                           16           32768  avgt   10   137439.163 ± 5256.658      ns/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:CPI                       16           32768  avgt             0.279             clks/insn
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:IPC                       16           32768  avgt             3.590             insns/clk
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:cycles                    16           32768  avgt        542818.999                  #/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:instructions              16           32768  avgt       1948478.370                  #/op
+BenchmarkPatternCollections.matchingSetPatternIdsMatchDense:r0403                     16           32768  avgt            21.533                  #/op
+Benchmark result is saved to /home/ec2-user/runs/D2/F1-perfnorm-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user  924432 Nov 18 09:11 /home/ec2-user/runs/D2/F1-perfnorm-1.console.zst
+-rw-rw-r--. 1 ec2-user ec2-user    7033 Nov 18 09:11 /home/ec2-user/runs/D2/F1-perfnorm-1.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    3798 Nov 18 09:11 /home/ec2-user/runs/D2/F1-perfnorm-1.log
+-rw-rw-r--. 1 ec2-user ec2-user 1087136 Nov 18 09:11 /home/ec2-user/runs/D2/F1-perfnorm-1.xml.zst
+rc 0 ok 1

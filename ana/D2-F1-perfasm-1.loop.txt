@@ -1,0 +1,45 @@
+# D2/F1-perfasm-1 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 797
+  0.20%   0.18%  0x7f038bf10450: mov      r11,QWORD PTR [rsp+0x60]
+  0.18%   0.32%  0x7f038bf10455: mov      ebp,DWORD PTR [rsp+0x54]
+  0.24%   0.20%  0x7f038bf10459: movzx    r11d,BYTE PTR [r11+rbp*1+0x10]
+  1.49%   1.62%  0x7f038bf1045f: cmp      r11d,r10d
+  0.00%   0.00%  0x7f038bf10462: jae      0x00007f038bf106ed
+  0.09%   0.18%  0x7f038bf10468: movzx    ecx,BYTE PTR [rbx+r11*1+0x10]
+  0.37%   0.32%  0x7f038bf1046e: lea      r11d,[rdi+rcx*1]
+  0.60%   0.40%  0x7f038bf10472: cmp      r11d,r8d
+  0.00%   0.00%  0x7f038bf10475: jae      0x00007f038bf10762
+  0.99%   2.05%  0x7f038bf1047b: movsxd   r11,ecx
+  0.28%   0.36%  0x7f038bf1047e: movsxd   rcx,edi
+  0.30%   0.47%  0x7f038bf10481: add      rcx,r11
+  0.21%   0.28%  0x7f038bf10484: mov      rbp,QWORD PTR [rsp+0x68]
+  1.25%   1.87%  0x7f038bf10489: mov      ebp,DWORD PTR [rbp+rcx*4+0x10]
+  6.41%   7.38%  0x7f038bf1048d: mov      DWORD PTR [rsp+0x5c],ebp
+  1.51%   0.80%  0x7f038bf10491: test     ebp,0xc0000000
+  0.00%   0.00%  0x7f038bf10497: je       0x00007f038bf104a6
+  0.18%   0.04%  0x7f038bf10499: mov      DWORD PTR [rsp+0x5c],edi
+  0.39%   0.17%  0x7f038bf1049d: mov      ecx,DWORD PTR [rsp+0x54]
+  0.00%   0.00%  0x7f038bf104a1: jmp      0x00007f038bf100a3
+  0.10%   0.10%  0x7f038bf104a6: mov      ecx,DWORD PTR [rsp+0x54]
+  0.36%   0.12%  0x7f038bf104aa: inc      ecx
+  0.13%   0.17%  0x7f038bf104ac: movsxd   r11,DWORD PTR [rsp+0x54]
+  0.12%   0.16%  0x7f038bf104b1: mov      rbp,QWORD PTR [rsp+0x60]
+  0.13%   0.13%  0x7f038bf104b6: movzx    r11d,BYTE PTR [rbp+r11*1+0x11]
+  0.38%   0.37%  0x7f038bf104bc: cmp      r11d,r10d
+  0.00%   0.00%  0x7f038bf104bf: jae      0x00007f038bf106f5
+  0.61%   1.00%  0x7f038bf104c5: movzx    esi,BYTE PTR [rbx+r11*1+0x10]
+  1.54%   1.49%  0x7f038bf104cb: mov      r11d,esi
+  0.07%   0.02%  0x7f038bf104ce: add      r11d,DWORD PTR [rsp+0x5c]
+  0.95%   0.91%  0x7f038bf104d3: cmp      r11d,r8d
+  0.00%   0.00%  0x7f038bf104d6: jae      0x00007f038bf1076a
+  0.55%   0.55%  0x7f038bf104dc: movsxd   rdi,esi
+  0.18%   0.23%  0x7f038bf104df: movsxd   r11,DWORD PTR [rsp+0x5c]
+  2.76%   4.36%  0x7f038bf104e4: add      rdi,r11
+  1.90%   2.44%  0x7f038bf104e7: mov      rbp,QWORD PTR [rsp+0x68]
+  0.20%   0.18%  0x7f038bf104ec: mov      edi,DWORD PTR [rbp+rdi*4+0x10]
+  6.55%   5.31%  0x7f038bf104f0: test     edi,0xc0000000
+  0.00%   0.00%  0x7f038bf104f6: jne      0x00007f038bf100a3
+  0.07%   0.21%  0x7f038bf104fc: mov      r11d,DWORD PTR [rsp+0x54]
+  0.06%   0.03%  0x7f038bf10501: add      r11d,0x2
+  0.04%   0.08%  0x7f038bf10505: mov      DWORD PTR [rsp+0x54],r11d
+  0.06%   0.07%  0x7f038bf1050a: cmp      r11d,edx
+  0.00%   0.00%  0x7f038bf1050d: jl       0x00007f038bf10450

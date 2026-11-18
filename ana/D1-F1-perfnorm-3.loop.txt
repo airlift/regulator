@@ -1,0 +1,34 @@
+# D1/F1-perfnorm-3 inferred: last standard tier-4 searchMany compile 813 (no samples in perfnorm)
+  0.00%   0.00%  0x7ffb03f0dd40: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.00%   0.00%  0x7ffb03f0dd46: cmp      eax,edi
+  0.00%   0.00%  0x7ffb03f0dd48: jae      0x00007ffb03f0ddf1
+  0.00%   0.00%  0x7ffb03f0dd4e: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7ffb03f0dd54: lea      eax,[rsi+r8*1]
+  0.00%   0.00%  0x7ffb03f0dd58: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ffb03f0dd5b: jae      0x00007ffb03f0de60
+  0.00%   0.00%  0x7ffb03f0dd61: movsxd   r8,r8d
+  0.00%   0.00%  0x7ffb03f0dd64: movsxd   r9,esi
+  0.00%   0.00%  0x7ffb03f0dd67: add      r9,r8
+  0.00%   0.00%  0x7ffb03f0dd6a: vmovq    r8,xmm10
+  0.00%   0.00%  0x7ffb03f0dd6f: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+  0.00%   0.00%  0x7ffb03f0dd74: test     r9d,0xc0000000
+  0.00%   0.00%  0x7ffb03f0dd7b: jne      0x00007ffb03f0d9b2
+  0.00%   0.00%  0x7ffb03f0dd81: lea      r8d,[r11+0x1]
+  0.00%   0.00%  0x7ffb03f0dd85: movsxd   rsi,r11d
+  0.00%   0.00%  0x7ffb03f0dd88: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.00%   0.00%  0x7ffb03f0dd8e: cmp      eax,edi
+  0.00%   0.00%  0x7ffb03f0dd90: jae      0x00007ffb03f0ddf7
+  0.00%   0.00%  0x7ffb03f0dd92: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7ffb03f0dd97: lea      eax,[rsi+r9*1]
+  0.00%   0.00%  0x7ffb03f0dd9b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ffb03f0dd9e: jae      0x00007ffb03f0de66
+  0.00%   0.00%  0x7ffb03f0dda4: movsxd   rax,esi
+  0.00%   0.00%  0x7ffb03f0dda7: movsxd   rsi,r9d
+  0.00%   0.00%  0x7ffb03f0ddaa: add      rax,rsi
+  0.00%   0.00%  0x7ffb03f0ddad: vmovq    rsi,xmm10
+  0.00%   0.00%  0x7ffb03f0ddb2: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+  0.00%   0.00%  0x7ffb03f0ddb6: test     esi,0xc0000000
+  0.00%   0.00%  0x7ffb03f0ddbc: jne      0x00007ffb03f0d9b8
+  0.00%   0.00%  0x7ffb03f0ddc2: add      r11d,0x2
+  0.00%   0.00%  0x7ffb03f0ddc6: cmp      r11d,ebp
+  0.00%   0.00%  0x7ffb03f0ddc9: jl       0x00007ffb03f0dd40

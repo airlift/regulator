@@ -1,0 +1,34 @@
+# D1/F1-perfasm-4 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 895
+  0.18%   0.15%  0x7f8e67f131c0: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.04%   0.03%  0x7f8e67f131c6: cmp      eax,edi
+  0.00%   0.00%  0x7f8e67f131c8: jae      0x00007f8e67f13271
+  0.00%   0.00%  0x7f8e67f131ce: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.03%   0.07%  0x7f8e67f131d4: lea      eax,[rsi+r8*1]
+  1.04%   2.37%  0x7f8e67f131d8: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f8e67f131db: jae      0x00007f8e67f132e0
+ 13.05%  18.51%  0x7f8e67f131e1: movsxd   r8,r8d
+  0.16%   0.07%  0x7f8e67f131e4: movsxd   r9,esi
+  0.08%   0.04%  0x7f8e67f131e7: add      r9,r8
+  0.23%   0.35%  0x7f8e67f131ea: vmovq    r8,xmm10
+  0.03%   0.02%  0x7f8e67f131ef: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+ 31.61%  24.38%  0x7f8e67f131f4: test     r9d,0xc0000000
+  0.00%   0.00%  0x7f8e67f131fb: jne      0x00007f8e67f12e32
+  0.18%   0.32%  0x7f8e67f13201: lea      r8d,[r11+0x1]
+  0.01%   0.02%  0x7f8e67f13205: movsxd   rsi,r11d
+  0.19%   0.32%  0x7f8e67f13208: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.05%   0.12%  0x7f8e67f1320e: cmp      eax,edi
+  0.00%   0.00%  0x7f8e67f13210: jae      0x00007f8e67f13277
+  0.01%   0.00%  0x7f8e67f13212: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.07%   0.05%  0x7f8e67f13217: lea      eax,[rsi+r9*1]
+  0.69%   1.70%  0x7f8e67f1321b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f8e67f1321e: jae      0x00007f8e67f132e6
+ 12.25%  20.82%  0x7f8e67f13224: movsxd   rax,esi
+  0.12%   0.06%  0x7f8e67f13227: movsxd   rsi,r9d
+  0.07%   0.05%  0x7f8e67f1322a: add      rax,rsi
+  0.36%   0.31%  0x7f8e67f1322d: vmovq    rsi,xmm10
+  0.08%   0.03%  0x7f8e67f13232: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+ 32.26%  23.82%  0x7f8e67f13236: test     esi,0xc0000000
+  0.00%   0.00%  0x7f8e67f1323c: jne      0x00007f8e67f12e38
+  0.25%   0.27%  0x7f8e67f13242: add      r11d,0x2
+  0.01%   0.00%  0x7f8e67f13246: cmp      r11d,ebp
+  0.00%   0.00%  0x7f8e67f13249: jl       0x00007f8e67f131c0

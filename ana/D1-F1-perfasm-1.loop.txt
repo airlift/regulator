@@ -1,0 +1,34 @@
+# D1/F1-perfasm-1 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 859
+  0.15%   0.16%  0x7f280ff13040: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.05%   0.04%  0x7f280ff13046: cmp      eax,edi
+  0.00%   0.00%  0x7f280ff13048: jae      0x00007f280ff130f1
+  0.00%   0.00%  0x7f280ff1304e: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.03%   0.07%  0x7f280ff13054: lea      eax,[rsi+r8*1]
+  1.01%   1.90%  0x7f280ff13058: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f280ff1305b: jae      0x00007f280ff13160
+ 13.04%  19.07%  0x7f280ff13061: movsxd   r8,r8d
+  0.17%   0.11%  0x7f280ff13064: movsxd   r9,esi
+  0.03%   0.05%  0x7f280ff13067: add      r9,r8
+  0.31%   0.31%  0x7f280ff1306a: vmovq    r8,xmm10
+  0.06%   0.01%  0x7f280ff1306f: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+ 31.44%  25.05%  0x7f280ff13074: test     r9d,0xc0000000
+  0.00%   0.00%  0x7f280ff1307b: jne      0x00007f280ff12cb2
+  0.29%   0.32%  0x7f280ff13081: lea      r8d,[r11+0x1]
+  0.01%   0.00%  0x7f280ff13085: movsxd   rsi,r11d
+  0.15%   0.22%  0x7f280ff13088: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.03%   0.06%  0x7f280ff1308e: cmp      eax,edi
+  0.00%   0.00%  0x7f280ff13090: jae      0x00007f280ff130f7
+  0.01%   0.00%  0x7f280ff13092: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.09%   0.06%  0x7f280ff13097: lea      eax,[rsi+r9*1]
+  0.74%   1.57%  0x7f280ff1309b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f280ff1309e: jae      0x00007f280ff13166
+ 12.84%  21.11%  0x7f280ff130a4: movsxd   rax,esi
+  0.12%   0.05%  0x7f280ff130a7: movsxd   rsi,r9d
+  0.02%   0.04%  0x7f280ff130aa: add      rax,rsi
+  0.34%   0.41%  0x7f280ff130ad: vmovq    rsi,xmm10
+  0.06%   0.06%  0x7f280ff130b2: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+ 32.68%  24.44%  0x7f280ff130b6: test     esi,0xc0000000
+  0.00%   0.00%  0x7f280ff130bc: jne      0x00007f280ff12cb8
+  0.32%   0.14%  0x7f280ff130c2: add      r11d,0x2
+  0.02%   0.03%  0x7f280ff130c6: cmp      r11d,ebp
+  0.00%   0.00%  0x7f280ff130c9: jl       0x00007f280ff13040

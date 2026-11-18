@@ -1,0 +1,42 @@
+# D2/F1-perfnorm-1 inferred: last standard tier-4 searchMany compile 736 (no samples in perfnorm)
+  0.00%   0.00%  0x7f7e37f0cb40: mov      r8,QWORD PTR [rsp+0x68]
+  0.00%   0.00%  0x7f7e37f0cb45: mov      ebp,DWORD PTR [rsp+0x54]
+  0.00%   0.00%  0x7f7e37f0cb49: movzx    edi,BYTE PTR [r8+rbp*1+0x10]
+  0.00%   0.00%  0x7f7e37f0cb4f: cmp      edi,edx
+  0.00%   0.00%  0x7f7e37f0cb51: jae      0x00007f7e37f0cd12
+  0.00%   0.00%  0x7f7e37f0cb57: movzx    r8d,BYTE PTR [r11+rdi*1+0x10]
+  0.00%   0.00%  0x7f7e37f0cb5d: lea      r9d,[rsi+r8*1]
+  0.00%   0.00%  0x7f7e37f0cb61: cmp      r9d,eax
+  0.00%   0.00%  0x7f7e37f0cb64: jae      0x00007f7e37f0cd8a
+  0.00%   0.00%  0x7f7e37f0cb6a: movsxd   r8,r8d
+  0.00%   0.00%  0x7f7e37f0cb6d: movsxd   r9,esi
+  0.00%   0.00%  0x7f7e37f0cb70: add      r9,r8
+  0.00%   0.00%  0x7f7e37f0cb73: mov      rbp,QWORD PTR [rsp+0x40]
+  0.00%   0.00%  0x7f7e37f0cb78: mov      ebp,DWORD PTR [rbp+r9*4+0x10]
+  0.00%   0.00%  0x7f7e37f0cb7d: mov      DWORD PTR [rsp+0x5c],ebp
+  0.00%   0.00%  0x7f7e37f0cb81: test     ebp,0xc0000000
+  0.00%   0.00%  0x7f7e37f0cb87: jne      0x00007f7e37f0c7a8
+  0.00%   0.00%  0x7f7e37f0cb8d: mov      ebx,DWORD PTR [rsp+0x54]
+  0.00%   0.00%  0x7f7e37f0cb91: inc      ebx
+  0.00%   0.00%  0x7f7e37f0cb93: movsxd   r8,DWORD PTR [rsp+0x54]
+  0.00%   0.00%  0x7f7e37f0cb98: mov      rbp,QWORD PTR [rsp+0x68]
+  0.00%   0.00%  0x7f7e37f0cb9d: movzx    edi,BYTE PTR [rbp+r8*1+0x11]
+  0.00%   0.00%  0x7f7e37f0cba3: cmp      edi,edx
+  0.00%   0.00%  0x7f7e37f0cba5: jae      0x00007f7e37f0cd1a
+  0.00%   0.00%  0x7f7e37f0cbab: movzx    edi,BYTE PTR [r11+rdi*1+0x10]
+  0.00%   0.00%  0x7f7e37f0cbb1: mov      r9d,edi
+  0.00%   0.00%  0x7f7e37f0cbb4: add      r9d,DWORD PTR [rsp+0x5c]
+  0.00%   0.00%  0x7f7e37f0cbb9: cmp      r9d,eax
+  0.00%   0.00%  0x7f7e37f0cbbc: jae      0x00007f7e37f0cd92
+  0.00%   0.00%  0x7f7e37f0cbc2: movsxd   r9,edi
+  0.00%   0.00%  0x7f7e37f0cbc5: movsxd   r8,DWORD PTR [rsp+0x5c]
+  0.00%   0.00%  0x7f7e37f0cbca: add      r9,r8
+  0.00%   0.00%  0x7f7e37f0cbcd: mov      rbp,QWORD PTR [rsp+0x40]
+  0.00%   0.00%  0x7f7e37f0cbd2: mov      esi,DWORD PTR [rbp+r9*4+0x10]
+  0.00%   0.00%  0x7f7e37f0cbd7: test     esi,0xc0000000
+  0.00%   0.00%  0x7f7e37f0cbdd: jne      0x00007f7e37f0c7b0
+  0.00%   0.00%  0x7f7e37f0cbe3: mov      r9d,DWORD PTR [rsp+0x54]
+  0.00%   0.00%  0x7f7e37f0cbe8: add      r9d,0x2
+  0.00%   0.00%  0x7f7e37f0cbec: mov      DWORD PTR [rsp+0x54],r9d
+  0.00%   0.00%  0x7f7e37f0cbf1: cmp      r9d,r13d
+  0.00%   0.00%  0x7f7e37f0cbf4: jl       0x00007f7e37f0cb40

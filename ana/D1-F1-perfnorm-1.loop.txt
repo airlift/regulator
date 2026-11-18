@@ -1,0 +1,34 @@
+# D1/F1-perfnorm-1 inferred: last standard tier-4 searchMany compile 812 (no samples in perfnorm)
+  0.00%   0.00%  0x7f37b7f0f840: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.00%   0.00%  0x7f37b7f0f846: cmp      eax,edi
+  0.00%   0.00%  0x7f37b7f0f848: jae      0x00007f37b7f0f8e9
+  0.00%   0.00%  0x7f37b7f0f84e: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7f37b7f0f854: lea      eax,[rsi+r8*1]
+  0.00%   0.00%  0x7f37b7f0f858: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f37b7f0f85b: jae      0x00007f37b7f0f958
+  0.00%   0.00%  0x7f37b7f0f861: movsxd   r8,r8d
+  0.00%   0.00%  0x7f37b7f0f864: movsxd   r9,esi
+  0.00%   0.00%  0x7f37b7f0f867: add      r9,r8
+  0.00%   0.00%  0x7f37b7f0f86a: vmovq    r8,xmm10
+  0.00%   0.00%  0x7f37b7f0f86f: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+  0.00%   0.00%  0x7f37b7f0f874: test     r9d,0xc0000000
+  0.00%   0.00%  0x7f37b7f0f87b: jne      0x00007f37b7f0f4b2
+  0.00%   0.00%  0x7f37b7f0f881: lea      r8d,[r11+0x1]
+  0.00%   0.00%  0x7f37b7f0f885: movsxd   rsi,r11d
+  0.00%   0.00%  0x7f37b7f0f888: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.00%   0.00%  0x7f37b7f0f88e: cmp      eax,edi
+  0.00%   0.00%  0x7f37b7f0f890: jae      0x00007f37b7f0f8ef
+  0.00%   0.00%  0x7f37b7f0f892: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7f37b7f0f897: lea      eax,[rsi+r9*1]
+  0.00%   0.00%  0x7f37b7f0f89b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f37b7f0f89e: jae      0x00007f37b7f0f95e
+  0.00%   0.00%  0x7f37b7f0f8a4: movsxd   rax,esi
+  0.00%   0.00%  0x7f37b7f0f8a7: movsxd   rsi,r9d
+  0.00%   0.00%  0x7f37b7f0f8aa: add      rax,rsi
+  0.00%   0.00%  0x7f37b7f0f8ad: vmovq    rsi,xmm10
+  0.00%   0.00%  0x7f37b7f0f8b2: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+  0.00%   0.00%  0x7f37b7f0f8b6: test     esi,0xc0000000
+  0.00%   0.00%  0x7f37b7f0f8bc: jne      0x00007f37b7f0f4b8
+  0.00%   0.00%  0x7f37b7f0f8c2: add      r11d,0x2
+  0.00%   0.00%  0x7f37b7f0f8c6: cmp      r11d,ebp
+  0.00%   0.00%  0x7f37b7f0f8c9: jl       0x00007f37b7f0f840

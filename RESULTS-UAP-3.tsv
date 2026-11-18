@@ -1,0 +1,37 @@
+job	fork	leg	prof	us	std_id	std_count	std_backedge	count_vs_40	osr_ids	events	hot_id	hot_osr	helper_inline	loop_n	bytes_per_iter	ipb_loop	mod64	rsp_loads	rsp_stores	state_in_register	spill_slots	shape	loop_cycle_share	cycles_per_op	instructions_per_op	r0403_per_op	cpb	ipb_run	ipc	floor	floor_ok
+D1	A-perfasm-1	A	perfasm	74.8	863	37	580608	<40	861	-	863	False	-	42	1	42.0	27	7	3	True	-	fast	93.8	-	-	-	-	-	-	-	-
+D1	A-perfasm-2	A	perfasm	74.6	883	38	614400	<40	881	-	883	False	-	42	1	42.0	27	7	3	True	-	fast	94.8	-	-	-	-	-	-	-	-
+D1	A-perfasm-3	A	perfasm	74.5	861	38	605184	<40	859	-	861	False	-	42	1	42.0	27	7	3	True	-	fast	95.6	-	-	-	-	-	-	-	-
+D1	A-perfasm-4	A	perfasm	74.5	841	40	624640	>=40	838	-	841	False	-	42	1	42.0	14	7	3	True	-	fast	94.1	-	-	-	-	-	-	-	-
+D1	C-perfasm-1	C	perfasm	118.5	840	40	480256	>=40	838	-	840	False	-	49	1	49.0	23	11	8	False	[rsp+0x34]	slow	87.0	-	-	-	-	-	-	-	-
+D1	C-perfasm-2	C	perfasm	76.2	875	54	555008	>=40	872	-	875	False	-	48	1	48.0	23	9	7	True	-	fast	94.1	-	-	-	-	-	-	-	-
+D1	C-perfasm-3	C	perfasm	117.4	869	45	541696	>=40	866	-	869	False	-	49	1	49.0	23	11	8	False	[rsp+0x34]	slow	93.2	-	-	-	-	-	-	-	-
+D1	C-perfasm-4	C	perfasm	75.7	827	39	516475	<40	825	-	827	False	-	41	1	41.0	28	7	2	True	-	fast	94.3	-	-	-	-	-	-	-	-
+D1	F1-perfasm-1	F1	perfasm	63.6	859	4436	13316	>=40		-	859	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	94.0	-	-	-	-	-	-	-	-
+D1	F1-perfasm-2	F1	perfasm	63.5	915	4438	13322	>=40		-	915	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	95.4	-	-	-	-	-	-	-	-
+D1	F1-perfasm-3	F1	perfasm	63.7	866	4436	13316	>=40		-	866	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	91.6	-	-	-	-	-	-	-	-
+D1	F1-perfasm-4	F1	perfasm	63.6	895	4608	13832	>=40		-	895	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	93.0	-	-	-	-	-	-	-	-
+D1	F3-perfasm-1	F3	perfasm	114.4	790	39	565625	<40	788	-	790	False	-	52	1	52.0	18	11	9	False	[rsp+0x68]	slow	96.7	-	-	-	-	-	-	-	-
+D1	F3-perfasm-2	F3	perfasm	115.2	876	39	646144	<40	874	-	876	False	-	52	1	52.0	18	11	9	False	[rsp+0x68]	slow	92.0	-	-	-	-	-	-	-	-
+D1	F3-perfasm-3	F3	perfasm	73.2	850	40	440320	>=40	847	-	850	False	-	45	1	45.0	27	8	6	True	-	fast	98.5	-	-	-	-	-	-	-	-
+D1	F3-perfasm-4	F3	perfasm	116.0	854	37	550912	<40	853	-	854	False	-	52	1	52.0	18	11	9	False	[rsp+0x68]	slow	88.1	-	-	-	-	-	-	-	-
+D1	A-perfnorm-1	A	perfnorm	72.4	758	32	763609	<40	755	-	758	False	-	42	1	42.0	27	7	3	True	-	fast	-	285812	1381311	6.5	8.722	42.154	4.83	1376256	True
+D1	A-perfnorm-2	A	perfnorm	74.5	763	67	1274112	>=40	760	-	763	False	-	42	1	42.0	13	7	3	True	-	fast	-	292490	1379869	6.4	8.926	42.110	4.72	1376256	True
+D1	A-perfnorm-3	A	perfnorm	74.7	775	70	1277419	>=40	771	-	775	False	-	42	1	42.0	13	7	3	True	-	fast	-	293549	1379531	6.3	8.958	42.100	4.70	1376256	True
+D1	C-perfnorm-1	C	perfnorm	72.7	762	39	594428	<40	759	-	762	False	-	41	1	41.0	28	7	2	True	-	fast	-	284861	1346284	5.4	8.693	41.085	4.73	1343488	True
+D1	C-perfnorm-2	C	perfnorm	112.9	798	43	742400	>=40	795	-	798	False	-	49	1	49.0	23	11	8	False	[rsp+0x34]	slow	-	447093	1616158	6.6	13.644	49.321	3.61	1605632	True
+D1	C-perfnorm-3	C	perfnorm	72.9	767	70	383096	>=40	764	-	767	False	-	48	1	48.0	23	9	7	True	-	fast	-	284344	1575894	8.4	8.678	48.092	5.54	1572864	True
+D1	F1-perfnorm-1	F1	perfnorm	61.3	812	4608	13832	>=40		-	812	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	-	241825	544696	4.0	7.380	16.623	2.25	540672	True
+D1	F1-perfnorm-2	F1	perfnorm	61.3	818	4608	13832	>=40		-	818	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	-	240788	544074	0.2	7.348	16.604	2.26	540672	True
+D1	F1-perfnorm-3	F1	perfnorm	61.3	813	4553	13667	>=40		-	813	False	<inline_success reason='inline (hot)'/>	33	2	16.5	0	2	0	True	-	fast	-	241093	544228	3.9	7.358	16.609	2.26	540672	True
+D1	F3-perfnorm-1	F3	perfnorm	71.5	784	40	573964	>=40	782	-	784	False	-	45	1	45.0	27	8	6	True	-	fast	-	280562	1479538	6.1	8.562	45.152	5.27	1474560	True
+D1	F3-perfnorm-2	F3	perfnorm	73.2	762	104	567941	>=40	760	-	762	False	-	48	1	48.0	23	9	7	True	-	fast	-	288031	1576072	8.6	8.790	48.098	5.47	1572864	True
+D1	F3-perfnorm-3	F3	perfnorm	71.7	816	72	848675	>=40	814	-	816	False	-	45	1	45.0	27	8	6	True	-	fast	-	280175	1477385	6.0	8.550	45.086	5.27	1474560	True
+D2	C-perfasm-1	C	perfasm	138.2	802	31	529408	<40	798	-	802	False	-	42	1	42.0	4	8	3	False	[rsp+0x54]	slow	60.2	-	-	-	-	-	-	-	-
+D2	C-perfasm-2	C	perfasm	113.9	752	40	454210	>=40	748	-	752	False	-	41	1	41.0	50	6	2	True	-	fast	47.3	-	-	-	-	-	-	-	-
+D2	F1-perfasm-1	F1	perfasm	149.8	797	44	308224	>=40	792	-	797	False	<inline_success reason='inline (hot)'/>	44	2	22.0	16	11	3	False	[rsp+0x5c]	slow	31.4	-	-	-	-	-	-	-	-
+D2	F1-perfasm-2	F1	perfasm	144.1	806	189	1498112	>=40	803	-	806	False	<inline_success reason='inline (hot)'/>	41	2	20.5	0	10	2	False	[rsp+0x5c]	slow	32.8	-	-	-	-	-	-	-	-
+D2	C-perfnorm-1	C	perfnorm	136.5	727	32	450560	<40	724	-	727	False	-	42	1	42.0	4	8	3	False	[rsp+0x54]	slow	-	541828	2145043	23.1	16.535	65.462	3.96	1376256	True
+D2	C-perfnorm-2	C	perfnorm	137.4	732	39	470016	<40	726	-	732	False	-	42	1	42.0	4	8	3	False	[rsp+0x54]	slow	-	544776	2144203	23.5	16.625	65.436	3.94	1376256	True
+D2	F1-perfnorm-1	F1	perfnorm	137.4	736	143	658432	>=40	730	-	736	False	<inline_success reason='inline (hot)'/>	41	2	20.5	0	10	2	False	[rsp+0x5c]	slow	-	542819	1948478	21.5	16.566	59.463	3.59	671744	True
+D2	F1-perfnorm-2	F1	perfnorm	146.8	737	147	446871	>=40	731	-	737	False	<inline_success reason='inline (hot)'/>	41	2	20.5	16	10	2	False	[rsp+0x5c]	slow	-	578909	1986513	26.6	17.667	60.624	3.43	671744	True

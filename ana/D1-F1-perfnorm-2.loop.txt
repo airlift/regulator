@@ -1,0 +1,34 @@
+# D1/F1-perfnorm-2 inferred: last standard tier-4 searchMany compile 818 (no samples in perfnorm)
+  0.00%   0.00%  0x7ff6cff10440: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.00%   0.00%  0x7ff6cff10446: cmp      eax,edi
+  0.00%   0.00%  0x7ff6cff10448: jae      0x00007ff6cff104e9
+  0.00%   0.00%  0x7ff6cff1044e: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7ff6cff10454: lea      eax,[rsi+r8*1]
+  0.00%   0.00%  0x7ff6cff10458: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ff6cff1045b: jae      0x00007ff6cff10558
+  0.00%   0.00%  0x7ff6cff10461: movsxd   r8,r8d
+  0.00%   0.00%  0x7ff6cff10464: movsxd   r9,esi
+  0.00%   0.00%  0x7ff6cff10467: add      r9,r8
+  0.00%   0.00%  0x7ff6cff1046a: vmovq    r8,xmm10
+  0.00%   0.00%  0x7ff6cff1046f: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+  0.00%   0.00%  0x7ff6cff10474: test     r9d,0xc0000000
+  0.00%   0.00%  0x7ff6cff1047b: jne      0x00007ff6cff100b2
+  0.00%   0.00%  0x7ff6cff10481: lea      r8d,[r11+0x1]
+  0.00%   0.00%  0x7ff6cff10485: movsxd   rsi,r11d
+  0.00%   0.00%  0x7ff6cff10488: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.00%   0.00%  0x7ff6cff1048e: cmp      eax,edi
+  0.00%   0.00%  0x7ff6cff10490: jae      0x00007ff6cff104ef
+  0.00%   0.00%  0x7ff6cff10492: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.00%   0.00%  0x7ff6cff10497: lea      eax,[rsi+r9*1]
+  0.00%   0.00%  0x7ff6cff1049b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7ff6cff1049e: jae      0x00007ff6cff1055e
+  0.00%   0.00%  0x7ff6cff104a4: movsxd   rax,esi
+  0.00%   0.00%  0x7ff6cff104a7: movsxd   rsi,r9d
+  0.00%   0.00%  0x7ff6cff104aa: add      rax,rsi
+  0.00%   0.00%  0x7ff6cff104ad: vmovq    rsi,xmm10
+  0.00%   0.00%  0x7ff6cff104b2: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+  0.00%   0.00%  0x7ff6cff104b6: test     esi,0xc0000000
+  0.00%   0.00%  0x7ff6cff104bc: jne      0x00007ff6cff100b8
+  0.00%   0.00%  0x7ff6cff104c2: add      r11d,0x2
+  0.00%   0.00%  0x7ff6cff104c6: cmp      r11d,ebp
+  0.00%   0.00%  0x7ff6cff104c9: jl       0x00007ff6cff10440

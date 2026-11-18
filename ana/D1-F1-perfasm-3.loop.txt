@@ -1,0 +1,34 @@
+# D1/F1-perfasm-3 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 866
+  0.14%   0.26%  0x7f93fbf148c0: movzx    eax,BYTE PTR [r13+r11*1+0x10]
+  0.05%   0.02%  0x7f93fbf148c6: cmp      eax,edi
+  0.00%   0.00%  0x7f93fbf148c8: jae      0x00007f93fbf14971
+  0.01%   0.00%  0x7f93fbf148ce: movzx    r8d,BYTE PTR [rcx+rax*1+0x10]
+  0.09%   0.11%  0x7f93fbf148d4: lea      eax,[rsi+r8*1]
+  1.03%   1.77%  0x7f93fbf148d8: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f93fbf148db: jae      0x00007f93fbf149e0
+ 12.31%  18.39%  0x7f93fbf148e1: movsxd   r8,r8d
+  0.21%   0.09%  0x7f93fbf148e4: movsxd   r9,esi
+  0.04%   0.02%  0x7f93fbf148e7: add      r9,r8
+  0.36%   0.36%  0x7f93fbf148ea: vmovq    r8,xmm10
+  0.06%   0.04%  0x7f93fbf148ef: mov      r9d,DWORD PTR [r8+r9*4+0x10]
+ 30.86%  23.69%  0x7f93fbf148f4: test     r9d,0xc0000000
+  0.00%   0.00%  0x7f93fbf148fb: jne      0x00007f93fbf14532
+  0.27%   0.34%  0x7f93fbf14901: lea      r8d,[r11+0x1]
+  0.04%   0.03%  0x7f93fbf14905: movsxd   rsi,r11d
+  0.17%   0.25%  0x7f93fbf14908: movzx    eax,BYTE PTR [r13+rsi*1+0x11]
+  0.03%   0.06%  0x7f93fbf1490e: cmp      eax,edi
+  0.00%   0.00%  0x7f93fbf14910: jae      0x00007f93fbf14977
+  0.01%   0.01%  0x7f93fbf14912: movzx    esi,BYTE PTR [rcx+rax*1+0x10]
+  0.06%   0.10%  0x7f93fbf14917: lea      eax,[rsi+r9*1]
+  0.81%   1.51%  0x7f93fbf1491b: cmp      eax,DWORD PTR [rsp]
+  0.00%   0.00%  0x7f93fbf1491e: jae      0x00007f93fbf149e6
+ 12.69%  20.05%  0x7f93fbf14924: movsxd   rax,esi
+  0.16%   0.09%  0x7f93fbf14927: movsxd   rsi,r9d
+  0.06%   0.06%  0x7f93fbf1492a: add      rax,rsi
+  0.36%   0.53%  0x7f93fbf1492d: vmovq    rsi,xmm10
+  0.06%   0.03%  0x7f93fbf14932: mov      esi,DWORD PTR [rsi+rax*4+0x10]
+ 31.31%  24.41%  0x7f93fbf14936: test     esi,0xc0000000
+  0.00%   0.00%  0x7f93fbf1493c: jne      0x00007f93fbf14538
+  0.33%   0.36%  0x7f93fbf14942: add      r11d,0x2
+  0.05%   0.03%  0x7f93fbf14946: cmp      r11d,ebp
+  0.00%   0.00%  0x7f93fbf14949: jl       0x00007f93fbf148c0

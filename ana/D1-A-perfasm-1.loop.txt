@@ -1,0 +1,43 @@
+# D1/A-perfasm-1 c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 863
+  2.42%   1.14%  0x7fd08ff1455b: mov      r8d,DWORD PTR [rsp+0x88]
+  0.25%   0.20%  0x7fd08ff14563: mov      ecx,eax
+  0.87%   0.66%  0x7fd08ff14565: mov      edx,DWORD PTR [rsp+0x28]
+  1.45%   0.62%  0x7fd08ff14569: cmp      edx,DWORD PTR [rsp+0x30]
+  0.00%   0.00%  0x7fd08ff1456d: jge      0x00007fd08ff14732
+  0.56%   0.30%  0x7fd08ff14573: mov      r9,QWORD PTR [rsp+0x18]
+  1.79%   0.44%  0x7fd08ff14578: mov      DWORD PTR [rsp+0x88],r8d
+  3.13%   1.10%  0x7fd08ff14580: mov      eax,ecx
+  0.41%   0.16%  0x7fd08ff14582: mov      r14d,r10d
+  2.34%   0.64%  0x7fd08ff14585: mov      ecx,DWORD PTR [r9+0xf4]
+  0.23%   0.13%  0x7fd08ff1458c: mov      QWORD PTR [rsp+0x18],r9
+  1.24%   0.31%  0x7fd08ff14591: lea      r11d,[rdx+0x1]
+  1.61%   0.45%  0x7fd08ff14595: mov      DWORD PTR [rsp+0x28],r11d
+  0.69%   0.30%  0x7fd08ff1459a: mov      r10,QWORD PTR [rsp+0x60]
+  1.69%   0.55%  0x7fd08ff1459f: movzx    r8d,BYTE PTR [r10+rdx*1+0x10]
+  2.99%   1.34%  0x7fd08ff145a5: mov      r10d,DWORD PTR [r12+rcx*8+0xc]
+  0.45%   0.21%  0x7fd08ff145aa: cmp      r8d,r10d
+  0.00%   0.00%  0x7fd08ff145ad: jae      0x00007fd08ff14d0f
+  2.46%   0.99%  0x7fd08ff145b3: lea      r10,[r12+rcx*8]
+  0.08%   0.17%  0x7fd08ff145b7: movzx    r11d,BYTE PTR [r10+r8*1+0x10]
+  1.09%   0.35%  0x7fd08ff145bd: lea      r10d,[r14+r11*1]
+  1.24%   0.77%  0x7fd08ff145c1: mov      ecx,DWORD PTR [rsp+0x90]
+  1.57%   1.73%  0x7fd08ff145c8: mov      r9d,DWORD PTR [r12+rcx*8+0xc]
+  6.35%   8.20%  0x7fd08ff145cd: cmp      r10d,r9d
+  0.00%   0.00%  0x7fd08ff145d0: jae      0x00007fd08ff14d54
+ 11.63%  14.06%  0x7fd08ff145d6: movsxd   r10,r11d
+  0.99%   1.91%  0x7fd08ff145d9: movsxd   r11,r14d
+  8.27%  10.57%  0x7fd08ff145dc: add      r11,r10
+  0.40%   0.53%  0x7fd08ff145df: mov      r10,QWORD PTR [rsp+0x68]
+  3.93%   3.87%  0x7fd08ff145e4: mov      r11d,DWORD PTR [r10+r11*4+0x10]
+ 15.17%  23.20%  0x7fd08ff145e9: cmp      r11d,0xfffffffd
+  0.00%   0.00%  0x7fd08ff145ed: je       0x00007fd08ff14dc3
+  7.98%  10.11%  0x7fd08ff145f3: cmp      r11d,0x80000000
+  0.00%   0.00%  0x7fd08ff145fa: je       0x00007fd08ff14e20
+  2.65%   2.88%  0x7fd08ff14600: cmp      r11d,0xffffffff
+  0.00%   0.00%  0x7fd08ff14604: je       0x00007fd08ff14e7c
+  3.55%   3.40%  0x7fd08ff1460a: cmp      r11d,0xfffffffe
+  0.00%   0.00%  0x7fd08ff1460e: je       0x00007fd08ff14e9c
+  3.87%   2.70%  0x7fd08ff14614: mov      r10d,r11d
+  0.00%   0.00%  0x7fd08ff14617: and      r10d,0xbfffffff
+  0.49%   0.40%  0x7fd08ff1461e: test     r11d,0x40000000
+  0.00%   0.00%  0x7fd08ff14625: je       0x00007fd08ff1455b

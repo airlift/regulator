@@ -1,0 +1,55 @@
+job D1 bundle a revision 80bccc124bfcdfa6e8cc8b5ff2c880b9cd1d4e75 host  cpu Intel(R) Xeon(R) 6975P-C
+jdk OpenJDK 64-Bit Server VM Temurin-25.0.4+7 (build 25.0.4+7-LTS, mixed mode, sharing)
+row ^io.airlift.regulator.BenchmarkPatternCollections\.matchingSetPatternIds$ prof perfasm:intelSyntax=true;events=cycles,instructions;top=3;saveLog=true;saveLogToFile=/home/ec2-user/runs/D1/A-perfasm-3.perfasm
+jvmArgs --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds
+# Parameters: (patternCount = 16, sourceLength = 32768)
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfAsmProfiler 
+# Profilers consume stdout and stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   1: 87538.918 ns/op
+# Warmup Iteration   2: 75867.342 ns/op
+# Warmup Iteration   3: 74066.794 ns/op
+# Warmup Iteration   4: 74184.293 ns/op
+# Warmup Iteration   5: 77266.186 ns/op
+# Warmup Iteration   6: 81049.074 ns/op
+# Warmup Iteration   7: 73697.655 ns/op
+# Warmup Iteration   8: 75754.150 ns/op
+# Warmup Iteration   9: 79433.290 ns/op
+# Warmup Iteration  10: 83814.925 ns/op
+Iteration   1: 77848.004 ns/op
+Iteration   2: 74358.160 ns/op
+Iteration   3: 73962.007 ns/op
+Iteration   4: 73877.909 ns/op
+Iteration   5: 74524.052 ns/op
+Iteration   6: 74391.212 ns/op
+Iteration   7: 73721.855 ns/op
+Iteration   8: 74033.969 ns/op
+Iteration   9: 73802.507 ns/op
+Iteration  10: 74246.551 ns/op
+# Processing profiler results: LinuxPerfAsmProfiler 
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds":
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:asm":
+Perf output processed (skipped 13.993 seconds):
+Perf-annotated Hotspot log is saved to /home/ec2-user/runs/D1/A-perfasm-3.perfasm
+# Run complete. Total time: 00:00:27
+Benchmark                                              (patternCount)  (sourceLength)  Mode  Cnt      Score      Error  Units
+BenchmarkPatternCollections.matchingSetPatternIds                  16           32768  avgt   10  74476.623 ± 1836.909  ns/op
+BenchmarkPatternCollections.matchingSetPatternIds:asm              16           32768  avgt             NaN               ---
+Benchmark result is saved to /home/ec2-user/runs/D1/A-perfasm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    3656 Nov 18 09:03 /home/ec2-user/runs/D1/A-perfasm-3.console.zst
+-rw-rw-r--. 1 ec2-user ec2-user    2972 Nov 18 09:03 /home/ec2-user/runs/D1/A-perfasm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    2957 Nov 18 09:03 /home/ec2-user/runs/D1/A-perfasm-3.log
+-rw-rw-r--. 1 ec2-user ec2-user 1632809 Nov 18 09:03 /home/ec2-user/runs/D1/A-perfasm-3.perfasm.zst
+rc 0 ok 1
