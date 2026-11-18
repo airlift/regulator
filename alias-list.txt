@@ -1,0 +1,16 @@
+# perf list | grep -i alias:
+ld_blocks_partial.address_alias: event syntax error: 'ld_blocks_partial.address_alias'
+                     \___ parser error
+Run 'perf list' for a list of valid events
+
+ Usage: perf stat [<options>] [<command>]
+
+    -e, --event <event>   event selector. use 'perf list' to list available events
+ld_blocks.address_alias: event syntax error: 'ld_blocks.address_alias'
+                     \___ parser error
+Run 'perf list' for a list of valid events
+
+ Usage: perf stat [<options>] [<command>]
+
+    -e, --event <event>   event selector. use 'perf list' to list available events
+r0403: 443,,r0403,440103,100.00,,

@@ -1,0 +1,91 @@
+bundle a revision 80bccc124bfcdfa6e8cc8b5ff2c880b9cd1d4e75 prof perfnorm:events=cycles,instructions,r0403
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/home/ec2-user/bundles/deps/jars/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds
+# Parameters: (patternCount = 16, sourceLength = 32768)
+
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfNormProfiler 
+# Profilers consume stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   1: 75274.981 ns/op
+# Warmup Iteration   2: 71740.983 ns/op
+# Warmup Iteration   3: 71765.976 ns/op
+# Warmup Iteration   4: 71707.309 ns/op
+# Warmup Iteration   5: 71785.042 ns/op
+# Warmup Iteration   6: 71778.092 ns/op
+# Warmup Iteration   7: 71779.560 ns/op
+# Warmup Iteration   8: 72217.159 ns/op
+# Warmup Iteration   9: 71744.398 ns/op
+# Warmup Iteration  10: 71714.378 ns/op
+Iteration   1: 71730.588 ns/op
+Iteration   2: 71674.319 ns/op
+Iteration   3: 71743.329 ns/op
+Iteration   4: 71693.902 ns/op
+Iteration   5: 71721.603 ns/op
+Iteration   6: 71691.172 ns/op
+Iteration   7: 71723.788 ns/op
+Iteration   8: 71748.617 ns/op
+Iteration   9: 71746.042 ns/op
+Iteration  10: 71761.870 ns/op
+# Processing profiler results: LinuxPerfNormProfiler 
+
+
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds":
+  71723.523 ±(99.9%) 43.347 ns/op [Average]
+  (min, avg, max) = (71674.319, 71723.523, 71761.870), stdev = 28.671
+  CI (99.9%): [71680.176, 71766.870] (assumes normal distribution)
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:CPI":
+  0.224 clks/insn
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:IPC":
+  4.454 insns/clk
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:cycles":
+  279797.339 #/op
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:instructions":
+  1246317.784 #/op
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:r0403":
+  5.960 #/op
+
+
+# Run complete. Total time: 00:00:22
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                                       (patternCount)  (sourceLength)  Mode  Cnt        Score    Error      Units
+BenchmarkPatternCollections.matchingSetPatternIds                           16           32768  avgt   10    71723.523 ± 43.347      ns/op
+BenchmarkPatternCollections.matchingSetPatternIds:CPI                       16           32768  avgt             0.224           clks/insn
+BenchmarkPatternCollections.matchingSetPatternIds:IPC                       16           32768  avgt             4.454           insns/clk
+BenchmarkPatternCollections.matchingSetPatternIds:cycles                    16           32768  avgt        279797.339                #/op
+BenchmarkPatternCollections.matchingSetPatternIds:instructions              16           32768  avgt       1246317.784                #/op
+BenchmarkPatternCollections.matchingSetPatternIds:r0403                     16           32768  avgt             5.960                #/op
+
+Benchmark result is saved to /home/ec2-user/runs/D/A-perfnorm.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user 6761 Nov 18 08:02 /home/ec2-user/runs/D/A-perfnorm.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user 5002 Nov 18 08:02 /home/ec2-user/runs/D/A-perfnorm.log

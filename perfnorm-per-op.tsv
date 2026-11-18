@@ -1,0 +1,4 @@
+leg	fork	mode	score_ns_per_op	cycles_per_op	instructions_per_op	r0403_alias_per_op	IPC	cycles_per_byte
+A	A-perfnorm	fast	71723.5	279797	1246318	6.0	4.45	8.54
+C	C-perfnorm	fast	74196.5	289435	1311826	5.5	4.53	8.83
+D	D-perfnorm	slow (spilled state)	118006.4	461555	1215183	15.6	2.63	14.09

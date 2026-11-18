@@ -1,0 +1,203 @@
+bundle c revision c46ea32784f3f572a98932d81b8082a492cb5fb0 prof perfasm:intelSyntax=true;top=3;saveLog=true;saveLogToFile=/home/ec2-user/runs/D/C-perfasm-3.perfasm
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/home/ec2-user/bundles/deps/jars/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.4, OpenJDK 64-Bit Server VM, 25.0.4+7-LTS
+# VM invoker: /opt/jdk-25.0.4+7/bin/java
+# VM options: --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Xms8g -Xmx8g -XX:+UseG1GC -XX:+AlwaysPreTouch
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 10 iterations, 1 s each
+# Measurement: 10 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds
+# Parameters: (patternCount = 16, sourceLength = 32768)
+
+# Run progress: 0.00% complete, ETA 00:00:20
+# Fork: 1 of 1
+# Preparing profilers: LinuxPerfAsmProfiler 
+# Profilers consume stdout and stderr from target VM, use -v EXTRA to copy to console
+# Warmup Iteration   1: 132036.528 ns/op
+# Warmup Iteration   2: 116670.718 ns/op
+# Warmup Iteration   3: 114655.858 ns/op
+# Warmup Iteration   4: 114450.493 ns/op
+# Warmup Iteration   5: 114664.075 ns/op
+# Warmup Iteration   6: 125692.606 ns/op
+# Warmup Iteration   7: 114763.739 ns/op
+# Warmup Iteration   8: 117801.428 ns/op
+# Warmup Iteration   9: 114196.666 ns/op
+# Warmup Iteration  10: 129266.635 ns/op
+Iteration   1: 116465.854 ns/op
+Iteration   2: 118630.271 ns/op
+Iteration   3: 115223.568 ns/op
+Iteration   4: 114035.724 ns/op
+Iteration   5: 114007.138 ns/op
+Iteration   6: 114020.070 ns/op
+Iteration   7: 115903.449 ns/op
+Iteration   8: 114077.399 ns/op
+Iteration   9: 114003.881 ns/op
+Iteration  10: 113960.768 ns/op
+# Processing profiler results: LinuxPerfAsmProfiler 
+
+
+Result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds":
+  115032.812 ±(99.9%) 2362.798 ns/op [Average]
+  (min, avg, max) = (113960.768, 115032.812, 118630.271), stdev = 1562.844
+  CI (99.9%): [112670.014, 117395.610] (assumes normal distribution)
+
+Secondary result "io.airlift.regulator.BenchmarkPatternCollections.matchingSetPatternIds:asm":
+PrintAssembly processed: 203921 total address lines.
+Perf output processed (skipped 13.856 seconds):
+ Column 1: cycles (10523 events)
+
+Hottest code regions (>10.00% "cycles" events):
+ Event counts are percents of total event count.
+
+....[Hottest Region 1]..............................................................................
+c2, level 4, io.airlift.regulator.Dfa::searchMany, version 2, compile id 841 
+
+              0x00007f84d3f13b3d:   jae    0x00007f84d3f144f0
+              0x00007f84d3f13b43:   lea    rbp,[r12+r8*8]               ;*getfield transitions {reexecute=0 rethrow=0 return_oop=0}
+                                                                        ; - io.airlift.regulator.Dfa::searchMany@270 (line 2671)
+              0x00007f84d3f13b47:   lea    r13,[r12+rdi*8]              ;*getfield base {reexecute=0 rethrow=0 return_oop=0}
+                                                                        ; - io.airlift.slice.Slice::byteArray@1 (line 175)
+                                                                        ; - io.airlift.regulator.Dfa::searchMany@259 (line 2669)
+              0x00007f84d3f13b4b:   mov    ebx,r11d
+              0x00007f84d3f13b4e:   mov    DWORD PTR [rsp+0x34],ecx
+              0x00007f84d3f13b52:   xor    r9d,r9d
+          ╭   0x00007f84d3f13b55:   jmp    0x00007f84d3f13b89
+   2.84%  │↗  0x00007f84d3f13b57:   mov    r10d,DWORD PTR [rsp+0x38]
+   0.16%  ││  0x00007f84d3f13b5c:   mov    r9d,r14d                     ;*goto {reexecute=0 rethrow=0 return_oop=0}
+          ││                                                            ; - io.airlift.regulator.Dfa::searchMany@595 (line 2713)
+   0.02%  ││  0x00007f84d3f13b5f:   mov    ebx,DWORD PTR [rsp+0x28]
+   0.31%  ││  0x00007f84d3f13b63:   cmp    ebx,DWORD PTR [rsp+0x2c]
+          ││  0x00007f84d3f13b67:   jge    0x00007f84d3f13e53           ;*if_icmpge {reexecute=0 rethrow=0 return_oop=0}
+          ││                                                            ; - io.airlift.regulator.Dfa::searchMany@279 (line 2672)
+   0.22%  ││  0x00007f84d3f13b6d:   mov    ecx,DWORD PTR [rsp+0x20]
+   2.02%  ││  0x00007f84d3f13b71:   mov    edi,DWORD PTR [rsp+0x3c]
+   1.66%  ││  0x00007f84d3f13b75:   mov    r8d,DWORD PTR [rsp+0x30]
+   0.01%  ││  0x00007f84d3f13b7a:   mov    rsi,QWORD PTR [rsp+0x58]
+   2.96%  ││  0x00007f84d3f13b7f:   mov    r13,QWORD PTR [rsp+0x60]
+   0.13%  ││  0x00007f84d3f13b84:   mov    DWORD PTR [rsp+0x34],r11d    ;*aload {reexecute=0 rethrow=0 return_oop=0}
+          ││                                                            ; - io.airlift.regulator.Dfa::searchMany@282 (line 2673)
+   0.15%  ↘│  0x00007f84d3f13b89:   movzx  r11d,BYTE PTR [r13+rbx*1+0x10];*iand {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@293 (line 2673)
+   0.37%   │  0x00007f84d3f13b8f:   inc    ebx                          ;*iinc {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@286 (line 2673)
+   0.20%   │  0x00007f84d3f13b91:   mov    rdx,QWORD PTR [rsp+0x18]
+   1.92%   │  0x00007f84d3f13b96:   mov    edx,DWORD PTR [rdx+0xf4]     ;*getfield bytemap {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@301 (line 2674)
+   1.89%   │  0x00007f84d3f13b9c:   mov    eax,DWORD PTR [r12+rdx*8+0xc]; implicit exception: dispatches to 0x00007f84d3f1471c
+           │                                                            ;*baload {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@306 (line 2674)
+           │  0x00007f84d3f13ba1:   cmp    r11d,eax
+           │  0x00007f84d3f13ba4:   jae    0x00007f84d3f140a2
+   2.76%   │  0x00007f84d3f13baa:   mov    r14d,r9d
+   0.21%   │  0x00007f84d3f13bad:   mov    DWORD PTR [rsp+0x28],ebx
+   0.10%   │  0x00007f84d3f13bb1:   mov    QWORD PTR [rsp+0x60],r13
+   0.48%   │  0x00007f84d3f13bb6:   mov    QWORD PTR [rsp+0x58],rsi
+   0.15%   │  0x00007f84d3f13bbb:   mov    DWORD PTR [rsp+0x30],r8d
+   1.61%   │  0x00007f84d3f13bc0:   mov    DWORD PTR [rsp+0x3c],edi
+   2.49%   │  0x00007f84d3f13bc4:   mov    DWORD PTR [rsp+0x20],ecx     ;   {other}
+   0.01%   │  0x00007f84d3f13bc8:   mov    DWORD PTR [rsp+0x38],r10d
+   2.94%   │  0x00007f84d3f13bcd:   lea    r10,[r12+rdx*8]
+   0.41%   │  0x00007f84d3f13bd1:   movzx  r10d,BYTE PTR [r10+r11*1+0x10];*iand {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@310 (line 2674)
+   0.18%   │  0x00007f84d3f13bd7:   mov    ecx,DWORD PTR [rsp+0x34]
+           │  0x00007f84d3f13bdb:   add    ecx,r10d                     ;*iadd {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@311 (line 2674)
+  10.26%   │  0x00007f84d3f13bde:   mov    r8d,DWORD PTR [r12+r8*8+0xc] ; implicit exception: dispatches to 0x00007f84d3f14768
+   0.07%   │  0x00007f84d3f13be3:   cmp    ecx,r8d
+           │  0x00007f84d3f13be6:   jae    0x00007f84d3f140f0
+   6.08%   │  0x00007f84d3f13bec:   movsxd r8,r10d
+   0.28%   │  0x00007f84d3f13bef:   movsxd r10,DWORD PTR [rsp+0x34]
+           │  0x00007f84d3f13bf4:   add    r10,r8
+   0.78%   │  0x00007f84d3f13bf7:   mov    r8d,DWORD PTR [rbp+r10*4+0x10];*iaload {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::getTransition@2 (line 2922)
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@312 (line 2674)
+  34.59%   │  0x00007f84d3f13bfc:   cmp    r8d,0xfffffffd
+   0.30%   │  0x00007f84d3f13c00:   je     0x00007f84d3f14148           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@321 (line 2675)
+   8.10%   │  0x00007f84d3f13c06:   cmp    r8d,0x80000000
+           │  0x00007f84d3f13c0d:   je     0x00007f84d3f141b4           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@355 (line 2680)
+   1.33%   │  0x00007f84d3f13c13:   cmp    r8d,0xffffffff
+           │  0x00007f84d3f13c17:   je     0x00007f84d3f14220           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@504 (line 2700)
+   4.32%   │  0x00007f84d3f13c1d:   cmp    r8d,0xfffffffe
+           │  0x00007f84d3f13c21:   je     0x00007f84d3f14244           ;*if_icmpne {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@536 (line 2703)
+   2.17%   │  0x00007f84d3f13c27:   mov    r11d,r8d
+           │  0x00007f84d3f13c2a:   and    r11d,0xbfffffff              ;*iand {reexecute=0 rethrow=0 return_oop=0}
+           │                                                            ; - io.airlift.regulator.Dfa::searchMany@572 (line 2708)
+   0.01%   │  0x00007f84d3f13c31:   test   r8d,0x40000000
+           ╰  0x00007f84d3f13c38:   je     0x00007f84d3f13b57           ;*ifeq {reexecute=0 rethrow=0 return_oop=0}
+                                                                        ; - io.airlift.regulator.Dfa::searchMany@577 (line 2709)
+              0x00007f84d3f13c3e:   mov    DWORD PTR [rsp+0x24],r11d
+              0x00007f84d3f13c43:   mov    QWORD PTR [rsp+0x68],rbp
+              0x00007f84d3f13c48:   mov    rsi,QWORD PTR [rsp+0x18]
+              0x00007f84d3f13c4d:   mov    edx,r11d
+              0x00007f84d3f13c50:   data16 xchg ax,ax
+              0x00007f84d3f13c53:   call   0x00007f84d3986ae0           ; ImmutableOopMap {[24]=Oop [48]=NarrowOop [56]=NarrowOop [60]=NarrowOop [64]=Oop [72]=Oop [88]=Oop [96]=Oop [104]=Oop }
+                                                                        ;*invokevirtual stateIndex {reexecute=0 rethrow=0 return_oop=0}
+....................................................................................................
+  94.48%  <total for region 1>
+
+....[Hottest Regions]...............................................................................
+  94.48%           c2, level 4  io.airlift.regulator.Dfa::searchMany, version 2, compile id 841 
+   0.34%             libjvm.so  ElfSymbolTable::lookup 
+   0.23%     [kernel.kallsyms]  pvclock_clocksource_read 
+   4.95%  <...other 283 warm regions...>
+....................................................................................................
+ 100.00%  <totals>
+
+....[Hottest Methods (after inlining)]..............................................................
+  94.51%           c2, level 4  io.airlift.regulator.Dfa::searchMany, version 2, compile id 841 
+   0.41%                        <unknown> 
+   0.34%             libjvm.so  ElfSymbolTable::lookup 
+   4.74%  <...other 191 warm methods...>
+....................................................................................................
+ 100.00%  <totals>
+
+....[Distribution by Source]........................................................................
+  94.51%           c2, level 4
+   3.22%     [kernel.kallsyms]
+   1.10%             libjvm.so
+   0.48%             libc.so.6
+   0.41%                      
+   0.13%           interpreter
+   0.10%        hsdis-amd64.so
+   0.03%  ld-linux-x86-64.so.2
+   0.02%           c1, level 3
+   0.01%           c1, level 1
+....................................................................................................
+ 100.00%  <totals>
+
+Perf-annotated Hotspot log is saved to /home/ec2-user/runs/D/C-perfasm-3.perfasm
+
+
+# Run complete. Total time: 00:00:27
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                              (patternCount)  (sourceLength)  Mode  Cnt       Score      Error  Units
+BenchmarkPatternCollections.matchingSetPatternIds                  16           32768  avgt   10  115032.812 ± 2362.798  ns/op
+BenchmarkPatternCollections.matchingSetPatternIds:asm              16           32768  avgt              NaN               ---
+
+Benchmark result is saved to /home/ec2-user/runs/D/C-perfasm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user    2997 Nov 18 08:06 /home/ec2-user/runs/D/C-perfasm-3.json.tmp
+-rw-rw-r--. 1 ec2-user ec2-user   14225 Nov 18 08:06 /home/ec2-user/runs/D/C-perfasm-3.log
+-rw-rw-r--. 1 ec2-user ec2-user 1566482 Nov 18 08:06 /home/ec2-user/runs/D/C-perfasm-3.perfasm.zst
