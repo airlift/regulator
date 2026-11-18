@@ -244,8 +244,12 @@ final class ScanKernelSupport
     /// A copy of `ScanPlanRun.re2MatchBefore`.
     static int re2RunMatchBefore(ScanPlanRun run, byte[] input, int cursor, int end, byte delimiter)
     {
-        int stop = re2RunMatch(run, input, cursor, end);
-        return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
+        int stop = re2RunByteStop(input, cursor, end, delimiter & 0x7F);
+        if (stop < end && input[stop] < 0) {
+            stop = VectorSupport.isAvailable() ? re2RunScanNonAscii(input, cursor, stop, end, delimiter) : re2RunScan(run, input, stop, end);
+            return stop - cursor >= run.minimum() && stop < end && input[stop] == delimiter ? stop : -1;
+        }
+        return stop - cursor >= run.minimum() && stop < end ? stop : -1;
     }
 
     // A copy of ScanPlanRun.re2MemberWidth.
@@ -301,15 +305,36 @@ final class ScanKernelSupport
     // A copy of ScanPlanRun.re2ScanBlocks.
     private static int re2RunScanBlocks(byte[] input, int cursor, int end, int stopByte)
     {
+        return re2RunScanNonAscii(input, cursor, re2RunByteStop(input, cursor, end, stopByte), end, stopByte);
+    }
+
+    // A copy of ScanPlanRun.re2ByteStop.
+    private static int re2RunByteStop(byte[] input, int cursor, int end, int stopByte)
+    {
+        if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
+            return VectorScanKernelSupport.findRe2ByteStop(input, cursor, end, stopByte);
+        }
+        int needle = Math.max(stopByte, 0);
+        int bound = stopByte >= 0 ? 1 : 0;
+        while (cursor < end && (input[cursor] ^ needle) >= bound) {
+            cursor++;
+        }
+        return cursor;
+    }
+
+    // A copy of ScanPlanRun.re2ScanNonAscii.
+    private static int re2RunScanNonAscii(byte[] input, int cursor, int stop, int end, int stopByte)
+    {
+        int lastBlockStop = VectorScanKernelSupport.findRe2LastBlockStop(input, cursor, stop, end, stopByte);
+        return lastBlockStop >= 0 ? lastBlockStop : re2RunWalkNonAscii(input, stop, end, stopByte);
+    }
+
+    // A copy of ScanPlanRun.re2WalkNonAscii.
+    private static int re2RunWalkNonAscii(byte[] input, int cursor, int end, int stopByte)
+    {
         while (true) {
             if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
-                cursor = VectorScanKernelSupport.findRe2ByteStop(input, cursor, end, stopByte);
-                if (cursor == end || input[cursor] >= 0) {
-                    return cursor;
-                }
-                if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
-                    cursor = VectorScanKernelSupport.skipRe2Run(input, cursor, end, stopByte);
-                }
+                cursor = VectorScanKernelSupport.skipRe2Run(input, cursor, end, stopByte);
             }
             int limit = ScanPlanRun.re2WalkLimit(cursor, end);
             while (cursor < limit) {
@@ -329,6 +354,12 @@ final class ScanKernelSupport
             }
             if (cursor >= end) {
                 return cursor;
+            }
+            if (end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES) {
+                cursor = VectorScanKernelSupport.findRe2ByteStop(input, cursor, end, stopByte);
+                if (cursor == end || input[cursor] >= 0) {
+                    return cursor;
+                }
             }
         }
     }
