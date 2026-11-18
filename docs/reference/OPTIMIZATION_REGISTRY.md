@@ -361,7 +361,12 @@ its current and start states instead of starting over.
 **Effect**: A matching state stores the match IDs of every pattern that matched
 after a `MatchSep` marker, and the search loop inserts them into the caller's
 set. Many-match never returns `FullMatchState` and never bails to the NFA when
-the cache thrashes, since `RE2::Set` has no fallback.
+the cache thrashes, since `RE2::Set` has no fallback. The IDs are those of the
+queue before the byte that entered the state, so a state pairs its frontier
+with the previous frontier's matches. In a program with no empty-width
+assertion, Regulator's state holds its own frontier's matches instead, as
+[Many-Match States Hold Their Own Matches](../../REGULATOR_DECISIONS.md#many-match-states-hold-their-own-matches)
+describes.
 
 ---
 
