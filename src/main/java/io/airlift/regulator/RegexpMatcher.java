@@ -543,6 +543,10 @@ public final class RegexpMatcher
                     if (dfaQuitStreak != 0) {
                         dfaQuitStreak = 0;
                     }
+                    // Timing placebo: a branch no find takes, the size of the bookkeeping #278 adds here.
+                    if (nextFindStart < 0) {
+                        placeboNeverCalled(groups[0], groups[1], regionStart, regionEnd, retryStart, previousMatchEnd, nextFindStart);
+                    }
                     setMatchAndAdvance(groups[0], groups[1]);
                     return true;
                 }
@@ -716,6 +720,12 @@ public final class RegexpMatcher
                 groups[index] -= regionStart;
             }
         }
+    }
+
+    // Timing placebo; never called.
+    private static void placeboNeverCalled(int start, int end, int regionStart, int regionEnd, int retryStart, int previousMatchEnd, int nextFindStart)
+    {
+        throw new IllegalStateException("placebo " + start + " " + end + " " + regionStart + " " + regionEnd + " " + retryStart + " " + previousMatchEnd + " " + nextFindStart);
     }
 
     // A failed find leaves no match, and the next find searches again from retryStart.
