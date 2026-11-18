@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +66,19 @@ class TestBaselinePublicApiBenchmarks
                 assertThat(benchmark.potentialPatternIds(data)).containsExactly(IntStream.range(0, patternCount).toArray());
                 assertThat(benchmark.firstMatchingPatternId(data)).isEqualTo(patternCount - 1);
                 assertThat(benchmark.matchingFilteredPatternIds(data)).containsExactly(patternCount - 1);
+
+                BenchmarkPatternCollections.MatchDenseData denseData = new BenchmarkPatternCollections.MatchDenseData();
+                denseData.patternCount = patternCount;
+                denseData.sourceLength = sourceLength;
+                denseData.setup();
+
+                // The text ends wherever the length cuts it, so a pattern matches only if its whole
+                // prefix and a digit made it in.
+                String denseText = denseData.source.toStringUtf8();
+                int[] denseMatches = IntStream.range(0, patternCount)
+                        .filter(patternId -> Pattern.compile("prefix" + patternId + "-[0-9]").matcher(denseText).find())
+                        .toArray();
+                assertThat(benchmark.matchingSetPatternIdsMatchDense(denseData)).containsExactly(denseMatches);
             }
         }
     }
