@@ -90,8 +90,6 @@ final class Dfa
     private static final int SHORT_PAIRED_SEARCH_BYTES = 16;
     private static final int SHORT_PAIRED_SEARCH_LIMIT = 16;
     private static final int SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT = 16;
-    // The matching states one many-match byte scan holds for its caller to record.
-    static final int MANY_MATCH_SCAN_STATES = 64;
     // Sidecar rows and entries are eight-byte aligned, so their low bits encode computed terminals.
     private static final long ABSOLUTE_POINTER_TAG_MASK = Long.BYTES - 1;
     private static final long ABSOLUTE_POINTER_MATCH_TAG = 1;
@@ -2637,9 +2635,6 @@ final class Dfa
             return ManyMatchResult.RESOURCE_EXHAUSTED;
         }
 
-        // The byte scan's matched states: slot 0 holds the count, and the following slots the
-        // matched state offsets.
-        int[] matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -2675,22 +2670,6 @@ final class Dfa
                 int position = textBegin;
                 int[] transitions = tables.transitions;
                 while (position < textEnd) {
-                    long scanned = scanManyBytes(transitions, dfa.bytemap, bytes, position, textEnd, stateOffset, matchedStates);
-                    position = (int) (scanned >>> 32);
-                    stateOffset = (int) scanned;
-                    // Record the states the scan matched in the tables it read them from, before
-                    // the step that handles the byte the scan stopped at can compute a transition,
-                    // reset, or retry.
-                    int matchedCount = matchedStates[0];
-                    if (matchedCount != 0) {
-                        matched = true;
-                        for (int index = 1; index <= matchedCount; index++) {
-                            recordMatches(dfa.stateData(tables, matchedStates[index]), matches);
-                        }
-                    }
-                    if (position == textEnd) {
-                        break;
-                    }
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
@@ -2779,85 +2758,6 @@ final class Dfa
                 dfa.endSearch(exclusiveSearch);
             }
         }
-    }
-
-    // Steps from position toward end through the many-match transition table, from stateOffset,
-    // stopping before a transition that is uncomputed, dead, or full-match, which searchMany's own
-    // step handles. matchedStates holds the count in slot 0 and the matched state offsets in the
-    // following slots. The scan steps through a matching transition, appending the state it enters
-    // unless that state is the one it appended last, and stops before a matching transition when
-    // matchedStates is full. Four bytes a step keep it larger than FreqInlineSize, so C2 compiles
-    // it on its own and allocates its registers from its own few live values rather than from
-    // searchMany's whole graph. Returns the position and state reached as position << 32 | state.
-    private static long scanManyBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int end, int stateOffset, int[] matchedStates)
-    {
-        int count = 0;
-        int lastMatchedState = -1;
-        int unrolledEnd = end - 3;
-        while (true) {
-            // The flagged transition of the byte at position, from stateOffset, or zero for none,
-            // since a flagged transition has its sign or match bit set.
-            int flagged = 0;
-            while (position < unrolledEnd) {
-                int first = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
-                if ((first & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
-                    flagged = first;
-                    break;
-                }
-                int second = getTransition(transitions, first + (byteMap[bytes[position + 1] & 0xFF] & 0xFF));
-                if ((second & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
-                    position++;
-                    stateOffset = first;
-                    flagged = second;
-                    break;
-                }
-                int third = getTransition(transitions, second + (byteMap[bytes[position + 2] & 0xFF] & 0xFF));
-                if ((third & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
-                    position += 2;
-                    stateOffset = second;
-                    flagged = third;
-                    break;
-                }
-                int fourth = getTransition(transitions, third + (byteMap[bytes[position + 3] & 0xFF] & 0xFF));
-                if ((fourth & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
-                    position += 3;
-                    stateOffset = third;
-                    flagged = fourth;
-                    break;
-                }
-                stateOffset = fourth;
-                position += 4;
-            }
-            if (flagged == 0) {
-                for (; position < end; position++) {
-                    int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
-                    if ((nextState & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
-                        flagged = nextState;
-                        break;
-                    }
-                    stateOffset = nextState;
-                }
-                if (flagged == 0) {
-                    break;
-                }
-            }
-            if (flagged < 0) {
-                break;
-            }
-            int matchedState = flagged & ~T_MATCH_BIT;
-            if (matchedState != lastMatchedState) {
-                if (count == matchedStates.length - 1) {
-                    break;
-                }
-                count++;
-                matchedStates[count] = matchedState;
-                lastMatchedState = matchedState;
-            }
-            stateOffset = matchedState;
-            position++;
-        }
-        matchedStates[0] = count;
-        return ((long) position << 32) | stateOffset;
     }
 
     @SuppressWarnings("UnusedException")
