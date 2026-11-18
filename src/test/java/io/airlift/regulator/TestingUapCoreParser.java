@@ -37,6 +37,9 @@ import static java.util.Objects.requireNonNull;
 ///   the atoms it finds select the candidate rules
 /// - the candidates run in ascending rule order, and the first that matches wins
 ///
+/// [#parseOneCall(Slice)] runs the same parse through [FilteredRe2#firstMatchResult(Slice)], which
+/// searches for the atoms itself, with an atom search of the same memory budget.
+///
 /// A user agent is cut at [#MAX_USER_AGENT_BYTES] before parsing. The bound models a calling
 /// application's input limit, not uap-core's specification.
 final class TestingUapCoreParser
@@ -121,7 +124,7 @@ final class TestingUapCoreParser
         fieldCount = section.resultFields().size();
         rules = section.rules();
         Re2.Options ruleOptions = Re2.Options.defaults().setMaxMemory(ruleMemory);
-        FilteredRe2.Builder filteredBuilder = FilteredRe2.builder();
+        FilteredRe2.Builder filteredBuilder = FilteredRe2.builder().setAtomSearchMaxMemory(atomSetMemory);
         for (Rule rule : rules) {
             filteredBuilder.add(Slices.utf8Slice(rule.regex()), ruleOptions);
         }
@@ -177,9 +180,27 @@ final class TestingUapCoreParser
         for (int ruleId : filteredRe2.potentialPatternIds(atomIds)) {
             MatchResult match = filteredRe2.pattern(ruleId).findResult(text);
             if (match != null) {
-                return new Parse(ruleId, fields(rules.get(ruleId), match));
+                return matched(ruleId, match);
             }
         }
+        return noMatch();
+    }
+
+    /// Returns the same parse as [#parse(Slice)], with [FilteredRe2#firstMatchResult(Slice)] finding
+    /// the atoms and the winning rule in one call.
+    Parse parseOneCall(Slice userAgent)
+    {
+        FilteredRe2.PatternMatch match = filteredRe2.firstMatchResult(cut(userAgent));
+        return match == null ? noMatch() : matched(match.patternId(), match.result());
+    }
+
+    private Parse matched(int ruleId, MatchResult match)
+    {
+        return new Parse(ruleId, fields(rules.get(ruleId), match));
+    }
+
+    private Parse noMatch()
+    {
         String[] fields = new String[fieldCount];
         fields[0] = NO_MATCH_FAMILY;
         return new Parse(NO_MATCH_RULE_ID, Arrays.asList(fields));
