@@ -21,8 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -338,6 +341,112 @@ public class TestFilteredRe2
         assertThat(buildFiltered(3, Re2.Options.defaults(), "bar", "foo\\d+")).isNotEqualTo(filtered);
         assertThat(buildFiltered(2, Re2.Options.defaults(), "foo\\d+", "bar")).isNotEqualTo(filtered);
         assertThat(buildFiltered(3, Re2.Options.defaults().setMaxMemory(16 << 20), "foo\\d+", "bar")).isNotEqualTo(filtered);
+
+        // The atom search's budget takes part, as a set's budget does.
+        FilteredRe2.Builder builder = FilteredRe2.builder(3).setAtomSearchMaxMemory(16 << 20);
+        builder.add(utf8("foo\\d+"), Re2.Options.defaults());
+        builder.add(utf8("bar"), Re2.Options.defaults());
+        assertThat(builder.build()).isNotEqualTo(filtered);
+    }
+
+    @Test
+    public void testOneCallMatching()
+    {
+        // Filtered and unfiltered patterns, case-insensitive patterns whose atoms match only the
+        // canonical text, and captures.
+        FilteredRe2 filtered = buildFiltered(3, Re2.Options.defaults(), "(?i)hello\\s+(\\w+)", "\\d+", "world", "(?i)ΔΣK");
+        assertOneCallMatches(filtered, utf8("HeLLo there"), 0);
+        assertOneCallMatches(filtered, utf8("hello world 42"), 0, 1, 2);
+        assertOneCallMatches(filtered, utf8("say world 42"), 1, 2);
+        assertOneCallMatches(filtered, utf8("δςk"), 3);
+        assertOneCallMatches(filtered, utf8("nothing here"));
+        assertThat(filtered.firstMatchResult(utf8("HeLLo there")).result().groupUtf8(1)).isEqualTo("there");
+
+        assertOneCallMatches(FilteredRe2.builder().build(), utf8("hello"));
+
+        // No pattern yields an atom, so every pattern is a candidate.
+        filtered = buildFiltered(100, Re2.Options.defaults(), "hello", "world");
+        assertThat(filtered.atoms()).isEmpty();
+        assertOneCallMatches(filtered, utf8("hello world"), 0, 1);
+        assertOneCallMatches(filtered, utf8("world"), 1);
+        assertOneCallMatches(filtered, utf8("goodbye"));
+
+        // A Latin-1 atom is matched byte for byte; 0xBE alone is not UTF-8.
+        FilteredRe2.Builder builder = FilteredRe2.builder();
+        builder.add(Slices.wrappedBuffer(new byte[] {(byte) 0xDE, (byte) 0xAD, 'Q', (byte) 0xBE, (byte) 0xEF}), Re2.Options.latin1());
+        builder.add(utf8("(?i)lemur"), Re2.Options.latin1());
+        filtered = builder.build();
+        assertOneCallMatches(filtered, Slices.wrappedBuffer(new byte[] {'f', 'o', 'o', (byte) 0xDE, (byte) 0xAD, 'Q', (byte) 0xBE, (byte) 0xEF, 'L', 'e', 'm', 'U', 'r'}), 0, 1);
+        assertOneCallMatches(filtered, Slices.wrappedBuffer(new byte[] {(byte) 0xDE, (byte) 0xAD, 'q', (byte) 0xBE, (byte) 0xEF}));
+    }
+
+    // Random small collections whose one-call results equal searching every pattern.
+    @Test
+    public void testOneCallMatchingEqualsSearchingEveryPattern()
+    {
+        Random random = new Random(20261117);
+        for (int collection = 0; collection < 300; collection++) {
+            boolean latin1 = random.nextInt(4) == 0;
+            String alphabet = latin1 ? "abcABC\u00E9\u00C90" : "abcABC\u03C3\u03A3\u03C2\u00E90";
+            Re2.Options options = latin1 ? Re2.Options.latin1() : Re2.Options.defaults();
+            FilteredRe2.Builder builder = FilteredRe2.builder(1 + random.nextInt(3));
+            int patternCount = 1 + random.nextInt(6);
+            for (int pattern = 0; pattern < patternCount; pattern++) {
+                builder.add(encode(randomPattern(random, alphabet), latin1), options);
+            }
+            FilteredRe2 filtered = builder.build();
+            for (int textIndex = 0; textIndex < 30; textIndex++) {
+                StringBuilder text = new StringBuilder();
+                int length = random.nextInt(25);
+                for (int character = 0; character < length; character++) {
+                    text.append(alphabet.charAt(random.nextInt(alphabet.length())));
+                }
+                Slice input = encode(text.toString(), latin1);
+                int[] expected = IntStream.range(0, filtered.patternCount())
+                        .filter(patternId -> filtered.pattern(patternId).find(input))
+                        .toArray();
+                assertOneCallMatches(filtered, input, expected);
+            }
+        }
+    }
+
+    @Test
+    public void testAtomSearchBudget()
+    {
+        assertThatThrownBy(() -> FilteredRe2.builder().setAtomSearchMaxMemory(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("atomSearchMaxMemory");
+        assertThatThrownBy(() -> FilteredRe2.builder().setAtomSearchMaxMemory(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("atomSearchMaxMemory");
+
+        // A collection whose atom search exceeds the default budget still builds, and its methods
+        // taking found atom IDs find what they always found; only the input-only methods need it.
+        Random random = new Random(20261118);
+        List<String> literals = new ArrayList<>();
+        FilteredRe2.Builder overBudget = FilteredRe2.builder();
+        for (int pattern = 0; pattern < 256; pattern++) {
+            literals.add(randomLiteral(random, "abcdefghijklmnopqrstuvwxyz", 1024));
+            overBudget.add(utf8(literals.getLast()), Re2.Options.defaults());
+        }
+        FilteredRe2 filtered = overBudget.build();
+        assertThat(filtered.atoms()).extracting(Slice::toStringUtf8).containsExactlyInAnyOrderElementsOf(literals);
+
+        Slice text = utf8("<" + literals.get(3) + literals.get(100) + literals.get(255) + ">");
+        int[] matchedAtomIds = findAtomIndices(filtered.atoms(), List.of(literals.get(3), literals.get(100), literals.get(255)));
+        assertThat(filtered.potentialPatternIds(matchedAtomIds)).containsExactly(3, 100, 255);
+        assertThat(filtered.matchingPatternIds(text, matchedAtomIds)).containsExactly(3, 100, 255);
+        assertThat(filtered.firstMatchingPatternId(text, matchedAtomIds)).isEqualTo(3);
+
+        String budgetMessage = Pattern.quote("FilteredRe2 atom search over the collection's 256 atoms exceeds atomSearchMaxMemory (%s bytes)".formatted(Re2.Options.DEFAULT_MAX_MEMORY)) +
+                " and needs at least \\d+ bytes" + Pattern.quote("; rebuild the collection with a larger FilteredRe2.Builder.setAtomSearchMaxMemory");
+        assertThatThrownBy(() -> filtered.matchingPatternIds(text)).isInstanceOf(IllegalStateException.class).hasMessageMatching(budgetMessage);
+        assertThatThrownBy(() -> filtered.firstMatchResult(text)).isInstanceOf(IllegalStateException.class).hasMessageMatching(budgetMessage);
+
+        // A collection without atoms builds no atom search, whatever its budget.
+        FilteredRe2.Builder builder = FilteredRe2.builder(100).setAtomSearchMaxMemory(1);
+        builder.add(utf8("hello"), Re2.Options.defaults());
+        assertOneCallMatches(builder.build(), utf8("hello"), 0);
     }
 
     @Test
@@ -675,6 +784,69 @@ public class TestFilteredRe2
         assertThat(Prefilter.exactCrossProductFits(46_341, 46_341)).isFalse();
         assertThat(Prefilter.exactCrossProductFits(4, 4)).isTrue();
         assertThat(Prefilter.exactCrossProductFits(17, 1)).isFalse();
+    }
+
+    // One-call results name the expected patterns, and the first carries the match its pattern
+    // finds on its own.
+    private static void assertOneCallMatches(FilteredRe2 filtered, Slice text, int... expectedPatternIds)
+    {
+        assertThat(filtered.matchingPatternIds(text))
+                .as("matchingPatternIds of %s", text.toStringUtf8())
+                .containsExactly(expectedPatternIds);
+        FilteredRe2.PatternMatch first = filtered.firstMatchResult(text);
+        if (expectedPatternIds.length == 0) {
+            assertThat(first).isNull();
+            return;
+        }
+        assertThat(first.patternId()).isEqualTo(expectedPatternIds[0]);
+        assertThat(groupOffsets(first.result())).isEqualTo(groupOffsets(filtered.pattern(expectedPatternIds[0]).findResult(text)));
+    }
+
+    private static List<Integer> groupOffsets(MatchResult result)
+    {
+        List<Integer> offsets = new ArrayList<>();
+        for (int group = 0; group <= result.groupCount(); group++) {
+            offsets.add(result.start(group));
+            offsets.add(result.end(group));
+        }
+        return offsets;
+    }
+
+    // A concatenation of literals, classes, repeats, and alternations, sometimes case-insensitive.
+    private static String randomPattern(Random random, String alphabet)
+    {
+        StringBuilder pattern = new StringBuilder(random.nextInt(3) == 0 ? "(?i)" : "");
+        int pieces = 1 + random.nextInt(3);
+        for (int piece = 0; piece < pieces; piece++) {
+            switch (random.nextInt(6)) {
+                case 0 -> pattern.append("[ab]");
+                case 1 -> pattern.append('.');
+                case 2 -> pattern.append("\\d+");
+                case 3 -> pattern.append('(').append(randomLiteral(random, alphabet)).append('|').append(randomLiteral(random, alphabet)).append(')');
+                case 4 -> pattern.append(randomLiteral(random, alphabet)).append('*');
+                default -> pattern.append(randomLiteral(random, alphabet));
+            }
+        }
+        return pattern.toString();
+    }
+
+    private static String randomLiteral(Random random, String alphabet)
+    {
+        return randomLiteral(random, alphabet, 1 + random.nextInt(4));
+    }
+
+    private static String randomLiteral(Random random, String alphabet, int length)
+    {
+        StringBuilder literal = new StringBuilder();
+        for (int character = 0; character < length; character++) {
+            literal.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return literal.toString();
+    }
+
+    private static Slice encode(String value, boolean latin1)
+    {
+        return latin1 ? Slices.wrappedBuffer(value.getBytes(StandardCharsets.ISO_8859_1)) : utf8(value);
     }
 
     private static FilteredRe2 buildFiltered(int minimumAtomLength, Re2.Options options, String... patterns)

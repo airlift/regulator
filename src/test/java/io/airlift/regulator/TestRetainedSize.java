@@ -36,6 +36,7 @@ import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestRetainedSize
 {
@@ -172,6 +173,11 @@ public class TestRetainedSize
                 .extracting(Class::getName)
                 .contains("java.util.HashMap$TreeNode");
         assertMatchesHeapGraph("treeified prefilter map (TreeNode)", TestRetainedSize::collidingAtoms, (_, _) -> {}, FilteredRe2::retainedSizeInBytes);
+        assertMatchesHeapGraph("FilteredRe2 after one-call matching (atom search DFA)", TestRetainedSize::collidingAtoms, FilteredRe2::matchingPatternIds, FilteredRe2::retainedSizeInBytes);
+        FilteredRe2 overBudget = atomSearchOverBudget();
+        assertThat(overBudget.atomSearchForDiagnostics()).as("an atom search over a 1-byte budget is left out").isNull();
+        assertThatThrownBy(() -> overBudget.matchingPatternIds(TEXT)).isInstanceOf(IllegalStateException.class);
+        assertMatchesHeapGraph("FilteredRe2 whose atom search exceeds its budget (keeps no atom search)", TestRetainedSize::atomSearchOverBudget, (_, _) -> {}, FilteredRe2::retainedSizeInBytes);
 
         Re2 pattern = Re2.compile(Slices.utf8Slice("(\\w*)(\\w)"));
         RegexpMatcher matcher = pattern.matcher(TEXT);
@@ -219,14 +225,12 @@ public class TestRetainedSize
         settle.accept(reference, SHORT_TEXT);
         long nativeBytes = 0;
         List<Object> phantomReferents = new ArrayList<>();
-        if (object instanceof CompiledPattern pattern) {
-            for (Dfa.DfaInstance dfa : dfas(pattern)) {
-                MemorySegment segment = dfa.absolutePointerTransitionSegment();
-                if (segment != null && segment.isNative()) {
-                    nativeBytes += dfa.absolutePointerTransitionMemory();
-                }
-                phantomReferents.addAll(supersededPointerTables(dfa));
+        for (Dfa.DfaInstance dfa : dfas(object)) {
+            MemorySegment segment = dfa.absolutePointerTransitionSegment();
+            if (segment != null && segment.isNative()) {
+                nativeBytes += dfa.absolutePointerTransitionMemory();
             }
+            phantomReferents.addAll(supersededPointerTables(dfa));
         }
         // JOL walks a phantom reference's referent as it walks any field, but a superseded native
         // pointer table is reachable only that way.
@@ -243,9 +247,23 @@ public class TestRetainedSize
                 .isBetween(1.0, 1.5);
     }
 
-    private static List<Dfa.DfaInstance> dfas(CompiledPattern pattern)
+    // The DFAs of a compiled pattern, or of a collection's patterns and its atom search.
+    private static List<Dfa.DfaInstance> dfas(Object object)
     {
         List<Dfa.DfaInstance> dfas = new ArrayList<>();
+        if (object instanceof FilteredRe2 filtered) {
+            for (int patternId = 0; patternId < filtered.patternCount(); patternId++) {
+                dfas.addAll(dfas(filtered.pattern(patternId)));
+            }
+            Re2Set atomSearch = filtered.atomSearchForDiagnostics();
+            if (atomSearch != null && atomSearch.dfaForDiagnostics() != null) {
+                dfas.add(atomSearch.dfaForDiagnostics());
+            }
+            return dfas;
+        }
+        if (!(object instanceof CompiledPattern pattern)) {
+            return dfas;
+        }
         for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.booleanProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
             if (program == null) {
                 continue;
@@ -308,6 +326,16 @@ public class TestRetainedSize
         FilteredRe2.Builder builder = FilteredRe2.builder();
         for (String atom : List.of("word16", "word170", "word218", "word385", "word396", "word452", "word482", "word492", "word507", "word508", "word663")) {
             builder.add(Slices.utf8Slice(atom), Re2.Options.defaults());
+        }
+        return builder.build();
+    }
+
+    // A collection whose atom search does not fit its one-byte budget, so it builds without one.
+    private static FilteredRe2 atomSearchOverBudget()
+    {
+        FilteredRe2.Builder builder = FilteredRe2.builder().setAtomSearchMaxMemory(1);
+        for (int keyword = 0; keyword < 50; keyword++) {
+            builder.add(Slices.utf8Slice("keyword" + keyword), Re2.Options.defaults());
         }
         return builder.build();
     }
