@@ -2712,35 +2712,35 @@ final class Dfa
                     }
                 }
 
-                if (dfa.statesHoldOwnMatches()) {
-                    // The state at the end of the text reported its matches when the search entered it.
-                    return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
-                }
-                int transition = getTransition(transitions, stateOffset + dfa.bytemapRange);
-                if (transition == T_UNCOMPUTED) {
-                    transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
-                    tables = dfa.tablesAfterWrite(tables);
-                }
-                if (transition == Integer.MIN_VALUE) {
-                    StateSaver savedState = new StateSaver(dfa, stateOffset);
-                    RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
-                    tables = dfa.tablesAfterWrite(tables);
-                    stateOffset = restoredStates.stateOffset();
-                    if (stateOffset < 0) {
-                        matches.clear();
-                        return ManyMatchResult.RESOURCE_EXHAUSTED;
+                if (!dfa.statesHoldOwnMatches()) {
+                    // Upstream's states report the matches at the end of the text on an end-of-text
+                    // step. A state that holds its own matches reported them when the search entered it.
+                    int transition = getTransition(transitions, stateOffset + dfa.bytemapRange);
+                    if (transition == T_UNCOMPUTED) {
+                        transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
+                        tables = dfa.tablesAfterWrite(tables);
                     }
-                    transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
-                    tables = dfa.tablesAfterWrite(tables);
                     if (transition == Integer.MIN_VALUE) {
-                        matches.clear();
-                        return ManyMatchResult.RESOURCE_EXHAUSTED;
+                        StateSaver savedState = new StateSaver(dfa, stateOffset);
+                        RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
+                        tables = dfa.tablesAfterWrite(tables);
+                        stateOffset = restoredStates.stateOffset();
+                        if (stateOffset < 0) {
+                            matches.clear();
+                            return ManyMatchResult.RESOURCE_EXHAUSTED;
+                        }
+                        transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
+                        tables = dfa.tablesAfterWrite(tables);
+                        if (transition == Integer.MIN_VALUE) {
+                            matches.clear();
+                            return ManyMatchResult.RESOURCE_EXHAUSTED;
+                        }
                     }
-                }
-                if (transition > 0 && (transition & T_MATCH_BIT) != 0) {
-                    matched = true;
-                    stateOffset = transition & ~T_MATCH_BIT;
-                    recordMatches(dfa.stateData(tables, stateOffset), matches);
+                    if (transition > 0 && (transition & T_MATCH_BIT) != 0) {
+                        matched = true;
+                        stateOffset = transition & ~T_MATCH_BIT;
+                        recordMatches(dfa.stateData(tables, stateOffset), matches);
+                    }
                 }
                 return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
             }
@@ -2840,34 +2840,34 @@ final class Dfa
                     stateOffset = transition & ~T_MATCH_BIT;
                 }
 
-                if (dfa.statesHoldOwnMatches()) {
-                    // The state at the end of the range holds the branches that match up to it.
-                    return minimumMatchId(dfa.stateData(tables, stateOffset));
-                }
-                int boundaryByte = textEnd < contextLimit ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
-                int transition = getTransition(transitions, stateOffset + dfa.byteMap(boundaryByte));
-                if (transition == T_UNCOMPUTED) {
-                    transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
-                    tables = dfa.tablesAfterWrite(tables);
-                }
-                if (transition == Integer.MIN_VALUE) {
-                    StateSaver savedState = new StateSaver(dfa, stateOffset);
-                    RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
-                    tables = dfa.tablesAfterWrite(tables);
-                    stateOffset = restoredStates.stateOffset();
-                    if (stateOffset < 0) {
-                        return -1;
+                if (!dfa.statesHoldOwnMatches()) {
+                    // Upstream's states report the branches that match up to the end of the range on a
+                    // step past it. A state that holds its own matches holds those branches itself.
+                    int boundaryByte = textEnd < contextLimit ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
+                    int transition = getTransition(transitions, stateOffset + dfa.byteMap(boundaryByte));
+                    if (transition == T_UNCOMPUTED) {
+                        transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
+                        tables = dfa.tablesAfterWrite(tables);
                     }
-                    transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
-                    tables = dfa.tablesAfterWrite(tables);
                     if (transition == Integer.MIN_VALUE) {
+                        StateSaver savedState = new StateSaver(dfa, stateOffset);
+                        RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
+                        tables = dfa.tablesAfterWrite(tables);
+                        stateOffset = restoredStates.stateOffset();
+                        if (stateOffset < 0) {
+                            return -1;
+                        }
+                        transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
+                        tables = dfa.tablesAfterWrite(tables);
+                        if (transition == Integer.MIN_VALUE) {
+                            return -1;
+                        }
+                    }
+                    if (transition <= 0 || (transition & T_MATCH_BIT) == 0) {
                         return -1;
                     }
+                    stateOffset = transition & ~T_MATCH_BIT;
                 }
-                if (transition <= 0 || (transition & T_MATCH_BIT) == 0) {
-                    return -1;
-                }
-                stateOffset = transition & ~T_MATCH_BIT;
                 return minimumMatchId(dfa.stateData(tables, stateOffset));
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
