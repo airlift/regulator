@@ -26,14 +26,29 @@ import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
-/// An immutable collection of patterns with an external literal-atom prefilter.
+/// An immutable collection of patterns with a literal-atom prefilter.
 ///
-/// A caller searches the canonicalized input returned by [#canonicalizeText(Slice)] for the
-/// byte strings in [#atoms()], then supplies the IDs of the atoms found in the input. The
-/// prefilter rejects impossible patterns before the remaining candidates are verified by RE2.
+/// [#matchingPatternIds(Slice)] and [#firstMatchResult(Slice)] search the input for the atoms
+/// themselves, with an atom search the collection builds. Alternatively, a caller searches the
+/// canonicalized input returned by [#canonicalizeText(Slice)] for the byte strings in [#atoms()],
+/// then supplies the IDs of the atoms found in the input. Either way, the prefilter rejects
+/// impossible patterns before the remaining candidates are verified by RE2. When the atom search
+/// exceeds the budget set by [Builder#setAtomSearchMaxMemory(long)], the collection builds without
+/// it, and only the methods taking found atom IDs match.
 public final class FilteredRe2
 {
+    /// A pattern ID and the match that pattern finds.
+    public record PatternMatch(int patternId, MatchResult result)
+    {
+        public PatternMatch
+        {
+            requireNonNull(result, "result is null");
+        }
+    }
+
     private static final int DEFAULT_MINIMUM_ATOM_LENGTH = 3;
+    // No atom search budget compiles the atoms.
+    private static final long ATOM_SEARCH_FITS_NO_BUDGET = -1;
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(FilteredRe2.class);
 
     private final int minimumAtomLength;
@@ -43,8 +58,18 @@ public final class FilteredRe2
     private final long prefilterTreeRetainedSize;
     private final List<Slice> atoms;
     private final Re2.Options.Encoding encoding;
-    // The hash of the minimum atom length and the patterns, which decide equality, computed when
-    // the collection compiles.
+    private final long atomSearchMaxMemory;
+    // A FIND set whose member ID is each atom's index in atoms, or null when there are no atoms or
+    // the set exceeded atomSearchMaxMemory. Null with atoms means the methods that search the atoms
+    // themselves cannot run.
+    private final Re2Set atomSearch;
+    // The lower bound on the budget an atom search that exceeded atomSearchMaxMemory needs, as its
+    // compile proved it; ATOM_SEARCH_FITS_NO_BUDGET when its program exceeds the compiler's
+    // instruction limit, which no budget lifts; or 0 when no bound is known or the atom search was
+    // built. Only the number is kept: the failed compile's exception can hold compiler state.
+    private final long atomSearchRequiredMaxMemory;
+    // The hash of the minimum atom length, the atom search budget, and the patterns, which decide
+    // equality, computed when the collection compiles.
     private final int hash;
 
     private FilteredRe2(
@@ -52,7 +77,10 @@ public final class FilteredRe2
             List<Re2> patterns,
             PrefilterTree prefilterTree,
             List<Slice> atoms,
-            Re2.Options.Encoding encoding)
+            Re2.Options.Encoding encoding,
+            long atomSearchMaxMemory,
+            Re2Set atomSearch,
+            long atomSearchRequiredMaxMemory)
     {
         this.minimumAtomLength = minimumAtomLength;
         this.patterns = List.copyOf(patterns);
@@ -62,7 +90,10 @@ public final class FilteredRe2
                 .map(Slice::copy)
                 .toList();
         this.encoding = requireNonNull(encoding, "encoding is null");
-        this.hash = 31 * minimumAtomLength + this.patterns.hashCode();
+        this.atomSearchMaxMemory = atomSearchMaxMemory;
+        this.atomSearch = atomSearch;
+        this.atomSearchRequiredMaxMemory = atomSearchRequiredMaxMemory;
+        this.hash = 31 * (31 * minimumAtomLength + Long.hashCode(atomSearchMaxMemory)) + this.patterns.hashCode();
     }
 
     /// Creates a single-use builder with the default three-byte minimum atom length.
@@ -89,8 +120,8 @@ public final class FilteredRe2
         return patterns.get(patternId);
     }
 
-    /// Returns copies of the distinct canonical atoms that the caller must search for.
-    /// The atoms are matched literally against [#canonicalizeText(Slice)].
+    /// Returns copies of the distinct canonical atoms that a caller supplying found atom IDs must
+    /// search for. The atoms are matched literally against [#canonicalizeText(Slice)].
     public List<Slice> atoms()
     {
         return atoms.stream()
@@ -100,14 +131,17 @@ public final class FilteredRe2
 
     /// Returns an estimate of the heap bytes this collection retains now, plus the native memory of
     /// its live DFA pointer tables: each pattern's [Re2#retainedSizeInBytes()], with a byte
-    /// distribution several patterns share counted once, the prefilter tree, and the atoms. Each
-    /// pattern keeps its own memory budget, which [Re2#maxMemoryBytes()] returns. Rarely, when
+    /// distribution several patterns share counted once, the prefilter tree, the atoms, and the
+    /// atom search's [Re2Set#retainedSizeInBytes()]. Each pattern keeps its own memory budget, which
+    /// [Re2#maxMemoryBytes()] returns, and the atom search keeps the budget
+    /// [Builder#setAtomSearchMaxMemory(long)] sets. Rarely, when
     /// concurrent growth or resets replace a DFA's tables throughout a read, the read reports that
     /// DFA's whole state budget in place of what its cache holds: a conservative over-report, not a
     /// leak.
     public long retainedSizeInBytes()
     {
-        long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(patterns) + prefilterTreeRetainedSize;
+        long size = INSTANCE_SIZE + RetainedSizeSupport.unmodifiableListSize(patterns) + prefilterTreeRetainedSize +
+                (atomSearch == null ? 0 : atomSearch.retainedSizeInBytes());
         // Each pattern counts its custom byte distribution, which patterns added with the same
         // one share, so a shared distribution is counted once.
         Set<ByteFrequencies> countedFrequencies = null;
@@ -241,9 +275,69 @@ public final class FilteredRe2
         return -1;
     }
 
-    /// Returns whether `other` is a collection built with the same minimum atom length from
-    /// equal patterns, added in the same order. Patterns compare as [Re2#equals(Object)] does, so
-    /// each pattern's options take part, and the atoms and encoding follow from these inputs.
+    /// Returns ascending IDs of every pattern that matches `text`, searching the atoms itself.
+    ///
+    /// The atom search reads a [canonical copy][#canonicalizeText(Slice)] of `text`, and the
+    /// candidates the prefilter accepts are verified against `text` itself, as
+    /// [#matchingPatternIds(Slice,int\[\])] verifies them.
+    ///
+    /// @throws IllegalStateException if the collection's atom search exceeded its budget
+    /// @throws RegexpMatchMemoryLimitException if the atom search exhausts its memory budget; no
+    ///         partial result is returned
+    public int[] matchingPatternIds(Slice text)
+    {
+        return matchingPatternIds(text, matchedAtomIds(text));
+    }
+
+    /// Returns the first pattern in ID order that matches `text`, with its match, or `null` when no
+    /// pattern matches, searching the atoms itself.
+    ///
+    /// The atom search reads a [canonical copy][#canonicalizeText(Slice)] of `text`, and the
+    /// candidates the prefilter accepts are searched in `text` itself, each once; the winner's
+    /// [Re2#findResult(Slice)] is the returned match.
+    ///
+    /// @throws IllegalStateException if the collection's atom search exceeded its budget
+    /// @throws RegexpMatchMemoryLimitException if the atom search exhausts its memory budget
+    public PatternMatch firstMatchResult(Slice text)
+    {
+        for (int patternId : potentialPatternIds(matchedAtomIds(text))) {
+            MatchResult result = patterns.get(patternId).findResult(text);
+            if (result != null) {
+                return new PatternMatch(patternId, result);
+            }
+        }
+        return null;
+    }
+
+    // The IDs of the atoms found in the canonical copy of text, in no particular order; the
+    // prefilter tree marks each atom's entries and needs no order.
+    private int[] matchedAtomIds(Slice text)
+    {
+        requireNonNull(text, "text is null");
+        // Checked first: a collection without its atom search must not report that no atom matched.
+        if (atomSearch == null && !atoms.isEmpty()) {
+            if (atomSearchRequiredMaxMemory == ATOM_SEARCH_FITS_NO_BUDGET) {
+                throw new IllegalStateException("FilteredRe2 atom search over the collection's %s atoms exceeds the compiler's instruction limit, so no atomSearchMaxMemory compiles it; only the methods taking found atom IDs work".formatted(atoms.size()));
+            }
+            String required = atomSearchRequiredMaxMemory > 0 ? " and needs at least %s bytes".formatted(atomSearchRequiredMaxMemory) : "";
+            throw new IllegalStateException("FilteredRe2 atom search over the collection's %s atoms exceeds atomSearchMaxMemory (%s bytes)%s; rebuild the collection with a larger FilteredRe2.Builder.setAtomSearchMaxMemory".formatted(atoms.size(), atomSearchMaxMemory, required));
+        }
+        if (atomSearch == null) {
+            return new int[0];
+        }
+        return atomSearch.matchingPatternIds(canonicalizeText(text));
+    }
+
+    // The atom search, or null when there are no atoms or it exceeded its budget.
+    Re2Set atomSearchForDiagnostics()
+    {
+        return atomSearch;
+    }
+
+    /// Returns whether `other` is a collection built with the same minimum atom length and atom
+    /// search budget from equal patterns, added in the same order. Patterns compare as
+    /// [Re2#equals(Object)] does, so each pattern's options take part, and the atoms and encoding
+    /// follow from these inputs. The atom search budget takes part as an [Re2Set]'s budget does.
     @Override
     public boolean equals(Object other)
     {
@@ -255,6 +349,7 @@ public final class FilteredRe2
         }
         return hash == that.hash &&
                 minimumAtomLength == that.minimumAtomLength &&
+                atomSearchMaxMemory == that.atomSearchMaxMemory &&
                 patterns.equals(that.patterns);
     }
 
@@ -270,6 +365,7 @@ public final class FilteredRe2
         private final List<Re2> patterns = new ArrayList<>();
         private final PrefilterTree prefilterTree;
         private Re2.Options.Encoding encoding;
+        private long atomSearchMaxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private boolean built;
 
         private Builder(int minimumAtomLength)
@@ -315,7 +411,30 @@ public final class FilteredRe2
             return patterns.size();
         }
 
-        /// Compiles an immutable collection and invalidates this builder.
+        /// Sets the positive compilation and DFA-cache memory budget, in bytes, of the atom search
+        /// that [FilteredRe2#matchingPatternIds(Slice)] and [FilteredRe2#firstMatchResult(Slice)]
+        /// run. The default is [Re2.Options#DEFAULT_MAX_MEMORY], a pattern's default budget. When
+        /// the atom search exceeds this budget, the collection still builds without it, and the
+        /// methods taking found atom IDs still work, but [FilteredRe2#matchingPatternIds(Slice)]
+        /// and [FilteredRe2#firstMatchResult(Slice)] throw [IllegalStateException]. Rebuilding
+        /// the collection with a larger budget repairs that, unless the atom search exceeds the
+        /// compiler's instruction limit, which no budget lifts.
+        public Builder setAtomSearchMaxMemory(long bytes)
+        {
+            requireNotBuilt();
+            if (bytes <= 0) {
+                throw new IllegalArgumentException("atomSearchMaxMemory must be greater than zero: " + bytes);
+            }
+            atomSearchMaxMemory = bytes;
+            return this;
+        }
+
+        /// Compiles an immutable collection, with the atom search over its atoms, and invalidates
+        /// this builder. When the atom search exceeds the budget set by
+        /// [#setAtomSearchMaxMemory(long)], the collection builds without it: the methods taking
+        /// found atom IDs still work, and the methods that search the atoms themselves throw
+        /// [IllegalStateException]. Rebuilding the collection with a larger budget repairs that,
+        /// unless the atom search exceeds the compiler's instruction limit, which no budget lifts.
         public FilteredRe2 build()
         {
             requireNotBuilt();
@@ -324,7 +443,34 @@ public final class FilteredRe2
             prefilterTree.compile(atoms);
             Re2.Options.Encoding collectionEncoding =
                     encoding == null ? Re2.Options.Encoding.UTF8 : encoding;
-            return new FilteredRe2(minimumAtomLength, patterns, prefilterTree, atoms, collectionEncoding);
+            Re2Set atomSearch = null;
+            long atomSearchRequiredMaxMemory = 0;
+            try {
+                atomSearch = buildAtomSearch(atoms, collectionEncoding);
+            }
+            catch (RegexpCompileMemoryLimitException e) {
+                // The methods taking found atom IDs need no atom search, so the collection builds
+                // without it. Any other compile failure of quoted atoms is a bug, and propagates.
+                atomSearchRequiredMaxMemory = e.fitsNoBudget() ? ATOM_SEARCH_FITS_NO_BUDGET : e.requiredMaxMemoryBytes().orElse(0);
+            }
+            return new FilteredRe2(minimumAtomLength, patterns, prefilterTree, atoms, collectionEncoding, atomSearchMaxMemory, atomSearch, atomSearchRequiredMaxMemory);
+        }
+
+        // A FIND set with each atom, quoted, as the member whose ID is the atom's index. The
+        // atoms are canonical bytes matched literally: a Latin-1 set reads each byte as one
+        // character, and a UTF-8 atom holds only whole code points, which a UTF-8 set reads as
+        // their bytes.
+        private Re2Set buildAtomSearch(List<Slice> atoms, Re2.Options.Encoding collectionEncoding)
+        {
+            if (atoms.isEmpty()) {
+                return null;
+            }
+            Re2.Options options = collectionEncoding == Re2.Options.Encoding.LATIN1 ? Re2.Options.latin1() : Re2.Options.defaults();
+            Re2Set.Builder builder = Re2Set.builder(options.setMaxMemory(atomSearchMaxMemory), Re2Set.MatchMode.FIND);
+            for (Slice atom : atoms) {
+                builder.add(Re2.quote(atom));
+            }
+            return builder.build();
         }
 
         private void requireNotBuilt()
