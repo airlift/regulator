@@ -56,8 +56,38 @@ public class TestScanPlanRun
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
         ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()));
         byte[] input = "xabc".getBytes(UTF_8);
-        assertThat(matchMinimum(run, input, 1, 3)).isEqualTo(-1);
+        assertThat(matchMinimum(run, input, 1, 3)).isEqualTo(~3);
         assertThat(matchMinimum(run, input, 0, 3)).isEqualTo(3);
+    }
+
+    @Test
+    public void testFailedRunReportsWhereItStopped()
+    {
+        // A run that fails on its first byte made a bounded check and returns -1; one that read
+        // further returns the complement of where it stopped, which the plan budget charges.
+        // An ASCII run, a run of every non-ASCII character, and a run of some.
+        byte[] firstByte = "x/".getBytes(UTF_8);
+        byte[] secondByte = "xa/".getBytes(UTF_8);
+        for (String expression : List.of("[a-z]{2,}", "[^/]{2,}", "[aé]{2,}")) {
+            ParseResult parsed = RegexpParser.parse(utf8Slice(expression), Re2.Options.defaults().parseFlags());
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), expression);
+            assertThat(failures(run, firstByte)).as(expression).containsOnly(-1);
+            assertThat(failures(run, secondByte)).as(expression).containsOnly(~2);
+        }
+    }
+
+    // What every reader of the run's kind returns from position 1, interpreted and as generated
+    // kernels read it.
+    private static List<Integer> failures(ScanPlanRun run, byte[] input)
+    {
+        int end = input.length;
+        if (run.matchesNonAscii()) {
+            return List.of(run.re2Match(input, 1, end), run.re2MatchMinimum(input, 1, end), ScanKernelSupport.re2RunMatch(run, input, 1, end), ScanKernelSupport.re2RunMatchMinimum(run, input, 1, end));
+        }
+        if (run.matchesSomeNonAscii()) {
+            return List.of(run.re2SetMatch(input, 1, end), run.re2SetMatchMinimum(input, 1, end), ScanKernelSupport.re2SetRunMatch(run, input, 1, end), ScanKernelSupport.re2SetRunMatchMinimum(run, input, 1, end));
+        }
+        return List.of(run.match(input, 1, end), run.matchMinimum(input, 1, end), ScanKernelSupport.runMatch(run, input, 1, end), ScanKernelSupport.runMatchMinimum(run, input, 1, end));
     }
 
     // A plan reads a run of every non-ASCII character as RE2 does, and any other run of these
