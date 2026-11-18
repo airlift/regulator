@@ -253,21 +253,22 @@ Within the budget, compilation and matching keep these limits:
   Searches of 64 bytes or more skip ahead by windows of at most 16 bytes. Their
   trie walks may follow 4,096 edges plus two per byte passed, checked after
   each failed walk, before the automaton takes the rest of the search.
-- A count, or a Trino extract-all, split, or replacement, whose dense finds
-  switch to a
+- A count or `forEachMatch`, or a Trino extract-all, split, or replacement,
+  whose dense finds switch to a
   [match start set](../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches)
   holds a bitset of at most 1 MiB, one bit a byte of the rest of its region,
   and only while the operation runs; a caller's own `find()` loop never
-  switches. The set is charged to the reverse longest-match DFA's free memory,
-  and only when it fits half of it. The many-match DFA that collects the
-  starts then borrows half of what is left. The reverse longest-match DFA
-  takes that loan back when it needs the memory for its own states, or when
-  a pass fills the collecting DFA's cache; the collecting DFA, which builds
-  its states within the loan, never recalls it. A pass already running on a
-  retired collecting DFA finishes on it. Until the collector finds that DFA
-  unreachable, its loan stays counted and no new loan is made, so the reverse
-  memory holds at most one retired loan beyond its share. The pattern's
-  `retainedSizeInBytes()` counts the set while it is held.
+  switches, so a caller that wants the switch calls `forEachMatch`. The set is
+  charged to the reverse longest-match DFA's free memory, and only when it fits
+  half of it. The many-match DFA that collects the starts then borrows half of
+  what is left. The reverse longest-match DFA takes that loan back when it
+  needs the memory for its own states, or when a pass fills the collecting
+  DFA's cache; the collecting DFA, which builds its states within the loan,
+  never recalls it. A pass already running on a retired collecting DFA
+  finishes on it. Until the collector finds that DFA unreachable, its loan
+  stays counted and no new loan is made, so the reverse memory holds at most
+  one retired loan beyond its share. The pattern's `retainedSizeInBytes()`
+  counts the set while it is held.
 - Every program with at most 32,767 output lists can use BitState, where RE2
   allows only programs of at most 512 instructions, so the text limit, not
   program size, decides which spans BitState captures. An anchored BitState
@@ -512,6 +513,7 @@ the compiled `pattern`:
 | Match at the beginning | `pattern.lookingAt(input)` | None |
 | Match complete input | `pattern.matches(input)` | None |
 | Repeated matching | `pattern.matcher(input)` | One reusable buffer and workspaces |
+| Every match's span | `pattern.forEachMatch(input, consumer)` | One matcher a call |
 | Caller-owned captures | `pattern.findInto(input, groups)` | None for a buffer of the pattern's size |
 | Immutable result | `pattern.findResult(input)` | One capture array |
 
@@ -539,6 +541,25 @@ while (matcher.find()) {
     Slice key = matcher.group("key");
     Slice value = matcher.group("value");
 }
+```
+
+Use `forEachMatch` when only the match boundaries are needed. It passes each
+match's byte offsets to a `MatchSpanConsumer`, in the order and with the empty
+matches a `find()` loop of `pattern.matcher(input, 0)` produces. A consumer
+that returns `false` stops the operation after that match; an exception it
+throws propagates. The operation owns its loop, so the input must not change
+until it returns, as a Rust `find_iter` borrows its haystack. In return, dense
+matches may switch to a
+[match start set](../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches),
+which a caller's `find()` loop never does, since the caller may change the
+input between finds. `TrinoRegexp` has the same operation with Trino's rules.
+
+```java
+long[] matchedBytes = new long[1];
+pattern.forEachMatch(input, (start, end) -> {
+    matchedBytes[0] += end - start;
+    return true;
+});
 ```
 
 Caller-owned capture arrays contain byte-offset pairs:

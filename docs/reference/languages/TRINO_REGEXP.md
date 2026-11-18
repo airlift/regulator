@@ -319,7 +319,9 @@ report of it:
 
 `TrinoRegexp` provides Trino-shaped contains, count, position, extraction,
 split, and replacement operations. Replacement strings use Trino's Java-style
-`$1` and `${name}` references rather than RE2 rewrite syntax.
+`$1` and `${name}` references rather than RE2 rewrite syntax. `forEachMatch`
+passes the boundaries of each match that `matcher(source, 0)` finds to a
+consumer, as [Matching APIs](../REGULATOR_API.md#matching-apis) describes.
 
 Contains and count are not always allocation-free. Once a pattern is warm,
 they allocate nothing when it runs on a [scan plan](../../benchmarks/SCAN_PLAN.md)

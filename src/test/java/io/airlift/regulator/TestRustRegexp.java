@@ -652,12 +652,15 @@ public class TestRustRegexp
         TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("(?-u:\\b)[a-z]*")), words, 0, words.length(), 1);
 
         // A Unicode \\b beside text outside ASCII is decided from the text, which the reverse pass
-        // does not read: the pass ends at its first such step, near the end, and a count and every
-        // other operation over Cyrillic words keep the find-by-find search.
+        // does not read: the pass ends at its first such step, near the end, and a count, a
+        // forEachMatch, and every other operation over Cyrillic words keep the find-by-find search.
         Slice cyrillic = utf8Slice("аб cd вг, ".repeat(16 * 1024 / 14));
         RustRegexp unicodeWords = RustRegexp.compile(utf8Slice("\\b\\w+\\b"));
         TestRegexpMatcher.assertMatchStartSet(unicodeWords, cyrillic, 0, cyrillic.length(), 0);
         List<String> expected = spans(unicodeWords, cyrillic);
+        List<String> passed = new ArrayList<>();
+        unicodeWords.forEachMatch(cyrillic, (start, end) -> passed.add(start + "-" + end));
+        assertThat(passed).isEqualTo(expected);
         assertThat(unicodeWords.count(cyrillic)).isEqualTo(expected.size());
         // The operations built the start-set DFA for the pass, and no pass finished.
         Dfa.DfaInstance startSetDfa = unicodeWords.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH);

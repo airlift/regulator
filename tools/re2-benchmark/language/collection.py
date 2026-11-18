@@ -47,8 +47,8 @@ NULL_ENGINES = {"null": ("jvm", "re2", "native"), "native-re2-null": ("native-re
                 "native-rust-null": ("native-rust", "rust", "safe")}
 NULL_OPERATIONS = ("reusedContains", "reusedCount", "reusedFind")
 # The call contract a new measurement records. Version 4 is the pass protocol: a timed invocation is one in-order pass
-# over every input of a lifecycle case, one operation per input.
-BENCHMARK_CONTRACT_VERSION = 4
+# over every input of a lifecycle case, one operation per input. Version 5 sums bulk spans through public forEachMatch.
+BENCHMARK_CONTRACT_VERSION = 5
 MODES = ("native", "safe")
 # The JDK baseline/comparators.tsv pins for every JVM observation.
 JDK_VERSION = "25.0.4+7"
@@ -761,6 +761,8 @@ def work_contract(manifest, case, language, operation, version=BENCHMARK_CONTRAC
     """Record timed work independently of successful output verification."""
     if manifest.get("suite") == "language-bulk" and operation == "execute":
         model = case["model"]
+        if model == "count-spans" and version >= 5:
+            return "public-for-each-match-v1"
         if language == "trino" and model in {"count-spans", "count-captures", "grep-captures"}:
             return "trino-output-assisted-count-v1" if version == 2 else "trino-matcher-count-v3"
         if language in {"re2", "java", "rust"} and model in {"grep", "count"}:
@@ -922,7 +924,7 @@ def export(directory, results, *, write=True, inputs=None):
     # Never stamp a current call contract onto an archived measurement. Only a
     # collector that recorded this version before timing can emit these claims.
     version = provenance.get("benchmark_contract_version")
-    if "benchmark_contract_version" in provenance and version not in {2, 3, 4}:
+    if "benchmark_contract_version" in provenance and version not in {2, 3, 4, 5}:
         raise ValueError("unsupported benchmark contract version")
     rows = []
     for case in manifest["cases"]:
