@@ -3437,9 +3437,13 @@ final class Dfa
     // The result is measured from resultBegin, which precedes textBegin when the caller has
     // already consumed part of the search. A search that ends at a paired first match records it
     // in the DFA's short paired search streak, or, when `countRecordsPairedMatch` is set, returns
-    // it with COUNT_PAIRED_MATCH_FLAG for the count to record. Copied as `searchForwardPairsFlat`;
-    // keep the copy in step. This object-row form keeps its measured decoding loop for x86; the
-    // count's flag adds one branch at the paired-match exit, outside the loop.
+    // it with COUNT_PAIRED_MATCH_FLAG for the count to record. No exit, here or in the miss method,
+    // uses the loop's position after a call C2 may leave out of line: the one-byte search measures
+    // its result from resultBegin itself, the match path uses only its result after its calls, and
+    // the decode inlines on this method's profile. On x86, a position still needed after such a
+    // call kept the loop's position in a stack slot. Copied as `searchForwardPairsFlat`; keep the
+    // copy in step. This object-row form keeps its measured decoding loop for x86; the count's
+    // flag adds one branch at the paired-match exit, outside the loop.
     static long searchForwardPairs(
             DfaInstance dfa,
             CacheTables tables,
@@ -3500,11 +3504,7 @@ final class Dfa
 
         // Paired rows are complete when published, so their row metadata needs no check.
         int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
+        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
     // Copied as `searchForwardPairsFlatAfterMiss`; keep the copy in step.
@@ -3547,11 +3547,7 @@ final class Dfa
             return result;
         }
 
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
+        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
     // Copied as `searchForwardPairsFlatAfterMatch`; keep the copy in step.
@@ -3789,11 +3785,7 @@ final class Dfa
 
         // Paired rows are complete when published, so their state offsets need no check.
         int stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
+        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
     // Copied as `searchForwardPairsAfterMiss`; keep the copy in step.
@@ -3836,11 +3828,7 @@ final class Dfa
             return result;
         }
 
-        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch, ctxBegin);
-        if (result >= 0) {
-            return result + (position - resultBegin);
-        }
-        return result;
+        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
     // Copied as `searchForwardPairsAfterMatch`; keep the copy in step.

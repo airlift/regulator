@@ -26,16 +26,35 @@ import org.junit.jupiter.api.Test;
 import java.lang.classfile.Attributes;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
+import java.lang.classfile.CodeElement;
 import java.lang.classfile.CodeModel;
+import java.lang.classfile.Label;
 import java.lang.classfile.MethodModel;
+import java.lang.classfile.Opcode;
+import java.lang.classfile.TypeKind;
 import java.lang.classfile.attribute.CodeAttribute;
 import java.lang.classfile.attribute.MethodParameterInfo;
+import java.lang.classfile.instruction.BranchInstruction;
+import java.lang.classfile.instruction.IncrementInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
+import java.lang.classfile.instruction.LabelTarget;
+import java.lang.classfile.instruction.LoadInstruction;
+import java.lang.classfile.instruction.LookupSwitchInstruction;
+import java.lang.classfile.instruction.ReturnInstruction;
+import java.lang.classfile.instruction.StoreInstruction;
+import java.lang.classfile.instruction.TableSwitchInstruction;
+import java.lang.classfile.instruction.ThrowInstruction;
 import java.lang.constant.ClassDesc;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -619,6 +638,26 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the pair loops' exits from reading the loop's position after a call C2 may leave out
+    /// of line: the one-byte search a miss or the end of the text falls back to measures its result
+    /// from `resultBegin` itself, and the match path reads only its result after its calls. HotSpot
+    /// keeps no register across a call; when an immature miss-method profile left the one-byte
+    /// search out of line, the position read after it kept the loop's position in a stack slot on
+    /// x86. The decode before the miss method is exempt: the loop's own profile inlines it, and
+    /// testPairLoopsDecodeTheirOwnMisses keeps it there.
+    @Test
+    public void testPairLoopExitsReadNoPositionAfterCalls()
+            throws ClassNotFoundException
+    {
+        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+            for (String method : List.of(loop, loop + "AfterMiss", loop + "AfterMatch")) {
+                assertThat(callsBeforePositionReads(method))
+                        .as("calls in Dfa.%s after which it reads the loop's position", method)
+                        .isEmpty();
+            }
+        }
+    }
+
     /// Keeps the DFA's uncomputed transition below C2's 200-byte limit for inlining a method that
     /// throws often, as the quit and retry exceptions do, with every decoding step in a helper
     /// only a decoding DFA reaches; at 210 bytes a reverse search's fallback stopped inlining it.
@@ -683,6 +722,101 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner methods %s.%s calls", type.getSimpleName(), methodName)
                 .contains("findFoldCasePair", "findFoldCaseDensePair")
                 .doesNotContain("findFoldCase", "findFoldCaseDense", "findFoldCaseSve", "findFoldCaseDenseSve");
+    }
+
+    // The calls in `methodName` of Dfa after which some path reads the loop's position, the local
+    // the method's loop steps or its parameter named `position`, before storing it again. Calls
+    // C2 inlines at any call site, to methods of this package within MaxInlineSize, are skipped,
+    // as is the pair decode.
+    private static List<String> callsBeforePositionReads(String methodName)
+            throws ClassNotFoundException
+    {
+        List<MethodModel> methods = ClassFile.of().parse(classfile(Dfa.class)).methods().stream()
+                .filter(model -> model.methodName().equalsString(methodName))
+                .toList();
+        assertThat(methods).as("methods named %s", methodName).hasSize(1);
+        MethodModel method = methods.getFirst();
+        List<CodeElement> code = method.code().orElseThrow().elementList();
+
+        Set<Integer> positionSlots = new HashSet<>();
+        Map<Label, Integer> labelIndexes = new HashMap<>();
+        for (int index = 0; index < code.size(); index++) {
+            switch (code.get(index)) {
+                case IncrementInstruction increment -> positionSlots.add(increment.slot());
+                case LabelTarget target -> labelIndexes.put(target.label(), index);
+                default -> {}
+            }
+        }
+        List<ClassDesc> types = method.methodTypeSymbol().parameterList();
+        List<MethodParameterInfo> names = method.findAttribute(Attributes.methodParameters()).orElseThrow().parameters();
+        for (int index = 0, slot = 0; index < types.size(); slot += TypeKind.from(types.get(index)).slotSize(), index++) {
+            if (names.get(index).name().orElseThrow().equalsString("position")) {
+                positionSlots.add(slot);
+            }
+        }
+        assertThat(positionSlots).as("Dfa.%s position locals", methodName).hasSize(1);
+
+        List<String> calls = new ArrayList<>();
+        for (int index = 0; index < code.size(); index++) {
+            if (code.get(index) instanceof InvokeInstruction invoke && !inlinedAtAnyCallSite(invoke) && readsOnSomePath(code, labelIndexes, positionSlots, index + 1)) {
+                calls.add(invoke.name().stringValue());
+            }
+        }
+        return calls;
+    }
+
+    private static boolean inlinedAtAnyCallSite(InvokeInstruction invoke)
+            throws ClassNotFoundException
+    {
+        if (invoke.name().equalsString("decodePairedTransition")) {
+            return true;
+        }
+        String owner = invoke.owner().asInternalName();
+        if (!owner.startsWith("io/airlift/regulator/")) {
+            return false;
+        }
+        int length = codeLength(Class.forName(owner.replace('/', '.')), invoke.name().stringValue(), invoke.type().stringValue());
+        return length > 0 && length <= MAX_INLINE_SIZE;
+    }
+
+    // Whether some path through `code` from element `start` reads a local in `slots` before it
+    // stores one, returns, or throws.
+    private static boolean readsOnSomePath(List<CodeElement> code, Map<Label, Integer> labelIndexes, Set<Integer> slots, int start)
+    {
+        Deque<Integer> pending = new ArrayDeque<>(List.of(start));
+        Set<Integer> visited = new HashSet<>();
+        while (!pending.isEmpty()) {
+            int index = pending.pop();
+            if (!visited.add(index)) {
+                continue;
+            }
+            switch (code.get(index)) {
+                case LoadInstruction load when slots.contains(load.slot()) -> {
+                    return true;
+                }
+                case IncrementInstruction increment when slots.contains(increment.slot()) -> {
+                    return true;
+                }
+                case StoreInstruction store when slots.contains(store.slot()) -> {}
+                case ReturnInstruction _, ThrowInstruction _ -> {}
+                case BranchInstruction branch -> {
+                    pending.push(labelIndexes.get(branch.target()));
+                    if (branch.opcode() != Opcode.GOTO && branch.opcode() != Opcode.GOTO_W) {
+                        pending.push(index + 1);
+                    }
+                }
+                case TableSwitchInstruction tableSwitch -> {
+                    pending.push(labelIndexes.get(tableSwitch.defaultTarget()));
+                    tableSwitch.cases().forEach(switchCase -> pending.push(labelIndexes.get(switchCase.target())));
+                }
+                case LookupSwitchInstruction lookupSwitch -> {
+                    pending.push(labelIndexes.get(lookupSwitch.defaultTarget()));
+                    lookupSwitch.cases().forEach(switchCase -> pending.push(labelIndexes.get(switchCase.target())));
+                }
+                default -> pending.push(index + 1);
+            }
+        }
+        return false;
     }
 
     // The names of the methods of `owner` that `methodName` of `type` calls.
