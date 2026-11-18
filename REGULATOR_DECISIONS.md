@@ -95,6 +95,10 @@ semantics.
   headroom for reset recovery, which needs at most the start state, current
   state, and next transition state. Tests cover default and 64 KiB budgets,
   repeated reset/restore, end-text transitions, and a 512-ID match payload.
+- A `FilteredRe2` whose atom search exceeded its budget when it was built throws
+  `IllegalStateException` from `matchingPatternIds(input)` and
+  `firstMatchResult(input)` rather than report no match; its methods taking
+  found atom IDs still work.
 - Lazy reverse-program compilation still treats an insufficient reverse budget as
   an execution fallback and uses the NFA, matching upstream behavior.
 - Invalid rewrites throw `RegexpRewriteException`. No-match is no longer
@@ -5278,6 +5282,12 @@ pattern-ID arrays instead of caller-mutated boxed lists. A `FilteredRe2`
 collection uses one encoding and exposes its immutable canonical atom list.
 Callers scan `canonicalizeText(input)` and pass primitive atom IDs from the
 external scanner; mixed UTF-8 and Latin-1 patterns are rejected by the builder.
+Upstream's `FilteredRE2` leaves the atom search to its caller by design. A
+`FilteredRe2` also builds one, an `Re2Set` of the quoted atoms, so
+`matchingPatternIds(input)` and `firstMatchResult(input)` answer in one call and
+the first match is found once. An atom search that exceeds its budget is left
+out, so the collection still builds as it did before it had one: the methods
+taking found atom IDs keep working, and the input-only methods throw.
 Building a pattern's prefilter stops after upstream's 100,000 visits of the
 simplified regexp, and such a pattern is left unfiltered, always a candidate, as
 upstream does.
