@@ -586,16 +586,18 @@ public class TestHotMethodSize
                 Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int rowOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
                 Map.entry("searchForwardPairsFlatAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFlatFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
+                Map.entry("searchForwardForCount", "GroupZeroForwardCursor cursor, DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int contextEnd, int textBegin, FixedDistanceByteCandidates fixedDistanceCandidates"),
                 Map.entry("searchForwardCountSelfLoopScan", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int contextEnd, int startOffset"),
                 Map.entry("searchBackward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxBegin, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, int maximumBytes"),
                 Map.entry("searchAnchoredCandidate", "CandidateStartCursor cursor, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int candidate"),
                 Map.entry("searchAnchoredWithStop", "DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd"),
                 Map.entry("searchReverseThenAnchoredWithStop", "DfaInstance reverseDfa, CacheTables reverseTables, DfaInstance forwardDfa, CacheTables forwardTables, byte[] bytes, int contextOffset, int contextBegin, int contextEnd, int textBegin, int literalBegin, int textEnd, int maximumReverseBytes"))) {
-            // The loop is the one method of its name that reads the text's bytes; a Slice
-            // facade of the same name only enters it.
+            // The loop is the one method of its name that reads the text's bytes and takes the
+            // entry's first parameter; a Slice facade of the same name only enters it.
+            String firstParameter = method.getValue().substring(0, method.getValue().indexOf(','));
             assertThat(parameterLists(Dfa.class, method.getKey()))
                     .as("Dfa.%s parameters", method.getKey())
-                    .filteredOn(parameters -> parameters.contains("byte[] bytes"))
+                    .filteredOn(parameters -> parameters.contains("byte[] bytes") && parameters.startsWith(firstParameter))
                     .singleElement()
                     .asString()
                     .startsWith(method.getValue());

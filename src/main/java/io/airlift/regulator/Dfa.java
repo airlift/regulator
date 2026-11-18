@@ -1286,10 +1286,10 @@ final class Dfa
                         tables,
                         cursor.prog,
                         context.byteArray(),
-                        contextBegin,
                         contextLimit,
                         textBegin,
-                        cursor.fixedDistanceByteCandidates);
+                        cursor.fixedDistanceByteCandidates,
+                        contextBegin);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
@@ -2284,10 +2284,10 @@ final class Dfa
             CacheTables tables,
             Prog prog,
             byte[] bytes,
-            int contextBegin,
             int contextEnd,
             int textBegin,
-            Prog.FixedDistanceByteCandidates fixedDistanceCandidates)
+            Prog.FixedDistanceByteCandidates fixedDistanceCandidates,
+            int contextBegin)
     {
         if (prog.anchorStart() && contextBegin != textBegin) {
             return SEARCH_NO_MATCH;
