@@ -172,6 +172,7 @@ public class TestRetainedSize
                 .extracting(Class::getName)
                 .contains("java.util.HashMap$TreeNode");
         assertMatchesHeapGraph("treeified prefilter map (TreeNode)", TestRetainedSize::collidingAtoms, (_, _) -> {}, FilteredRe2::retainedSizeInBytes);
+        assertMatchesHeapGraph("FilteredRe2 after one-call matching (atom search DFA)", TestRetainedSize::collidingAtoms, FilteredRe2::matchingPatternIds, FilteredRe2::retainedSizeInBytes);
 
         Re2 pattern = Re2.compile(Slices.utf8Slice("(\\w*)(\\w)"));
         RegexpMatcher matcher = pattern.matcher(TEXT);
@@ -219,14 +220,12 @@ public class TestRetainedSize
         settle.accept(reference, SHORT_TEXT);
         long nativeBytes = 0;
         List<Object> phantomReferents = new ArrayList<>();
-        if (object instanceof CompiledPattern pattern) {
-            for (Dfa.DfaInstance dfa : dfas(pattern)) {
-                MemorySegment segment = dfa.absolutePointerTransitionSegment();
-                if (segment != null && segment.isNative()) {
-                    nativeBytes += dfa.absolutePointerTransitionMemory();
-                }
-                phantomReferents.addAll(supersededPointerTables(dfa));
+        for (Dfa.DfaInstance dfa : dfas(object)) {
+            MemorySegment segment = dfa.absolutePointerTransitionSegment();
+            if (segment != null && segment.isNative()) {
+                nativeBytes += dfa.absolutePointerTransitionMemory();
             }
+            phantomReferents.addAll(supersededPointerTables(dfa));
         }
         // JOL walks a phantom reference's referent as it walks any field, but a superseded native
         // pointer table is reachable only that way.
@@ -243,9 +242,23 @@ public class TestRetainedSize
                 .isBetween(1.0, 1.5);
     }
 
-    private static List<Dfa.DfaInstance> dfas(CompiledPattern pattern)
+    // The DFAs of a compiled pattern, or of a collection's patterns and its atom search.
+    private static List<Dfa.DfaInstance> dfas(Object object)
     {
         List<Dfa.DfaInstance> dfas = new ArrayList<>();
+        if (object instanceof FilteredRe2 filtered) {
+            for (int patternId = 0; patternId < filtered.patternCount(); patternId++) {
+                dfas.addAll(dfas(filtered.pattern(patternId)));
+            }
+            Re2Set atomSearch = filtered.atomSearchForDiagnostics();
+            if (atomSearch != null && atomSearch.dfaForDiagnostics() != null) {
+                dfas.add(atomSearch.dfaForDiagnostics());
+            }
+            return dfas;
+        }
+        if (!(object instanceof CompiledPattern pattern)) {
+            return dfas;
+        }
         for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.booleanProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
             if (program == null) {
                 continue;
