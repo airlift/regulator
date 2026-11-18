@@ -221,12 +221,15 @@ public class TestDfaRetainedState
         long pointerRowMemory = (warm.cacheSnapshot().stateCount() + 1L) * warm.nextSize * Long.BYTES;
         long fixedOverhead = (16 << 20) - warm.stateBudget();
 
-        // A budget that holds the warm DFA's Java state but none of its pointer rows. The pointer
-        // table is first sized while the tables are small, and it must leave the budget their
-        // growth to one row per instruction, beside the reference row of a state behind each
-        // pointer row it adds.
+        // A budget that holds four fifths of the warm DFA's Java state, counted with tables of one
+        // row per instruction, and none of its pointer rows, so it cannot fund a state per
+        // instruction beside a pointer table, and the budget, not the table's doubling, sizes the
+        // table in either object layout. The pointer table is first sized while the tables are
+        // small. It must leave the budget their next growth, which the states behind its rows
+        // fill, beside the reference row of a state behind each pointer row it adds, but not their
+        // growth to one row per instruction, which would sit unused at every reset.
         Prog tight = compileProgram(pattern, 64 << 20);
-        tight.setDfaMemory(2 * (javaStateMemory + fixedOverhead));
+        tight.setDfaMemory(2 * (javaStateMemory * 4 / 5 + fixedOverhead));
         Dfa.DfaInstance tightDfa = null;
         for (Slice text : texts) {
             Dfa.search(tight, text, false, Prog.MatchKind.FIRST_MATCH, true);
@@ -237,12 +240,16 @@ public class TestDfaRetainedState
         }
         assertThat(tightDfa.absolutePointerTransitionMemory()).isPositive();
         Dfa.CacheSnapshot firstPointerTable = tightDfa.cacheSnapshot();
-        assertThat(firstPointerTable.stateCapacity()).isLessThan(tightDfa.programStateCapacity());
-        long addedPointerRows = tightDfa.absolutePointerTransitionSegment().byteSize() / ((long) tightDfa.nextSize * Long.BYTES) - (firstPointerTable.stateCount() + 1L);
-        assertThat(tightDfa.availableStateMemory()).isGreaterThanOrEqualTo(
-                stateTableMemory(tightDfa.programStateCapacity(), tightDfa.nextSize) -
-                        stateTableMemory(firstPointerTable.stateCapacity(), tightDfa.nextSize) +
-                        addedPointerRows * sizeOfObjectArray(tightDfa.nextSize + 1));
+        int grownStateCapacity = 2 * firstPointerTable.stateCapacity();
+        assertThat(grownStateCapacity).isLessThan(tightDfa.programStateCapacity());
+        long pointerRows = tightDfa.absolutePointerTransitionSegment().byteSize() / ((long) tightDfa.nextSize * Long.BYTES);
+        long rowsInUse = firstPointerTable.stateCount() + 1L;
+        assertThat(pointerRows).isLessThan(2 * rowsInUse);
+        long firstTableMemory = stateTableMemory(firstPointerTable.stateCapacity(), tightDfa.nextSize);
+        long addedReferenceRowMemory = (pointerRows - rowsInUse) * sizeOfObjectArray(tightDfa.nextSize + 1);
+        assertThat(tightDfa.availableStateMemory())
+                .isGreaterThanOrEqualTo(stateTableMemory(grownStateCapacity, tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory)
+                .isLessThan(stateTableMemory(tightDfa.programStateCapacity(), tightDfa.nextSize) - firstTableMemory + addedReferenceRowMemory);
 
         // A budget a little above what the warm DFA would hold with tables that started at one row
         // per instruction, its Java state and one pointer row per state, holds them all: the

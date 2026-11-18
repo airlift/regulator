@@ -7066,15 +7066,22 @@ final class Dfa
             return Math.max(Math.min(prog.size(), stateLimit), 16);
         }
 
-        // The table growth, not yet charged, from state tables of `stateCapacity` rows to
-        // `programStateCapacity` rows. Tables that start there prepay it, so pointer-table sizing
-        // reserves it: a pointer table is then no larger than such tables would leave room for.
-        private long unpaidStateTableMemory(int stateCapacity)
+        // The growth, not yet charged, of state tables of `stateCapacity` rows that pointer-table
+        // sizing reserves: their next growth, to twice the rows but at most `programStateCapacity`,
+        // when the grown tables' rows hold more states than the current ones beside the pointer
+        // table that `memory` funds, each pointer row past `paidRowCount` with the minimum Java
+        // state behind it; otherwise none. Every pointer-table allocation and growth computes it
+        // again, and both cap the table at twice its rows, so a farther growth never changes the
+        // table: when the next growth's rows are not all funded, a larger reserve funds fewer.
+        private long reservedStateTableGrowthMemory(long memory, long paidRowCount, int stateCapacity)
         {
             if (stateCapacity >= programStateCapacity) {
                 return 0;
             }
-            return stateTableMemory(programStateCapacity) - stateTableMemory(stateCapacity);
+            int grownStateCapacity = (int) Math.min(2L * stateCapacity, programStateCapacity);
+            long growthMemory = stateTableMemory(grownStateCapacity) - stateTableMemory(stateCapacity);
+            long fundedRowCount = compatiblePointerRowCount(memory, paidRowCount, stateCapacity);
+            return compatiblePointerRowCount(memory - growthMemory, paidRowCount, grownStateCapacity) > fundedRowCount ? growthMemory : 0;
         }
 
         // The most pointer rows, at most `rowLimit`, that fit in `memory` with the minimum Java
@@ -8866,15 +8873,18 @@ final class Dfa
 
             long rowCapacity;
             long allocatedBytes;
-            long tableGrowthMemory = unpaidStateTableMemory(tables.stateData.length);
+            long tableGrowthMemory;
             try {
                 long currentRowCount = nextFreeOffset / nextSize;
+                long availableRowMemory = availableStateMemory - absolutePointerTableBytes(0);
                 // Reserve enough budget for the Java states addressable by the sidecar, and for
-                // the state tables' growth to one row per instruction, instead of eagerly consuming
-                // the complete DFA budget for a small graph. A heap table's array header and class
-                // offsets are charged once, outside the per-row cost.
+                // the state tables' growth toward one row per instruction that the budget funds,
+                // instead of eagerly consuming the complete DFA budget for a small graph. A heap
+                // table's array header and class offsets are charged once, outside the per-row
+                // cost.
+                tableGrowthMemory = reservedStateTableGrowthMemory(availableRowMemory, currentRowCount, tables.stateData.length);
                 rowCapacity = compatiblePointerRowCount(
-                        availableStateMemory - tableGrowthMemory - absolutePointerTableBytes(0),
+                        availableRowMemory - tableGrowthMemory,
                         currentRowCount,
                         Math.min(maxTransitionsLength / nextSize, Math.max(2, currentRowCount * 2)));
                 allocatedBytes = absolutePointerTableBytes(rowCapacity);
@@ -8945,14 +8955,17 @@ final class Dfa
                 requiredRowCount = Math.addExact(requiredEntryCapacity, nextSize - 1L) / nextSize;
                 long currentRowCount = existingPointers.entryCapacity() / nextSize;
                 long maximumRowCount = maxTransitionsLength / nextSize;
-                long remainingMemory = Math.max(0, availableStateMemory - reservedStateMemory - unpaidStateTableMemory(stateCapacity));
+                long unreservedMemory = availableStateMemory - reservedStateMemory;
+                long existingRowMemory = existingPointers.allocatedBytes() - absolutePointerTableBytes(0);
+                long tableGrowthMemory = reservedStateTableGrowthMemory(Math.addExact(unreservedMemory, existingRowMemory), requiredRowCount, stateCapacity);
+                long remainingMemory = Math.max(0, unreservedMemory - tableGrowthMemory);
                 // Preserve enough budget for the minimum Java state behind every additional
-                // pointer row, and for the state tables' growth to one row per instruction. A heap
-                // table's array header and class offsets are charged once, outside the per-row
-                // cost. Failure means ordinary DFA budget exhaustion, not an object-row
-                // representation change.
+                // pointer row, and for the state tables' growth toward one row per instruction
+                // that the budget funds. A heap table's array header and class offsets are charged
+                // once, outside the per-row cost. Failure means ordinary DFA budget exhaustion, not
+                // an object-row representation change.
                 rowCapacity = compatiblePointerRowCount(
-                        Math.addExact(remainingMemory, existingPointers.allocatedBytes() - absolutePointerTableBytes(0)),
+                        Math.addExact(remainingMemory, existingRowMemory),
                         requiredRowCount,
                         Math.min(maximumRowCount, currentRowCount * 2));
                 allocatedBytes = absolutePointerTableBytes(rowCapacity);

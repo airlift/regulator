@@ -1569,14 +1569,21 @@ build paired rows and has computed no transition, so a search that ends before
 computing one, such as a word boundary at a byte-order mark, does not decide
 between paired rows and the table. Waiting only once keeps a DFA that never
 computes a transition from retrying every search exclusively. A finite-budget
-DFA initially allocates a small row-rounded table and geometrically enlarges
-it as the graph grows. Each allocation is limited so that the remaining budget
-can still hold the minimum Java state behind every additional pointer row and
-the state tables' remaining growth to one row per instruction: state tables
-that start smaller than one row per instruction have not yet paid for growing
-to it, so the sizing reserves that growth, and a pointer table is no larger
-than tables that started there would leave room for. Without the reservation,
-a pointer table sized while the state tables are small would take the budget
+DFA initially allocates a small row-rounded table and geometrically enlarges it
+as the graph grows. Each allocation is limited so that the remaining budget can
+still hold the minimum Java state behind every additional pointer row and the
+state tables' next growth when that growth funds more rows. State tables that
+start smaller than one row per instruction have not yet paid for growing toward
+it, so the sizing reserves the tables' next growth, to twice their rows but at
+most one row per instruction, when the grown tables' rows would hold more
+states beside the table than the current ones, counting the minimum state
+behind each pointer row, and each pointer-table growth computes the reserve
+again. Each allocation at most doubles the table, so reserving a farther growth
+would change no table: once the next growth's rows are not all funded, a larger
+reserve funds fewer. Reserving the whole growth to one row per instruction left
+memory that a smaller budget could not use idle at every reset: 1.6 of 7.9 MB
+of state budget for one Trino URL pattern at 24 MiB. Without the reservation, a
+pointer table sized while the state tables are small would take the budget
 their growth needs, and a budget that holds the whole graph could reset on
 every pass or withhold the pointer table. The integer and object transition
 tables remain authoritative, and every zero entry delegates to the unchanged

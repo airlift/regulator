@@ -1361,11 +1361,12 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   ([hybrid/dfa.rs][ra-hybrid]). Regulator: flat Java state tables that start
   at up to 256 rows and double, each growth charged before it is allocated and
   never larger, at the same state count, than tables that started at one row
-  per instruction, with pointer-table sizing that reserves the growth still to
-  come ([#229]); base RE2 [O-DFA-003].
+  per instruction, with pointer-table sizing that reserves the next
+  state-table growth when it funds more rows, computed again at each
+  pointer-table growth ([#229]); base RE2 [O-DFA-003].
 - **Where:** `Dfa.DfaInstance.programStateCapacity`,
   `Dfa.DfaInstance.allocateCachedState`,
-  `Dfa.DfaInstance.unpaidStateTableMemory`,
+  `Dfa.DfaInstance.reservedStateTableGrowthMemory`,
   `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.sizeAbsolutePointerTransitionGrowth`
 - **Applies when:** Every DFA whose one-row-per-instruction capacity, at least
@@ -1373,7 +1374,8 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   of more than 256 instructions under a budget that holds 256 states. Other
   DFAs' tables start at that capacity. A growth that does not fit the state
   budget resets the cache as a full cache does, and the pointer table reserves
-  the growth while the tables are smaller than one row per instruction
+  the growth while the tables are smaller than one row per instruction, up to
+  the capacity whose rows the budget fills with the most states
 - **What it does:** A DFA's state, transition, and self-loop exit tables start
   with room for at most 256 states and double as states arrive, stopping once
   at the one-row-per-instruction capacity before doubling on toward the
