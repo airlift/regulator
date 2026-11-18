@@ -866,12 +866,13 @@ text, so the pair scan rejects little that a first-byte scan would not.
   took their captures, then initialized under a 72 MiB pattern budget
   (`maxMemory`), where the count it replaced needed 92 MiB.
 - A many-match state that matched also holds a separator and the ID of each
-  MATCH instruction in the queue it left, so its true bound is the lists, plus
-  one, plus the program's MATCH instructions. Its gate deliberately counts
-  only the lists and the separator: each state is charged its real size when
-  it is allocated, so nothing goes uncharged, and counting the IDs would only
-  turn away sets that run, such as 250,000 copies of `a` under a 96 MiB
-  budget.
+  MATCH instruction in the queue it left, or in its own queue when
+  [it holds its own matches](#many-match-states-hold-their-own-matches), so
+  its true bound is the lists, plus one, plus the program's MATCH
+  instructions. Its gate deliberately counts only the lists and the
+  separator: each state is charged its real size when it is allocated, so
+  nothing goes uncharged, and counting the IDs would only turn away sets that
+  run, such as 250,000 copies of `a` under a 96 MiB budget.
 - A plan that yields to the forward DFAs is left out when its reservation would
   leave the forward program's first-match or longest-match DFA too little to
   initialize where that DFA initializes without it, start-byte tables included.
@@ -5374,6 +5375,41 @@ external scanner; mixed UTF-8 and Latin-1 patterns are rejected by the builder.
 Building a pattern's prefilter stops after upstream's 100,000 visits of the
 simplified regexp, and such a pattern is left unfiltered, always a candidate, as
 upstream does.
+
+## Many-Match States Hold Their Own Matches
+
+Upstream RE2's many-match DFA keys each state by its frontier, the instructions
+live after a byte, and the IDs of the patterns that matched before that byte,
+which a search reports when it enters the state; a match that ends at the last
+byte is reported by the end-of-text step (`re2/dfa.cc` `RunStateOnByte`,
+`WorkqToCachedState`). The delay is what an empty-width assertion needs: whether
+`a$` matches after `a` is known only when the next byte, or the end of the text,
+is read. It also makes each state a pair of a frontier and the previous
+frontier's matches. Over 20,000 synthetic 1 KiB texts built from fragments of
+the atoms, the 945 literal atoms that `FilteredRe2` extracts from the uap-core
+user-agent parsers reached 44,156 such states and 39.7 MB of cache, measured
+with a 1 GiB budget. That footprint exceeds the 32 MiB default budget, under
+which the cache resets. They pass through only 6,259 frontiers.
+
+When no instruction of a set's program is an empty-width assertion, whether a
+frontier matches cannot depend on the next byte. A many-match state of such a
+program instead holds the sorted IDs of its own frontier's MATCH instructions,
+and a search reports them when it enters the state. The start state holds the
+empty members' matches, and `matchingPatternIds` skips the end-of-text step,
+which has nothing left to report. A state is then a function of its frontier alone, so a literal
+set's DFA is bounded by its trie rather than by the trie times the previous
+byte's outputs. Measured under the 32 MiB default budget, the user-agent atoms
+reach 6,259 states and 5.2 MB on the same texts with no reset, and the 371 OS
+atoms 1,421 states and 1.0 MB, down from 13,662 and 9.2 MB with the 1 GiB
+budget. The tagged alternation program, which picks a match's branch with a
+many-match search over its span, reads the branch from the state at the span's
+end rather than the state the following byte enters.
+
+The choice is per program. A set whose compiled program keeps an empty-width
+assertion, every `FULL` set (its members end in `\z`), and a tagged
+alternation program with a word boundary keep upstream's states and timing.
+Either way the reported IDs are upstream's; state counts, cache memory, and
+when a full cache resets differ.
 
 ## Bounded Candidate-Start Cursor
 

@@ -18,12 +18,16 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.function.LongSupplier;
 import java.util.stream.IntStream;
 
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -330,19 +334,16 @@ public class TestRe2Set
     @Test
     public void testMatchesAnyStopsAtFirstMatchInFullCache()
     {
-        Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
-        builder.add(Slices.utf8Slice("a+"));
-        Re2Set set = builder.build();
-        // Collecting every match reads the whole text, so it caches the DFA transitions for `aa`
-        // without stopping where the second 'a' shows the first match.
-        assertThat(set.matchingPatternIds(Slices.utf8Slice("aab"))).containsExactly(0);
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "a", "ab");
+        // This search caches the DFA state that 'a' enters, which holds the match of `a`.
+        assertThat(set.matchingPatternIds(Slices.utf8Slice("a"))).containsExactly(0);
         Dfa.DfaInstance dfa = set.dfaForDiagnostics();
         int resetCount = dfa.resetCount();
 
-        // The DFA sees the match when it reads the second 'a' and returns there, so it needs no new
-        // state, and a cache with no room for one is not reset.
+        // The DFA sees the match when it enters that state and returns there, so it does not need
+        // the new state that 'b' would enter, and a cache with no room for one is not reset.
         dfa.failStateAllocationsForTesting(1);
-        assertThat(set.matchesAny(Slices.utf8Slice("aa"))).isTrue();
+        assertThat(set.matchesAny(Slices.utf8Slice("ab"))).isTrue();
         assertThat(dfa.resetCount()).isEqualTo(resetCount);
     }
 
@@ -350,15 +351,16 @@ public class TestRe2Set
     public void testMatchesAnyResetsFullCacheAtEndOfText()
     {
         Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
-        builder.add(Slices.utf8Slice("a+"));
+        builder.add(Slices.utf8Slice("a+$"));
         Re2Set set = builder.build();
         // This search caches the DFA transition for 'a', but not the end-of-text step after it.
-        assertThat(set.matchesAny(Slices.utf8Slice("ab"))).isTrue();
+        assertThat(set.matchesAny(Slices.utf8Slice("ab"))).isFalse();
         Dfa.DfaInstance dfa = set.dfaForDiagnostics();
         int resetCount = dfa.resetCount();
 
-        // The match ends at the last byte, so the DFA sees it only in its end-of-text step, whose
-        // new state does not fit the cache. The search resets the cache once and sees the match.
+        // The member's `$` keeps the states that upstream RE2 builds, so the DFA sees the match that
+        // ends at the last byte only in its end-of-text step, whose new state does not fit the
+        // cache. The search resets the cache once and sees the match.
         dfa.failStateAllocationsForTesting(1);
         assertThat(set.matchesAny(Slices.utf8Slice("a"))).isTrue();
         assertThat(dfa.resetCount()).isEqualTo(resetCount + 1);
@@ -405,6 +407,50 @@ public class TestRe2Set
 
         assertThat(set.matchingPatternIds(Slices.utf8Slice("a")))
                 .containsExactlyInAnyOrder(IntStream.range(0, patternCount).toArray());
+    }
+
+    @Test
+    public void testLiteralSetStatesAreItsFrontiers()
+    {
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "a", "b", "ab", "ba");
+
+        // Without empty-width assertions, each DFA state holds the matches of its own frontier
+        // rather than those of the frontier one byte earlier, so the text reaches one state for
+        // each frontier: no member begun, after 'a', after 'b', after "ab" and after "ba". Keyed
+        // by the previous frontier's matches as well, as upstream RE2 keys them, it reaches 11.
+        assertThat(set.matchingPatternIds(toSlice("abba aab bba ab"))).containsExactlyInAnyOrder(0, 1, 2, 3);
+        assertThat(set.dfaForDiagnostics().cacheSnapshot().stateCount()).isEqualTo(5);
+    }
+
+    @Test
+    public void testEmptyWidthSetsKeepPreviousByteMatches()
+    {
+        // An assertion can depend on the byte after a match, so a set with one in any member keys
+        // each DFA state, as upstream RE2 does, by its frontier and the members that matched before
+        // the byte that entered it.
+        assertEmptyWidthSet("a", List.of("a$", "b"), 3);
+        assertEmptyWidthSet("foo bar xfoo barfoo", List.of("\\bfoo", "bar"), 12);
+        assertEmptyWidthSet("xyxy yx", List.of("^x", "y"), 6);
+        assertEmptyWidthSet("foo bar foobar", List.of("foo", "bar$"), 10);
+        assertEmptyWidthSet("ab bab ab", List.of("\\bab", "a", "b"), 9);
+    }
+
+    @Test
+    public void testMatchesEachMemberSearchedAlone()
+    {
+        Random random = new Random(20261117);
+        for (Re2.Options.Encoding encoding : Re2.Options.Encoding.values()) {
+            for (Re2Set.MatchMode matchMode : Re2Set.MatchMode.values()) {
+                for (int setIndex = 0; setIndex < 100; setIndex++) {
+                    List<String> patterns = randomSetPatterns(random);
+                    for (int textIndex = 0; textIndex < 12; textIndex++) {
+                        Slice text = randomText(random);
+                        int primedLength = random.nextBoolean() ? random.nextInt(text.length() + 1) : -1;
+                        assertMatchesEachMemberSearchedAlone(patterns, encoding, matchMode, text, primedLength);
+                    }
+                }
+            }
+        }
     }
 
     @Test
@@ -479,6 +525,117 @@ public class TestRe2Set
             builder.add(toSlice(pattern));
         }
         return builder.build();
+    }
+
+    private static void assertEmptyWidthSet(String text, List<String> patterns, int expectedStates)
+    {
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, patterns.toArray(String[]::new));
+        assertMatchesEachMemberSearchedAlone(patterns, Re2.Options.Encoding.UTF8, Re2Set.MatchMode.FIND, toSlice(text), -1);
+        set.matchingPatternIds(toSlice(text));
+        assertThat(set.dfaForDiagnostics().cacheSnapshot().stateCount())
+                .as("states of %s on \"%s\"", patterns, text)
+                .isEqualTo(expectedStates);
+    }
+
+    /// Checks that the set of `patterns` reports the members that, compiled alone with the same
+    /// options, match `text` in `matchMode`. With a `primedLength` of zero or more, each search
+    /// first runs over that many leading bytes, and the search of the whole text then finds no room
+    /// for the first new DFA state it needs past them, if it needs one, so it resets the cache and
+    /// carries on from the states it restores.
+    private static void assertMatchesEachMemberSearchedAlone(List<String> patterns, Re2.Options.Encoding encoding, Re2Set.MatchMode matchMode, Slice text, int primedLength)
+    {
+        Re2.Options options = Re2.Options.defaults().setEncoding(encoding);
+        List<Integer> expected = new ArrayList<>();
+        Re2Set.Builder builder = Re2Set.builder(options, matchMode);
+        for (int patternId = 0; patternId < patterns.size(); patternId++) {
+            Slice pattern = patternSlice(patterns.get(patternId), encoding);
+            builder.add(pattern);
+            Re2 member = Re2.compile(pattern, options);
+            boolean matches = switch (matchMode) {
+                case FIND -> member.find(text);
+                case LOOKING_AT -> member.lookingAt(text);
+                case FULL -> member.matches(text);
+            };
+            if (matches) {
+                expected.add(patternId);
+            }
+        }
+        Re2Set set = builder.build();
+
+        String description = "%s %s %s on %s".formatted(encoding, matchMode, patterns, Arrays.toString(text.getBytes()));
+        Dfa.DfaInstance dfa = set.dfaForDiagnostics();
+        if (primedLength >= 0) {
+            set.matchingPatternIds(text.slice(0, primedLength));
+            dfa.failStateAllocationsForTesting(1);
+        }
+        assertThat(set.matchingPatternIds(text)).as(description)
+                .containsExactlyInAnyOrder(expected.stream().mapToInt(Integer::intValue).toArray());
+        if (primedLength >= 0) {
+            dfa.resetCacheExternal();
+            set.matchesAny(text.slice(0, primedLength));
+            dfa.failStateAllocationsForTesting(1);
+        }
+        assertThat(set.matchesAny(text)).as(description).isEqualTo(!expected.isEmpty());
+    }
+
+    private static Slice patternSlice(String pattern, Re2.Options.Encoding encoding)
+    {
+        return switch (encoding) {
+            case UTF8 -> Slices.utf8Slice(pattern);
+            case LATIN1 -> Slices.wrappedBuffer(pattern.getBytes(ISO_8859_1));
+        };
+    }
+
+    /// Returns one to four members: literals over a small alphabet, including the empty literal,
+    /// and short shapes with classes, repeats and alternations, which overlap and abut one
+    /// another. One set in five also gets one more member, with an empty-width assertion, at a
+    /// random position.
+    private static List<String> randomSetPatterns(Random random)
+    {
+        String[] shapes = {"ba[rz]+", "x.y", "[0-9]{2,4}", "a+", "(?:ab|ba|c)", "[ab]c?", "é+"};
+        String[] emptyWidthMembers = {"a$", "^b", "\\bab", "c\\B"};
+        String literalCharacters = "abcé";
+        int memberCount = 1 + random.nextInt(4);
+        List<String> patterns = new ArrayList<>(memberCount + 1);
+        for (int member = 0; member < memberCount; member++) {
+            if (random.nextBoolean()) {
+                patterns.add(shapes[random.nextInt(shapes.length)]);
+                continue;
+            }
+            StringBuilder literal = new StringBuilder();
+            int length = random.nextInt(4);
+            for (int index = 0; index < length; index++) {
+                literal.append(literalCharacters.charAt(random.nextInt(literalCharacters.length())));
+            }
+            patterns.add(literal.toString());
+        }
+        if (random.nextInt(5) == 0) {
+            patterns.add(random.nextInt(patterns.size() + 1), emptyWidthMembers[random.nextInt(emptyWidthMembers.length)]);
+        }
+        return patterns;
+    }
+
+    /// Returns a text of the bytes the random members use, `é` in UTF-8 and Latin-1, and bytes
+    /// that are invalid UTF-8, viewed at a random offset into a larger array. One text in ten is a
+    /// few hundred bytes long, for longer runs through the DFA's states.
+    private static Slice randomText(Random random)
+    {
+        byte[][] pieces = {
+                {'a'}, {'b'}, {'c'}, {'r'}, {'z'}, {'x'}, {'y'}, {'0'}, {'7'}, {' '},
+                {(byte) 0xC3, (byte) 0xA9}, {(byte) 0xE9}, {(byte) 0xC3}, {(byte) 0xFF}, {0},
+        };
+        int pieceCount = random.nextInt(10) == 0 ? 300 + random.nextInt(100) : random.nextInt(12);
+        int prefixLength = random.nextInt(3);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        for (int index = 0; index < prefixLength; index++) {
+            bytes.write('a');
+        }
+        for (int index = 0; index < pieceCount; index++) {
+            bytes.writeBytes(pieces[random.nextInt(pieces.length)]);
+        }
+        int textLength = bytes.size() - prefixLength;
+        bytes.write('b');
+        return Slices.wrappedBuffer(bytes.toByteArray(), prefixLength, textLength);
     }
 
     private static Re2Set createExhaustingSet()
