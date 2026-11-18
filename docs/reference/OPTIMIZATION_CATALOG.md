@@ -1814,10 +1814,13 @@ byte operations instead of an automaton.
   non-ASCII character and every ASCII byte but at most one, such as `[^"]*`,
   `.*`, and `(?s).*`, when the Vector API is available and at least 16 bytes
   remain at a non-ASCII byte
-- **What it does:** The run's ASCII stop scan stays inline. At a non-ASCII
-  byte, an out-of-line skip checks 16-byte blocks: a block passes when it holds
-  no stop byte, no `C0`, `C1`, or `F5`-`FF`, and a continuation byte exactly
-  where a lead byte one, two, or three bytes before it expects one. Unlike a
+- **What it does:** The run's ASCII stop scan stays inline; under a block of
+  input it is a counted byte loop with the same one compare, so a short ASCII
+  run, such as a quoted field's, never enters the walk by character, and a
+  delimited capture accepts its delimiter there. At a non-ASCII byte, an
+  out-of-line skip checks 16-byte blocks: a block passes when it holds no stop
+  byte, no `C0`, `C1`, or `F5`-`FF`, and a continuation byte exactly where a
+  lead byte one, two, or three bytes before it expects one. Unlike a
   UTF-8 validator, it does not reject overlong three- and four-byte forms,
   encoded surrogates, or values above U+10FFFF, because the engine's `.`
   accepts them. A block of ASCII alone passes on the stop scan's one compare
