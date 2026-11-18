@@ -5446,6 +5446,36 @@ alternation program with a word boundary keep upstream's states and timing.
 Either way the reported IDs are upstream's; state counts, cache memory, and
 when a full cache resets differ.
 
+## Many-Match Byte Scan Runs Out Of Line
+
+On x86 the many-match search's byte loop ran at the register limit, with about
+12 values live and calls in the loop nest. Small graph differences elsewhere in
+`Dfa.searchMany` (profile pruning of once-per-search branches, whether
+`endSearch` inlined, a call on match-dense text) decided whether C2 kept the
+loop-carried state in a register or stored and reloaded it every byte, at about
+1.6 times the cost. The inline loop did so on match-dense text even before
+many-match states held their own matches.
+
+The scan therefore runs in `scanManyBytes`, unrolled four bytes a step, so it is
+larger than `FreqInlineSize` and C2 compiles it alone. It steps through matching
+states into a 64-state buffer, and `searchMany` records them from the same
+tables before handling the byte the scan stopped at. Measured with perf counters
+on Xeon 6975P-C (r8i) and Graviton (r9g), every fork kept the state in a
+register. Cycles per byte were 0.85 (r8i) and 0.91 (r9g) of the inline loop's on
+rare-match text, and 0.67 and 0.78 on match-dense text.
+
+The cost is at most one 280-byte buffer per search. A search starts without one,
+the scan treats a missing buffer as full and stops before the first byte that
+enters a matching state, and the search's own step allocates the buffer there,
+so a search that matches nothing allocates none. On Graviton each allocation costs about 230 cycles whatever its
+size, so a smaller first buffer saved nothing, while the 64-state batch keeps
+drains few on match-dense text. That allocation leaves user-agent rule sets
+whose strings match about half the time at about 1.03 times the inline loop's
+time on Graviton. Keeping the buffer in the tail of the match set's own array
+avoided the allocation but spilled the scan's state on x86, and no per-thread
+scratch fits, because the DFA instance is shared across threads.
+`TestHotMethodSize` keeps the scan above the inline limit and caps its size.
+
 ## Bounded Candidate-Start Cursor
 
 Eligible reusable matchers use a private candidate-start cursor for repeated
