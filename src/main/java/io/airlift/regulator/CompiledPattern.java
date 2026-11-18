@@ -1951,7 +1951,9 @@ abstract sealed class CompiledPattern
     /// holds: a conservative over-report, not a leak.
     ///
     /// The estimate leaves out static tables every pattern shares, such as the Unicode data; the
-    /// matchers a caller creates, which report their own size; and memory the pattern no longer
+    /// matchers a caller creates, which report their own size, except for the match start set an
+    /// all-match operation's matcher holds, which the pattern's reverse DFA budget charges and
+    /// this estimate counts while it is held; and memory the pattern no longer
     /// reaches. A search still running when a DFA cache resets keeps the old tables until it
     /// returns, up to that DFA's budget for each such search, and the native pointer tables a reset
     /// or growth replaced stay allocated until the JDK's cleaner frees them. The classes that
@@ -3653,6 +3655,66 @@ abstract sealed class CompiledPattern
         return Dfa.createGroupZeroForwardCursor(partialProg);
     }
 
+    /// Whether a dense all-match operation of the group-zero forward cursor may switch the rest of
+    /// `input`, `[start, end)`, to a match start set (see [Dfa#collectMatchStarts]). Excludes
+    /// patterns that already know their starts or have literal or estimated selective-byte skips,
+    /// and a rest where the forward DFA's own density samples would turn a byte scan on, since
+    /// the reverse pass would read what that scan skips. [#createGroupZeroForwardCursor] supplies
+    /// the other constraints. Evaluated at the switch, after the cursor builds the forward DFA;
+    /// caching the result would enlarge the pattern's layout.
+    boolean switchesToMatchStartSet(Slice input, int start, int end)
+    {
+        if (booleanPlans.innerLiteralSearch() != null ||
+                booleanPlans.windowLiteralSearch() != null ||
+                MatchLength.fixed(matchLength) >= 0 ||
+                singleCharacterMatch ||
+                (partialProg.canMatchEmpty() && !partialProg.hasEmptyWidthAssertions()) ||
+                partialProg.canPrefixAccel() ||
+                partialProg.transparentStartLiteral() != null) {
+            return false;
+        }
+        Dfa.DfaInstance forward = partialProg.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        if (forward == null || !forward.ok() || forward.hasSelectiveByteScan()) {
+            return false;
+        }
+        Prog reverseProgram = reverseProg();
+        if (reverseProgram == null || reverseProgram.anchorStart()) {
+            return false;
+        }
+        int offset = input.byteArrayOffset();
+        return !forward.byteScanSkipsPartOf(input.byteArray(), offset + start, offset + end);
+    }
+
+    /// Collects the match start set of `[start, contextEnd]`, or returns `null` when the pass
+    /// cannot run or fit; see [Dfa#collectMatchStarts].
+    Dfa.MatchStartSet collectMatchStartSet(Slice input, int contextStart, int contextEnd, int start)
+    {
+        Prog reverseProgram = reverseProg();
+        return reverseProgram == null ? null : Dfa.collectMatchStarts(reverseProgram, input, contextStart, contextEnd, start);
+    }
+
+    /// The leftmost-first match at or after `start`, as [#findGroupZeroBoundary] returns it, from
+    /// `startSet`: the match starts at the set's first start at or after `start`, and ends where
+    /// a first-match search anchored there ends, which is where the unanchored search that found
+    /// that start ends. Returns [Dfa#SEARCH_FAILED] when `start` lies before the set or the
+    /// anchored search fails, so the find searches as it would without the set.
+    long findOnMatchStartSet(Dfa.MatchStartSet startSet, Slice input, int contextStart, int contextEnd, int start)
+    {
+        if (start < startSet.begin()) {
+            return Dfa.SEARCH_FAILED;
+        }
+        int matchStart = startSet.nextStart(start);
+        if (matchStart < 0) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+        long forward = Dfa.search(partialProg, input, contextStart, contextEnd, matchStart, contextEnd, true, Prog.MatchKind.FIRST_MATCH, true);
+        if (forward < 0) {
+            return Dfa.SEARCH_FAILED;
+        }
+        return ((long) (matchStart - contextStart) << 32) |
+                ((matchStart + (int) forward - contextStart) & 0xFFFF_FFFFL);
+    }
+
     boolean canUseGroupZeroForwardCursor(int groupOffsetCount)
     {
         return groupOffsetCount == 2 || booleanPlans.taggedAlternationProgram() != null;
@@ -3858,8 +3920,14 @@ abstract sealed class CompiledPattern
             matcher.markSkipsForwardDfa();
         }
         long count = 0;
-        while (matcher.find()) {
-            count++;
+        matcher.beginAllMatchOperation();
+        try {
+            while (matcher.find()) {
+                count++;
+            }
+        }
+        finally {
+            matcher.endAllMatchOperation();
         }
         return count;
     }

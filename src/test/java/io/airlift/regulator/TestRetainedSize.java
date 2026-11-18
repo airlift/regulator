@@ -196,6 +196,20 @@ public class TestRetainedSize
         assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
         assertWithinHeapGraph("matcher after BitState finds", matcher.retainedSizeInBytes(), matcherHeapBytes(matcher, pattern, TEXT));
 
+        // A matcher whose operation switched holds a match start set, which the pattern's size
+        // reports while the matcher holds it, the set's object with its bits.
+        Re2 densePattern = Re2.compile(Slices.utf8Slice("\\b[a-z]+\\b|[0-9]"));
+        Slice dense = Slices.utf8Slice("ab1 cd ".repeat(16 * 1024 / 7));
+        RegexpMatcher switched = densePattern.groupZeroMatcher(dense, null);
+        switched.beginAllMatchOperation();
+        for (int find = 0; find < RegexpMatcher.MATCH_START_SET_SWITCH_FINDS; find++) {
+            assertThat(switched.find()).isTrue();
+        }
+        assertThat(switched.holdsMatchStartSetForDiagnostics()).isTrue();
+        long setSize = densePattern.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchStartSetReservationForDiagnostics();
+        assertWithinHeapGraph("matcher holding a match start set", switched.retainedSizeInBytes() + setSize, matcherHeapBytes(switched, densePattern, dense));
+        switched.endAllMatchOperation();
+
         Re2 namedPattern = Re2.compile(Slices.utf8Slice("(?P<first>a)(?P<second>b)(?P<third>c)(?P<fourth>d)"));
         RegexpMatcher fewerGroups = namedPattern.matcher(TEXT, 3);
         assertWithinHeapGraph("matcher keeping fewer groups (own name map omitted)", fewerGroups.retainedSizeInBytes(), matcherHeapBytes(fewerGroups, namedPattern, TEXT));
@@ -239,10 +253,10 @@ public class TestRetainedSize
             if (segment != null && segment.isNative()) {
                 nativeBytes += dfa.absolutePointerTransitionMemory();
             }
-            phantomReferents.addAll(supersededPointerTables(dfa));
+            phantomReferents.addAll(supersededReferents(dfa));
         }
         // JOL walks a phantom reference's referent as it walks any field, but a superseded native
-        // pointer table is reachable only that way.
+        // pointer table, or a start-set DFA a recall retired, is reachable only that way.
         List<Object> excluded = new ArrayList<>(phantomReferents);
         excluded.add(reference);
         long heapBytes = GraphLayout.parseInstance(object, reference).totalSize() - GraphLayout.parseInstance(excluded.toArray()).totalSize();
@@ -287,10 +301,10 @@ public class TestRetainedSize
         return dfas;
     }
 
-    private static List<Object> supersededPointerTables(Dfa.DfaInstance dfa)
+    private static List<Object> supersededReferents(Dfa.DfaInstance dfa)
             throws ReflectiveOperationException
     {
-        Field head = Dfa.DfaInstance.class.getDeclaredField("supersededAbsolutePointerReferences");
+        Field head = Dfa.DfaInstance.class.getDeclaredField("supersededReferences");
         head.setAccessible(true);
         long referentOffset = VM.current().fieldOffset(Reference.class.getDeclaredField("referent"));
         List<Object> referents = new ArrayList<>();

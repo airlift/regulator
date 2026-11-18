@@ -5625,6 +5625,95 @@ using the matcher region as assertion context like the group-zero search, and a
 declined pick falls back to the ordinary matcher path, searching from the
 match's start.
 
+## Match Start Set for Dense All-Match Searches
+
+A group-zero matcher on the forward cursor still runs two searches a match: an
+unanchored forward search for the end and an anchored reverse search for the
+start, each with its own setup. When matches are dense, as with `03-date`'s
+date tokenizer on most text, the setups cost more than the bytes. After the
+64th cursor find of an all-match operation, if those finds advanced at most 64
+bytes each on average and at least 4 KiB of the region remain, the matcher
+runs one unanchored reverse pass from the region end down to the last match's
+end and marks every match start in a bitset. Each later find takes the first
+start at or after its position and runs one anchored first-match forward
+search from there for the end. That is the end the unanchored search would
+find, since a leftmost-first search reports the leftmost start and its
+first-match end. The approach is resharp 0.8.0's `find_all_dfa`, without its
+longest-end rule, which would break leftmost-first priority (`a|aa` on `aa`
+gives `a`).
+
+Only the library's own all-match loops switch: count in every language, and
+Trino's count, extract-all, split, replacement, and callback replacement. Each
+marks its loop as one operation and ends it in a `finally`, so the set is
+released on every exit, a callback that returns `null` or throws included. A
+caller's `find()` loop never switches: the caller may change the input between
+finds, and a cached start set would miss the change, where the JDK's matcher
+and every other find read the input afresh. An operation that may switch marks
+its matcher undecided, and its cursor finds count through the branch a held
+set takes, so a find outside an operation counts nothing; it only tests that
+its matcher holds no set. Trino's position search stops at its occurrence, so
+it stays a one-match search. RE2's `replaceAll` loops over one-shot searches,
+not a matcher, and does not switch.
+
+The pass uses a many-match DFA of the reverse program, whose unanchored start
+the compiler already gives every reverse program without an end anchor. The
+longest-match reverse DFA cannot collect starts, because it drops
+lower-priority threads after a match. The pass reads the region as each find
+does: no bytes past the region end, and the byte before the pass's start, so
+line, text, and word assertions decide as an anchored search from each
+position would. A program without assertions has
+[many-match states that hold their own matches](#many-match-states-hold-their-own-matches),
+so the step that enters a position's state marks a match starting there, and
+no end-of-text step follows; otherwise, as upstream, the step that leaves it
+does.
+
+The bitset belongs to the operation: a matcher field, never kept in the
+pattern or its DFA caches. At the switch the operation reserves the set's
+memory, its object and its bits, from the longest-match DFA's free memory
+under the cache mutation lock, once, and releases it when a find fails, at
+reset, at the region end, when a find falls back, or when the operation ends.
+The set holds at most 1 MiB of bits, one a byte of 8 MiB of text, and at most
+half the lender's free memory. The reservation comes first, so a set that does
+not fit borrows nothing for the many-match DFA. That DFA then borrows half of
+what is left. The lender publishes it under its lock as it lends, and before
+it would refuse one of its own states or decoded word cache entries, or give
+its pointer table back for want of budget, it recalls the loan: it unpublishes
+the DFA, so the next switch builds a fresh one, and takes the memory back. A
+pass still running on the retired DFA finishes on it, so the retired loan stays
+counted through the superseded-memory reference that also counts replaced
+native pointer tables, and no new loan is made until the collector finds the
+retired DFA unreachable. The reverse share plus at most one retired loan
+bounds the reverse memory, and a dense operation leaves later searches the
+memory they had. A pass that fills the many-match DFA's cache gives the loan
+back at once, and the program builds no other start-set DFA, since its passes
+need more than half the lender's free memory. A reservation that does not fit,
+a pass that fills its cache or reaches a step whose transition must be read
+from the text, and an anchored search that fails all leave the operation on
+its find-by-find search. The pass ends at the first such step, a Unicode word
+assertion beside a byte outside ASCII, which a search decides by decoding the
+characters around it: a pass over such text would decode at nearly every byte,
+out of line, at more cost than the finds it replaces, so a dense operation
+whose Unicode `\b`, such as Rust's, meets text outside ASCII keeps its
+find-by-find search. The switch is final: an operation tries it once.
+
+A pattern qualifies only when its finds run both searches and its scans read
+every byte anyway: no fixed length, one-character, or empty-at-every-position
+start rule, and no inner, window, prefix, or transparent start literal. Two
+gates keep the reverse pass off text a forward byte scan would skip. At
+compile time, a start-byte or fixed-distance byte scan estimated to stop at
+fewer than one English position in eight rules the pattern out; that is an
+estimate, not a property of the input. At the switch, the forward DFA's own
+density sample checks each 64 KiB piece of the rest of the region, and if a
+search would turn either scan on in any piece, the operation stays on its
+find-by-find search, since a dense head can end in a tail that scan skips. An
+end-anchored pattern has no unanchored reverse start and does not qualify.
+Each language's iteration rules, the advance past an empty match, Rust's
+skipped empty matches, and the retry after a failed find, stay in the callers
+of the find, so answers do not change; find, contains, matches, and other
+one-match operations never switch. On `03-date` the switch takes the forward
+DFA from about 8.1 steps a find to 4.6 and replaces 4.2 reverse steps a find
+with one reverse step a byte.
+
 ## Word-Run Plan
 
 A pattern that is exactly a word boundary, a greedy run of one ASCII
