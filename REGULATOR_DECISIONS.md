@@ -5445,13 +5445,17 @@ first-match end. The approach is resharp 0.8.0's `find_all_dfa`, without its
 longest-end rule, which would break leftmost-first priority (`a|aa` on `aa`
 gives `a`).
 
-Only the library's own all-match loops switch: count in every language, and
-Trino's count, extract-all, split, replacement, and callback replacement. Each
-marks its loop as one operation and ends it in a `finally`, so the set is
-released on every exit, a callback that returns `null` or throws included. A
+Only the library's own all-match loops switch: count and `forEachMatch` in
+every language, and Trino's count, extract-all, split, replacement, and
+callback replacement. Each marks its loop as one operation and ends it in a
+`finally`, so the set is released on every exit, a callback that returns
+`null`, a consumer that returns `false`, or either one throwing included. A
 caller's `find()` loop never switches: the caller may change the input between
 finds, and a cached start set would miss the change, where the JDK's matcher
-and every other find read the input afresh. Outside an operation the find
+and every other find read the input afresh. A caller that wants the switch,
+such as rebar's count-spans runner, calls `forEachMatch`, which owns its loop
+and requires that the input not change until it returns, as Rust's `find_iter`
+does by borrowing its haystack. Outside an operation the find
 counter is never armed, so one-match operations pay one compare. Trino's
 position search stops at its occurrence, so it stays a one-match search. RE2's
 `replaceAll` loops over one-shot searches, not a matcher, and does not switch.

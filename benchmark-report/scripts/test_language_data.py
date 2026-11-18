@@ -33,8 +33,8 @@ def report_fixture(platforms=PLATFORMS, languages=RELEASE_1_0_LANGUAGES):
             'methodology': ['Fixture only'], 'provenance': {'fixture': True}, 'rows': rows}
 
 
-def bulk_capture(mappings):
-    case = {'id': 'fixture', 'model': 'count', 'population': 'bulk-text', 'family': 'test', 'pattern_bytes': 1, 'mappings': mappings}
+def bulk_capture(mappings, model='count'):
+    case = {'id': 'fixture', 'model': model, 'population': 'bulk-text', 'family': 'test', 'pattern_bytes': 1, 'mappings': mappings}
     manifest = {'suite': 'language-bulk', 'cases': [case]}
     case_hash = hashlib.sha256(json.dumps(case, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()).hexdigest()
     data = {'hosts': [], 'observations': [], 'comparisons': []}
@@ -100,6 +100,20 @@ class TestLanguageData(unittest.TestCase):
         for comparison in data['comparisons']:
             del comparison['work_contract']
         self.assertTrue(all('workContract' not in row for row in language_rows(data, [manifest])))
+
+    def test_span_sums_through_for_each_match_do_not_mix_with_matcher_loops(self):
+        # Contract version 5 sums count-spans through public forEachMatch, so a host that summed them through a
+        # matcher loop under version 4 measured different work.
+        data, manifest = bulk_capture({language: {'pattern': 'a', 'status': 'compatible', 'reason': 'same bytes'}
+                                       for language in ('re2', 'java', 'rust', 'trino')}, 'count-spans')
+        for comparison in data['comparisons']:
+            comparison['work_contract'] = 'public-for-each-match-v1'
+        self.assertTrue(all(row['workContract'] == 'public-for-each-match-v1' for row in language_rows(data, [manifest])))
+        for comparison in data['comparisons']:
+            if comparison['logical_identity'][4] == 1:
+                comparison['work_contract'] = 'trino-matcher-count-v3' if comparison['language'] == 'trino' else 'bulk-matched-outputs-v1'
+        with self.assertRaisesRegex(ValueError, 'mixed benchmark call contracts'):
+            language_rows(data, [manifest])
 
     def test_native_comparator_repetitions_are_one_process(self):
         # Native RE2 and the Rust crate time five repetitions in one invocation; each fork of a JVM side is a process.
@@ -210,6 +224,10 @@ class TestLanguageData(unittest.TestCase):
         validate_language_report(data)
         row['workContract'] = 'trino-matcher-count-v3'
         validate_language_report(data)
+        row['model'] = 'count-spans'
+        row['workContract'] = 'public-for-each-match-v1'
+        validate_language_report(data)
+        row['model'] = 'count-captures'
         for invalid in ('public-find-count-v2', 'unknown', None):
             row['workContract'] = invalid
             with self.assertRaisesRegex(ValueError, 'benchmark work contract'):
