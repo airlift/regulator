@@ -287,7 +287,7 @@ Representative JMH classes include:
 | `BenchmarkTrinoRegexp` | Fixed-haystack Trino operation diagnostics |
 | `BenchmarkTrinoRows` | [Normative Trino rows](#normative-trino-rows): one Trino function per real corpus row, for literals, ordered pairs, and `.*literal.*` |
 | `BenchmarkTrinoLikeRows` | [Normative Trino rows](#normative-trino-rows): one Trino LIKE contains or ordered match per real corpus row, interpreted or generated |
-| `BenchmarkUapCore` | The public uap-core browser and OS user-agent rules as an application runs them: each section's rules in a `FilteredRe2` whose atoms one `Re2Set` finds, over uap-core's test user agents; crawler rule 51 alone, the atom sets alone, and full parses, per thread and shared by every thread |
+| `BenchmarkUapCore` | The public uap-core browser and OS user-agent rules as an application runs them: each section's rules in a `FilteredRe2` whose atoms one `Re2Set` finds, over uap-core's test user agents and a seeded diagnostic corpus of atom fragments; crawler rule 51 alone, the atom sets alone, and full parses, per thread and shared by every thread |
 
 Compile the test classes and resolve their classpath with Maven:
 

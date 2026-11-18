@@ -126,17 +126,29 @@ final class UapCoreParser
     {
         fieldCount = section.resultFields().size();
         rules = section.rules();
-        FilteredRe2.Builder filteredBuilder = FilteredRe2.builder();
-        for (Rule rule : rules) {
-            filteredBuilder.add(Slices.utf8Slice(rule.regex()), Re2.Options.defaults().setMaxMemory(ruleMemory));
-        }
-        filteredRe2 = filteredBuilder.build();
+        filteredRe2 = compileRules(rules, Re2.Options.defaults().setMaxMemory(ruleMemory));
 
         Re2Set.Builder atomSetBuilder = Re2Set.builder(Re2.Options.defaults().setMaxMemory(atomSetMemory), FIND);
         for (Slice atom : filteredRe2.atoms()) {
             atomSetBuilder.add(Re2.quote(atom));
         }
         atomSet = atomSetBuilder.build();
+    }
+
+    /// Returns the section's atoms in the order its atom set holds them. The atoms come from the
+    /// rules alone, whatever the rules' memory budget.
+    static List<Slice> atoms(Section section)
+    {
+        return compileRules(section.rules(), Re2.Options.defaults()).atoms();
+    }
+
+    private static FilteredRe2 compileRules(List<Rule> rules, Re2.Options options)
+    {
+        FilteredRe2.Builder filteredBuilder = FilteredRe2.builder();
+        for (Rule rule : rules) {
+            filteredBuilder.add(Slices.utf8Slice(rule.regex()), options);
+        }
+        return filteredBuilder.build();
     }
 
     int ruleCount()
