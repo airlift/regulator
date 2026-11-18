@@ -45,7 +45,10 @@ pointer tables, its DFA caches included. It changes as searches build DFA
 states and caches reset, and the caches grow within the budget, which
 `maxMemoryBytes()` returns. A pattern shared by many threads counts once; each
 thread's `RegexpMatcher` reports its own working memory from its own
-`retainedSizeInBytes()`, which leaves out the pattern. See
+`retainedSizeInBytes()`, which leaves out the pattern. One exception: the
+match start set a dense all-match operation's matcher holds is charged to the
+pattern's DFA budget and reported by the pattern while the operation runs.
+See
 [Retained memory](REGULATOR_API.md#retained-memory) for what the estimate
 leaves out.
 
@@ -70,7 +73,7 @@ is right for all of them.
 
 | Engine | Shared by every thread | Held by each search or thread |
 |---|---|---|
-| Regulator | The program, planned matchers, and one DFA cache for each direction and match kind | Capture-search working memory, which a `RegexpMatcher` keeps between finds |
+| Regulator | The program, planned matchers, and one DFA cache for each direction and match kind | Capture-search working memory, which a `RegexpMatcher` keeps between finds, and a dense all-match operation's match start set, which the pattern's budget charges while it is held |
 | RE2 | The program, its one-pass table, and one DFA cache for each direction and match kind | NFA and backtracker working memory |
 | Rust `regex` crate | The compiled NFAs and other read-only parts | Lazy DFA caches and every engine's scratch, taken from a pool |
 | JDK `java.util.regex` and PCRE2 | The compiled pattern | A `Matcher`, or a PCRE2 match data block and JIT stack; no lazily built cache |

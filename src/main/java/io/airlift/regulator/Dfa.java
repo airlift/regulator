@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntPredicate;
 
@@ -145,7 +146,8 @@ final class Dfa
     private static final int SIZE_READ_ATTEMPTS = 4;
     private static final long WORK_QUEUE_BYTES = instanceSize(WorkQueue.class);
     private static final long ABSOLUTE_POINTER_TRANSITIONS_BYTES = instanceSize(AbsolutePointerTransitions.class);
-    private static final long SUPERSEDED_REFERENCE_BYTES = instanceSize(SupersededAbsolutePointerReference.class);
+    private static final long SUPERSEDED_REFERENCE_BYTES = instanceSize(SupersededMemoryReference.class);
+    private static final long MATCH_START_SET_INSTANCE_BYTES = instanceSize(MatchStartSet.class);
     // One conservatively aligned plan record and its 256-byte membership array.
     private static final long FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY = 32L + 16 + 256;
     private static final Prog.FixedDistanceByteCandidates NO_FIXED_DISTANCE_BYTE_CANDIDATES =
@@ -189,7 +191,8 @@ final class Dfa
     private static final int FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE = 15;
     private static final int PREFIX_RUN_SCAN_ROUTE = 16;
     private static final int ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE = 17;
-    private static final int COUNTED_ROUTES = 18;
+    private static final int MATCH_START_SET_PASS_ROUTE = 18;
+    private static final int COUNTED_ROUTES = 19;
 
     private Dfa() {}
 
@@ -1292,6 +1295,270 @@ final class Dfa
             finally {
                 cursor.dfa.endSearch(exclusiveSearch);
             }
+        }
+    }
+
+    /// The most memory a match start set takes: one bit per byte of 8 MiB of text. A longer rest
+    /// of the region stays on the find-by-find search.
+    static final long MAX_MATCH_START_SET_BYTES = 1024 * 1024;
+
+    /// Collects the positions of `[start, contextEnd]` where a match of the program whose reverse
+    /// is `reverseProg` starts, in one unanchored reverse pass of the start-set DFA (see
+    /// [Prog#matchStartSetDfa]) from the context end down to `start`, or returns `null`. The pass
+    /// reads the context as each search does: its first step sees the bytes after the context end
+    /// as missing and its last step sees the byte before `start`, so line, text, and word
+    /// assertions decide at every position as an anchored search from there would. The set's
+    /// memory, [#matchStartSetBytes], is reserved from the reverse longest-match DFA's free state
+    /// memory, as [DfaInstance#reserveMatchStartSetMemory] takes it, before the start-set DFA
+    /// borrows from what is left, so a set that does not fit borrows nothing; it goes back when
+    /// the operation releases the set. Returns `null`, holding nothing, when the set exceeds
+    /// [#MAX_MATCH_START_SET_BYTES] or the reservation, there is no start-set DFA, or the pass
+    /// quits on a byte outside ASCII or fills the cache.
+    static MatchStartSet collectMatchStarts(Prog reverseProg, Slice context, int contextStart, int contextEnd, int start)
+    {
+        requireNonNull(context, "context is null");
+        if (contextStart < 0 || contextEnd < contextStart || contextEnd > context.length() || start < contextStart || start > contextEnd) {
+            return null;
+        }
+        int words = matchStartSetWords(contextEnd - start);
+        if (sizeOfLongArray(words) > MAX_MATCH_START_SET_BYTES) {
+            return null;
+        }
+        long bytes = matchStartSetBytes(contextEnd - start);
+        DfaInstance lender = reverseProg.cachedDfaIfPresent(DfaInstance.Kind.LONGEST_MATCH);
+        if (lender == null || !lender.reserveMatchStartSetMemory(bytes)) {
+            return null;
+        }
+        MatchStartSet startSet = null;
+        try {
+            DfaInstance dfa = reverseProg.matchStartSetDfa();
+            if (dfa != null) {
+                long[] starts = new long[words];
+                int pass = collectMatchStarts(dfa, context, contextStart, contextEnd, start, starts);
+                if (pass == MATCH_START_PASS_COMPLETE) {
+                    countRoute(dfa, MATCH_START_SET_PASS_ROUTE);
+                    startSet = new MatchStartSet(starts, start, lender, bytes);
+                }
+                else if (pass == MATCH_START_PASS_FULL) {
+                    // The loan is too small for this program's passes: give it back now, and
+                    // build no other start-set DFA.
+                    reverseProg.markMatchStartSetDfaUnavailable();
+                    lender.recallMatchStartSetDfaLoan(dfa);
+                }
+            }
+        }
+        finally {
+            if (startSet == null) {
+                lender.releaseMatchStartSetMemory(bytes);
+            }
+        }
+        return startSet;
+    }
+
+    /// The memory a match start set over `length` bytes takes, one bit for each position of
+    /// `[start, start + length]`, with the set's own object.
+    static long matchStartSetBytes(int length)
+    {
+        return MATCH_START_SET_INSTANCE_BYTES + sizeOfLongArray(matchStartSetWords(length));
+    }
+
+    private static int matchStartSetWords(int length)
+    {
+        return toIntExact(((long) length + 1 + Long.SIZE - 1) / Long.SIZE);
+    }
+
+    // How a pass of collectMatchStarts ended: every start marked, quit on a byte outside ASCII or
+    // otherwise unfinished, or out of cache memory.
+    private static final int MATCH_START_PASS_COMPLETE = 0;
+    private static final int MATCH_START_PASS_UNFINISHED = 1;
+    private static final int MATCH_START_PASS_FULL = 2;
+
+    @SuppressWarnings("UnusedException")
+    private static int collectMatchStarts(DfaInstance dfa, Slice context, int contextStart, int contextEnd, int start, long[] starts)
+    {
+        int contextOffset = context.byteArrayOffset();
+        int ctxBegin = contextOffset + contextStart;
+        int ctxEnd = contextOffset + contextEnd;
+        int textBegin = contextOffset + start;
+        byte[] bytes = context.byteArray();
+        boolean requiresExclusiveSearch = false;
+        long observedCacheVersion = 0;
+        while (true) {
+            boolean exclusiveSearch = requiresExclusiveSearch;
+            if (!exclusiveSearch) {
+                observedCacheVersion = dfa.cacheVersion();
+            }
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
+            if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
+                dfa.cancelExclusiveSearch();
+                requiresExclusiveSearch = false;
+                continue;
+            }
+            try {
+                // A pass retried in exclusive mode marks the same positions again.
+                StateData startData = dfa.analyzeStart(tables, bytes, ctxBegin, ctxEnd, textBegin, ctxEnd, false, false);
+                tables = dfa.tablesAfterWrite(tables);
+                if (startData.offset() == T_DEAD) {
+                    return MATCH_START_PASS_COMPLETE;
+                }
+                if (startData.offset() == T_FULL_MATCH) {
+                    return MATCH_START_PASS_UNFINISHED;
+                }
+                if ((startData.flag() & FLAG_MATCH) != 0) {
+                    markMatchStart(starts, ctxEnd - textBegin);
+                }
+                return collectMatchStartsBackward(dfa, tables, bytes, ctxBegin, textBegin, ctxEnd, startData.offset(), starts);
+            }
+            catch (StartStateAllocationException ignored) {
+                return MATCH_START_PASS_FULL;
+            }
+            catch (QuitSearchException ignored) {
+                return MATCH_START_PASS_UNFINISHED;
+            }
+            catch (RetrySearchException ignored) {
+                if (exclusiveSearch) {
+                    throw new AssertionError("exclusive match start set pass requested a retry");
+                }
+                requiresExclusiveSearch = true;
+            }
+            finally {
+                dfa.endSearch(exclusiveSearch);
+            }
+        }
+    }
+
+    // The loop of searchBackward without its skips and early exits: the many-match transitions'
+    // match bit after the byte before a position marks a match starting at that position, and
+    // the end-of-text step decides `textBegin`. A many-match DFA reaches no full-match state, and
+    // the unanchored loop never dies. A full cache ends the pass, which the operation's find-by-
+    // find search then replaces.
+    private static int collectMatchStartsBackward(
+            DfaInstance dfa,
+            CacheTables tables,
+            byte[] bytes,
+            int ctxBegin,
+            int textBegin,
+            int textEnd,
+            int startOffset,
+            long[] starts)
+    {
+        int position = textEnd;
+        int stateOffset = startOffset;
+        int[] transitions = tables.transitions;
+        byte[] byteMap = dfa.bytemap;
+        while (position > textBegin) {
+            // Every computed transition stays in this loop; a match transition marks its position.
+            for (; position > textBegin; position--) {
+                int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position - 1] & 0xFF] & 0xFF));
+                if (nextState <= 0) {
+                    break;
+                }
+                int index = position - textBegin;
+                starts[index >>> 6] |= (long) ((nextState >>> 30) & 1) << index;
+                stateOffset = nextState & ~T_MATCH_BIT;
+            }
+            if (position == textBegin) {
+                break;
+            }
+            int inputByte = bytes[position - 1] & 0xFF;
+            int nextState = getTransition(transitions, stateOffset + (byteMap[inputByte] & 0xFF));
+            if (nextState == T_UNCOMPUTED) {
+                nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
+                if (nextState == Integer.MIN_VALUE) {
+                    return MATCH_START_PASS_FULL;
+                }
+            }
+            if (nextState == T_DEAD) {
+                return MATCH_START_PASS_COMPLETE;
+            }
+            if (nextState == T_FULL_MATCH) {
+                return MATCH_START_PASS_UNFINISHED;
+            }
+            if ((nextState & T_MATCH_BIT) != 0) {
+                markMatchStart(starts, position - textBegin);
+                nextState &= ~T_MATCH_BIT;
+            }
+            stateOffset = nextState;
+            position--;
+        }
+
+        int lastByte = textBegin == ctxBegin ? BYTE_END_TEXT : bytes[textBegin - 1] & 0xFF;
+        int lastClass = textBegin == ctxBegin ? dfa.bytemapRange : byteMap[lastByte] & 0xFF;
+        int finalState = getTransition(transitions, stateOffset + lastClass);
+        if (finalState == T_UNCOMPUTED) {
+            finalState = dfa.computeTransition(tables, stateOffset, lastByte);
+            if (finalState == Integer.MIN_VALUE) {
+                return MATCH_START_PASS_FULL;
+            }
+        }
+        if (finalState == T_FULL_MATCH) {
+            return MATCH_START_PASS_UNFINISHED;
+        }
+        if (finalState > 0 && (finalState & T_MATCH_BIT) != 0) {
+            markMatchStart(starts, 0);
+        }
+        return MATCH_START_PASS_COMPLETE;
+    }
+
+    private static void markMatchStart(long[] starts, int index)
+    {
+        starts[index >>> 6] |= 1L << index;
+    }
+
+    /// The positions from [#begin()] through the end of an all-match operation's region where a
+    /// match starts, which [#collectMatchStarts] collected. The operation that switched to it owns
+    /// it: it is never shared or cached, and [#release()] returns its reserved memory to the DFA
+    /// budget when the operation ends, in the `finally` of the library loop that runs it.
+    static final class MatchStartSet
+    {
+        /// What an all-match operation that may still switch holds until it decides, so that its
+        /// finds alone count toward the switch; see [RegexpMatcher#beginAllMatchOperation]. It
+        /// begins after every position, so it answers no find, and it holds no start and no
+        /// reservation and is never released.
+        static final MatchStartSet UNDECIDED = new MatchStartSet(new long[0], Integer.MAX_VALUE, null, 0);
+
+        private final long[] starts;
+        private final int begin;
+        private final DfaInstance lender;
+        private final long reservedBytes;
+
+        private MatchStartSet(long[] starts, int begin, DfaInstance lender, long reservedBytes)
+        {
+            this.starts = starts;
+            this.begin = begin;
+            this.lender = lender;
+            this.reservedBytes = reservedBytes;
+        }
+
+        int begin()
+        {
+            return begin;
+        }
+
+        /// Returns the first start at or after `position`, at least [#begin()], or -1.
+        int nextStart(int position)
+        {
+            int index = position - begin;
+            int word = index >>> 6;
+            if (word >= starts.length) {
+                return -1;
+            }
+            long bits = starts[word] & (-1L << index);
+            while (bits == 0) {
+                if (++word == starts.length) {
+                    return -1;
+                }
+                bits = starts[word];
+            }
+            return begin + (word << 6) + Long.numberOfTrailingZeros(bits);
+        }
+
+        /// Returns the reserved memory to the budget. The operation calls it once.
+        void release()
+        {
+            lender.releaseMatchStartSetMemory(reservedBytes);
         }
     }
 
@@ -5745,22 +6012,26 @@ final class Dfa
             long memoryDelta,
             boolean allocationFailed) {}
 
-    // A reference to a native pointer table a reset or growth superseded. The collector enqueues
-    // this reference once the superseded native table is unreachable; the DFA links the reference
-    // until then, so it stays reachable, and releases the table's bytes from its count when it next
-    // checks the cap. The native memory itself is freed by the automatic arena's cleaner in the
-    // JDK; this reference releases only the DFA's count of it.
-    private static final class SupersededAbsolutePointerReference
-            extends PhantomReference<AbsolutePointerTransitions>
+    // A reference to memory a DFA no longer holds but still counts: a native pointer table a reset
+    // or growth superseded, or the start-set DFA a recall retired (see
+    // DfaInstance.recallMatchStartSetDfaLoan), which in-flight passes may still use. The collector
+    // enqueues this reference once its referent is unreachable; the DFA links the reference until
+    // then, so it stays reachable, and releases the referent's bytes from their count when it next
+    // checks. The native memory itself is freed by the automatic arena's cleaner in the JDK; this
+    // reference releases only the DFA's count of it.
+    private static final class SupersededMemoryReference
+            extends PhantomReference<Object>
     {
         private final long allocatedBytes;
-        private SupersededAbsolutePointerReference previous;
-        private SupersededAbsolutePointerReference next;
+        private final boolean matchStartSetDfa;
+        private SupersededMemoryReference previous;
+        private SupersededMemoryReference next;
 
-        private SupersededAbsolutePointerReference(AbsolutePointerTransitions absolutePointers, ReferenceQueue<AbsolutePointerTransitions> queue)
+        private SupersededMemoryReference(Object referent, long allocatedBytes, boolean matchStartSetDfa, ReferenceQueue<Object> queue)
         {
-            super(absolutePointers, queue);
-            this.allocatedBytes = absolutePointers.allocatedBytes();
+            super(referent, queue);
+            this.allocatedBytes = allocatedBytes;
+            this.matchStartSetDfa = matchStartSetDfa;
         }
     }
 
@@ -6864,6 +7135,18 @@ final class Dfa
         private final long stateBudget;
         private long availableStateMemory;
         private long retainedStateMemory;
+        // The state budget this reverse DFA lent its program's published start-set DFA, which
+        // reports what it uses itself, or 0. Taken back before this DFA would refuse a state; see
+        // recallMatchStartSetDfaLoan and Prog.matchStartSetDfa.
+        private long matchStartSetDfaLoan;
+        // Odd while a lend or a recall moves memory between the free memory and the loan, which
+        // the size read's charge reads together, and advanced again once both are written; see
+        // estimatedRetainedSize.
+        private long matchStartSetLoanVersion;
+        // The match start sets of the all-match operations in progress, which each reserve their
+        // bits here at the switch and release them when the operation ends. See
+        // reserveMatchStartSetMemory.
+        private long matchStartSetReservation;
         private final boolean initFailed;
         private final int maxTransitionsLength;
 
@@ -6923,12 +7206,14 @@ final class Dfa
         // The first pointer table allocation's one wait, for a search that computed no transition,
         // is spent; later allocations, including after a reset, do not wait.
         private boolean absolutePointerTransitionDeferralUsed;
-        // References to native pointer tables a reset or growth superseded, linked until the
-        // collector enqueues them, and their native bytes not yet released from the count.
-        // The list and count are guarded by the cache mutation lock.
-        private final ReferenceQueue<AbsolutePointerTransitions> unreachableAbsolutePointerTables = new ReferenceQueue<>();
-        private SupersededAbsolutePointerReference supersededAbsolutePointerReferences;
+        // References to native pointer tables a reset or growth superseded, and to a start-set DFA
+        // a recall retired, linked until the collector enqueues them, with the native bytes and
+        // the retired loan not yet released from their counts. The list and counts are guarded by
+        // the cache mutation lock.
+        private final ReferenceQueue<Object> unreachableSupersededMemory = new ReferenceQueue<>();
+        private SupersededMemoryReference supersededReferences;
         private long supersededAbsolutePointerMemory;
+        private long retiredMatchStartSetDfaLoan;
         private int shortAbsolutePointerSearchCount;
         private volatile int absolutePointerTransitionCount;
         volatile int stateCount;
@@ -7411,6 +7696,54 @@ final class Dfa
                     textEnd,
                     MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES,
                     BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
+        }
+
+        /// Whether this forward DFA's start-byte or fixed-distance byte scan is selective on English
+        /// text: its filter, or its bytes, would stop at fewer than one position in eight by the
+        /// estimate the filters were admitted with, the density at which the samples begin to
+        /// accept a scan. It is an estimate made at compile time, not a property of any input;
+        /// [#byteScanSkipsPartOf] samples the input itself.
+        boolean hasSelectiveByteScan()
+        {
+            double selectiveDensity = (double) BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT / BYTE_SCAN_SAMPLE_SIZE;
+            if (canStartByteAcceleration()) {
+                double density;
+                if (startLiteralFilter != null) {
+                    density = startLiteralFilter.density();
+                }
+                else if (startClassFilter != null) {
+                    density = startClassFilter.density(ByteFrequencies.englishText());
+                }
+                else {
+                    density = englishProbability(startByteCandidates);
+                }
+                if (density < selectiveDensity) {
+                    return true;
+                }
+            }
+            Prog.FixedDistanceByteCandidates candidates = fixedDistanceByteCandidates();
+            return candidates != null && englishProbability(candidates.candidates()) < selectiveDensity;
+        }
+
+        /// Whether a search of this forward DFA would turn its start-byte or fixed-distance byte scan
+        /// on somewhere in `[position, textEnd)`: whether the density sample a search takes before it
+        /// scans accepts either scan on any [#MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES] piece of it,
+        /// the span over which a search samples again. Where it would, the search skips text that
+        /// a match start set's reverse pass would read whole.
+        boolean byteScanSkipsPartOf(byte[] bytes, int position, int textEnd)
+        {
+            Prog.FixedDistanceByteCandidates fixedDistance = fixedDistanceByteCandidates();
+            for (int piece = position; textEnd - piece >= BYTE_SCAN_SAMPLE_SIZE; piece += MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+                int pieceEnd = (int) Math.min(textEnd, (long) piece + MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES);
+                if (canStartByteAcceleration() && isStartByteScanTailProductive(bytes, piece, pieceEnd)) {
+                    return true;
+                }
+                if (fixedDistance != null &&
+                        isByteCandidateScanProductive(fixedDistance.candidates(), null, null, bytes, piece, pieceEnd, BYTE_SCAN_SAMPLE_SIZE, BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         // The same sample over a tail shorter than the sampling minimum, at least one sample long.
@@ -8081,12 +8414,24 @@ final class Dfa
                     (2 * REFERENCE_BYTES);
         }
 
+        // A DFA that lent its start-set DFA memory takes the loan back before it refuses a state,
+        // and tries once more; see recallMatchStartSetDfaLoan.
         private StateData allocateCachedState(StateKey key, int[] instructions, int flag)
         {
             if (testingStateAllocationFailures > 0) {
                 testingStateAllocationFailures--;
                 return null;
             }
+            StateData state = allocateCachedStateWithinBudget(key, instructions, flag);
+            if (state == null && matchStartSetDfaLoan != 0) {
+                recallMatchStartSetDfaLoan();
+                state = allocateCachedStateWithinBudget(key, instructions, flag);
+            }
+            return state;
+        }
+
+        private StateData allocateCachedStateWithinBudget(StateKey key, int[] instructions, int flag)
+        {
             beginStateAllocationForTesting();
             CacheTables tables = this.tables;
             int[] transitions = tables.transitions;
@@ -8388,7 +8733,7 @@ final class Dfa
         {
             cacheMutationLock.lock();
             try {
-                releaseUnreachableAbsolutePointerTables();
+                releaseUnreachableSupersededMemory();
                 return supersededAbsolutePointerMemory;
             }
             finally {
@@ -8601,6 +8946,13 @@ final class Dfa
             return routeCount(BYTE_SCAN_FALLBACK_ROUTE);
         }
 
+        /// Returns how many reverse passes collected a match start set on this DFA; see
+        /// [Dfa#collectMatchStarts].
+        int matchStartSetPassCount()
+        {
+            return routeCount(MATCH_START_SET_PASS_ROUTE);
+        }
+
         long estimatedPairedTransitionMemory()
         {
             int stateLimit = Math.min(nextFreeOffset / nextSize, tables.stateData.length);
@@ -8626,21 +8978,35 @@ final class Dfa
         // and HotSpot on the 64-bit platforms Regulator runs on reads them whole. A read that sees
         // a publish retries. After a few failed validations it takes the whole state budget as
         // the charge, which no generation's charge exceeds, with the tables current at its last
-        // read. No test forces these interleavings, which would need a hook on the locked path;
+        // read.
+        //
+        // A lend to the start-set DFA and its recall move memory between the free memory and the
+        // loan, which the charge reads together, and publish no tables: a read that saw one from
+        // before the move and the other from after it would miss the charge by the loan, below it
+        // as often as above. So each move, under the cache lock, advances a version to odd before
+        // it writes either field and back to even after, behind store-store fences, and the read
+        // takes the version before the charge and again after it, behind load-load fences, and
+        // retries on an odd version or a change, as it does on a publish. A reservation for a match
+        // start set moves memory out of the free memory alone, which a read sees whole either side
+        // of it. No test forces these interleavings, which would need a hook on the locked path;
         // the ordering argument is the guarantee.
         long estimatedRetainedSize()
         {
             CacheTables tables = this.tables;
+            long loanVersion = matchStartSetLoanVersion;
+            VarHandle.loadLoadFence();
             long charged = sizeReadCharge();
             VarHandle.loadLoadFence();
             int failedValidations = 0;
-            while (this.tables != tables) {
+            while (this.tables != tables || matchStartSetLoanVersion != loanVersion || (loanVersion & 1) != 0) {
                 tables = this.tables;
                 if (++failedValidations == SIZE_READ_ATTEMPTS) {
                     // Prog.getCachedDfa never builds a DFA without a positive budget
                     charged = stateBudget == Long.MAX_VALUE ? sizeReadCharge() : stateBudget;
                     break;
                 }
+                loanVersion = matchStartSetLoanVersion;
+                VarHandle.loadLoadFence();
                 charged = sizeReadCharge();
                 VarHandle.loadLoadFence();
             }
@@ -8668,7 +9034,143 @@ final class Dfa
 
         private long sizeReadCharge()
         {
-            return stateBudget == Long.MAX_VALUE ? retainedStateMemory + pairedTransitionMemory : stateBudget - availableStateMemory;
+            return stateBudget == Long.MAX_VALUE ? retainedStateMemory + pairedTransitionMemory : stateBudget - availableStateMemory - matchStartSetDfaLoan;
+        }
+
+        /// Takes `bytes` of this DFA's free state memory for the match start set of one all-match
+        /// operation, until [#releaseMatchStartSetMemory] returns it. A request takes at most half
+        /// the free memory, so the DFA's own searches keep room to build states; otherwise it takes
+        /// nothing and returns false. A DFA without a budget lends without counting. The cache
+        /// mutation lock orders the charge with state allocation and resets, which leave it
+        /// charged; an operation takes it once at the switch and once at the end, never per find.
+        boolean reserveMatchStartSetMemory(long bytes)
+        {
+            if (stateBudget == Long.MAX_VALUE) {
+                return true;
+            }
+            cacheMutationLock.lock();
+            try {
+                if (bytes > availableStateMemory / 2) {
+                    return false;
+                }
+                availableStateMemory -= bytes;
+                matchStartSetReservation += bytes;
+                return true;
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
+        }
+
+        /// Returns `bytes` reserved by [#reserveMatchStartSetMemory] to the free state memory.
+        void releaseMatchStartSetMemory(long bytes)
+        {
+            if (stateBudget == Long.MAX_VALUE) {
+                return;
+            }
+            cacheMutationLock.lock();
+            try {
+                availableStateMemory += bytes;
+                matchStartSetReservation -= bytes;
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
+        }
+
+        /// The free state memory a start-set DFA may borrow from this DFA: half of what is free,
+        /// 0 for a DFA without a budget, or -1 while a start-set DFA a recall retired is still
+        /// reachable, which keeps its loan counted, so at most one loan is ever outstanding
+        /// beyond the reverse share.
+        long matchStartSetDfaLoanSize()
+        {
+            if (stateBudget == Long.MAX_VALUE) {
+                return 0;
+            }
+            cacheMutationLock.lock();
+            try {
+                releaseUnreachableSupersededMemory();
+                return retiredMatchStartSetDfaLoan != 0 ? -1 : availableStateMemory / 2;
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
+        }
+
+        /// Publishes `dfa`, built with a budget of `loan`, as the start-set DFA in `slot`, lending
+        /// it `loan` of this DFA's free state memory, or returns false, lending nothing, when
+        /// another DFA was published first, a retired one is still reachable, or `loan` is now
+        /// more than half the free memory. The publish and the loan happen under the cache
+        /// mutation lock, as a recall's retire and refund do, so a published start-set DFA always
+        /// holds exactly the loan this DFA counts.
+        boolean lendToMatchStartSetDfa(AtomicReference<DfaInstance> slot, DfaInstance dfa, long loan)
+        {
+            if (stateBudget == Long.MAX_VALUE) {
+                return slot.compareAndSet(null, dfa);
+            }
+            cacheMutationLock.lock();
+            try {
+                releaseUnreachableSupersededMemory();
+                if (retiredMatchStartSetDfaLoan != 0 || loan > availableStateMemory / 2 || !slot.compareAndSet(null, dfa)) {
+                    return false;
+                }
+                matchStartSetLoanVersion++;
+                VarHandle.storeStoreFence();
+                availableStateMemory -= loan;
+                matchStartSetDfaLoan = loan;
+                VarHandle.storeStoreFence();
+                matchStartSetLoanVersion++;
+                return true;
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
+        }
+
+        /// Takes back the loan of `dfa` when it is still the published start-set DFA, after a pass
+        /// on it ran out of cache memory; see [#recallMatchStartSetDfaLoan()].
+        void recallMatchStartSetDfaLoan(DfaInstance dfa)
+        {
+            if (stateBudget == Long.MAX_VALUE) {
+                return;
+            }
+            cacheMutationLock.lock();
+            try {
+                if (matchStartSetDfaLoan != 0 && prog.cachedDfaIfPresent(Kind.MANY_MATCH) == dfa) {
+                    recallMatchStartSetDfaLoan();
+                }
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
+        }
+
+        // Takes the start-set DFA's loan back before this DFA refuses a state: unpublishes the
+        // DFA, so the program's next switch builds a fresh one, and returns the loan to the free
+        // memory. Passes still running on the retired DFA finish on it, so its loan stays counted
+        // through a superseded-memory reference until the collector finds it unreachable, and no
+        // new loan is made until then. Runs under the cache mutation lock. The size read's charge,
+        // which leaves the loan out, does not move; the loan version keeps a read from seeing
+        // half of the move.
+        private void recallMatchStartSetDfaLoan()
+        {
+            DfaInstance retired = prog.retireMatchStartSetDfa();
+            long loan = matchStartSetDfaLoan;
+            if (retired != null) {
+                supersedeMemory(new SupersededMemoryReference(retired, loan, true, unreachableSupersededMemory));
+                retiredMatchStartSetDfaLoan += loan;
+            }
+            matchStartSetLoanVersion++;
+            VarHandle.storeStoreFence();
+            matchStartSetDfaLoan = 0;
+            availableStateMemory += loan;
+            VarHandle.storeStoreFence();
+            matchStartSetLoanVersion++;
+        }
+
+        long matchStartSetReservationForDiagnostics()
+        {
+            return matchStartSetReservation;
         }
 
         // The references that count superseded native pointer tables until the collector frees
@@ -8677,7 +9179,7 @@ final class Dfa
         private long supersededReferenceSize()
         {
             long size = 0;
-            for (SupersededAbsolutePointerReference reference = supersededAbsolutePointerReferences; reference != null; reference = reference.next) {
+            for (SupersededMemoryReference reference = supersededReferences; reference != null; reference = reference.next) {
                 size += SUPERSEDED_REFERENCE_BYTES;
             }
             return size;
@@ -9048,7 +9550,7 @@ final class Dfa
                 // superseded Java tables, so it is neither counted nor capped.
                 return true;
             }
-            releaseUnreachableAbsolutePointerTables();
+            releaseUnreachableSupersededMemory();
             return supersededAbsolutePointerMemory + replacedBytes <= 2 * allocatedBytes;
         }
 
@@ -9060,24 +9562,28 @@ final class Dfa
             if (HEAP_POINTER_TABLES) {
                 return;
             }
-            SupersededAbsolutePointerReference reference = new SupersededAbsolutePointerReference(absolutePointers, unreachableAbsolutePointerTables);
-            reference.next = supersededAbsolutePointerReferences;
-            if (supersededAbsolutePointerReferences != null) {
-                supersededAbsolutePointerReferences.previous = reference;
-            }
-            supersededAbsolutePointerReferences = reference;
-            supersededAbsolutePointerMemory += reference.allocatedBytes;
+            supersedeMemory(new SupersededMemoryReference(absolutePointers, absolutePointers.allocatedBytes(), false, unreachableSupersededMemory));
+            supersededAbsolutePointerMemory += absolutePointers.allocatedBytes();
         }
 
-        // Releases the count of each superseded native pointer table the collector has found
-        // unreachable, and unlinks its reference. Runs only under the cache mutation lock, never on
-        // a search path.
-        private void releaseUnreachableAbsolutePointerTables()
+        private void supersedeMemory(SupersededMemoryReference reference)
         {
-            SupersededAbsolutePointerReference reference;
-            while ((reference = (SupersededAbsolutePointerReference) unreachableAbsolutePointerTables.poll()) != null) {
+            reference.next = supersededReferences;
+            if (supersededReferences != null) {
+                supersededReferences.previous = reference;
+            }
+            supersededReferences = reference;
+        }
+
+        // Releases the count of each superseded native pointer table and retired start-set DFA the
+        // collector has found unreachable, and unlinks its reference. Runs only under the cache
+        // mutation lock, never on a search path.
+        private void releaseUnreachableSupersededMemory()
+        {
+            SupersededMemoryReference reference;
+            while ((reference = (SupersededMemoryReference) unreachableSupersededMemory.poll()) != null) {
                 if (reference.previous == null) {
-                    supersededAbsolutePointerReferences = reference.next;
+                    supersededReferences = reference.next;
                 }
                 else {
                     reference.previous.next = reference.next;
@@ -9087,7 +9593,12 @@ final class Dfa
                 }
                 reference.previous = null;
                 reference.next = null;
-                supersededAbsolutePointerMemory -= reference.allocatedBytes;
+                if (reference.matchStartSetDfa) {
+                    retiredMatchStartSetDfaLoan -= reference.allocatedBytes;
+                }
+                else {
+                    supersededAbsolutePointerMemory -= reference.allocatedBytes;
+                }
             }
         }
 
@@ -10125,7 +10636,9 @@ final class Dfa
             availableStateMemory = stateBudget -
                     retainedStateMemory -
                     fixedDistanceByteCandidateMemory -
-                    absolutePointerTransitionMemory();
+                    absolutePointerTransitionMemory() -
+                    matchStartSetDfaLoan -
+                    matchStartSetReservation;
             if (fixedDistanceByteCandidates == RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET) {
                 fixedDistanceByteCandidates = null;
                 fixedDistanceSmallByteSet = 0;

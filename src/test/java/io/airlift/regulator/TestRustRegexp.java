@@ -579,4 +579,20 @@ public class TestRustRegexp
     {
         return method.getReturnType().getSimpleName() + " " + method.getName() + Arrays.toString(method.getParameterTypes());
     }
+
+    @Test
+    public void testDenseFindsSwitchToMatchStartSet()
+    {
+        // An empty match that ends where the last match ended is skipped, after the switch as
+        // before it: here the word boundary at the end of each word.
+        Slice words = utf8Slice("ab cd ".repeat(16 * 1024 / 6).strip());
+        TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("(?-u:\\b)[a-z]*")), words, 0, words.length(), 1);
+
+        // A Unicode \\b quits beside a byte outside ASCII, so a malformed byte near the end stops the
+        // reverse pass, and every find stays on the find-by-find search.
+        byte[] malformed = Arrays.copyOf(words.getBytes(), words.length());
+        malformed[malformed.length - 10] = (byte) 0xFF;
+        Slice input = Slices.wrappedBuffer(malformed);
+        TestRegexpMatcher.assertMatchStartSet(RustRegexp.compile(utf8Slice("\\b[a-z]+\\b")), input, 0, input.length(), 0);
+    }
 }
