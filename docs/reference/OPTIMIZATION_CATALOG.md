@@ -1439,6 +1439,32 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   788.9 MiB, with the same state counts and no resets; timings at that budget
   stayed within noise ([#229]).
 
+### Many-match states that hold their own matches
+
+- **Origin:** Adapted from Aho and Corasick (1975), whose automaton attaches
+  to each state the output of the keywords that end there
+  ([Efficient string matching][aho-corasick-1975]); base RE2 [O-DFA-019],
+  whose many-match states hold the matches of the frontier before the byte
+  that entered them ([dfa.cc][re2-dfa] `WorkqToCachedState`,
+  `RunStateOnByte`). Regulator: states that hold their own frontier's matches
+  in RE2's lazy many-match DFA, for programs without empty-width assertions
+  ([design][d-own-matches]).
+- **Where:** `Dfa.DfaInstance.workQueueToCachedState`, `Dfa.searchMany`,
+  `Dfa.searchManyFull`
+- **Applies when:** An `Re2Set` whose compiled program keeps no empty-width
+  assertion, or such a tagged alternation program; never a `FULL` set (its
+  members end in `\z`)
+- **What it does:** A many-match state holds the sorted IDs of its own
+  frontier's matches, which a search reports when it enters the state, rather
+  than RE2's matches of the frontier one byte earlier, which made each state a
+  pair of a frontier and the previous frontier's matches. A literal set's DFA
+  is then bounded by its trie. Over 20,000 synthetic texts, the 945 uap-core
+  user-agent atoms reached 44,156 states and 39.7 MB of cache, measured with a
+  1 GiB budget. That exceeds the 32 MiB default, under which the cache resets.
+  With states holding their own matches, they reach 6,259 states and 5.2 MB
+  with no reset under the default, and the 371 OS atoms go from 13,662 states
+  (1 GiB) to 1,421 (32 MiB), reporting the same IDs.
+
 ## DFA pointer table
 
 The DFA can also keep a flat pointer table whose entries lead straight to the
@@ -2635,7 +2661,7 @@ change is described.
 | NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero search of a pattern with bounded matches runs the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
 | Per-kind DFA budgets and a minimum state count; Regulator counts a longest-match state's marks and a reversed program's stack by the program's lists and instruction kinds, as [Memory Budgets And DFA Caching](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching) describes | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory`, `Dfa.DfaInstance.markSlots`, `Dfa.DfaInstance.stackLength` |
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
-| Many-match DFA | [O-DFA-019] | `Dfa.searchMany` |
+| Many-match DFA; a state of a program without empty-width assertions holds its own matches, as [Many-match states that hold their own matches](#many-match-states-that-hold-their-own-matches) describes | [O-DFA-019] | `Dfa.searchMany` |
 | Reverse program compiled lazily with swapped assertions | [O-COMP-017] | `CompiledPattern.reverseProg` |
 | Options defaults: UTF-8 and leftmost-first; the default budget is 32 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
 | Forward and reverse memory split | [O-RE2-002] | `CompiledPattern.build`, `CompiledPattern.reverseProgramMemory` |
@@ -2774,6 +2800,7 @@ change is described.
 [d-onepass-assert]: ../../REGULATOR_DECISIONS.md#text-dependent-assertions-in-onepass
 [d-onepass-ext]: ../../REGULATOR_DECISIONS.md#extended-onepass-captures
 [d-onepass-offsets]: ../../REGULATOR_DECISIONS.md#onepass-next-state-offsets
+[d-own-matches]: ../../REGULATOR_DECISIONS.md#many-match-states-hold-their-own-matches
 [d-paired]: ../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions
 [d-position-nfa]: ../../REGULATOR_DECISIONS.md#bit-parallel-position-automaton-after-dfa-failure
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
@@ -2866,6 +2893,7 @@ change is described.
 [ac-rare-bytes]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/util/prefilter.rs#L478-L497
 [ac-teddy-readme]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/README.md
 [ac-vector]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/vector.rs#L363-L370
+[aho-corasick-1975]: https://doi.org/10.1145/360825.360855
 [bg-shift-and]: https://doi.org/10.1145/135239.135243
 [bithacks-zero]: https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
 [briggs-torczon]: https://doi.org/10.1145/176454.176484
