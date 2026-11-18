@@ -39,20 +39,29 @@ public final class GoldenJsonl
             throw new IllegalArgumentException("resource not found: " + resourcePath);
         }
 
-        List<JsonObject> objects = new ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line;
-            int lineNo = 0;
-            while ((line = reader.readLine()) != null) {
-                lineNo++;
-                if (line.isEmpty() || line.charAt(0) == '#') {
-                    continue;
-                }
-                objects.add(parseLine(resourcePath, lineNo, line));
-            }
+        try (stream) {
+            return readObjects(resourcePath, stream);
         }
         catch (IOException e) {
             throw new IllegalStateException("failed to read resource: " + resourcePath, e);
+        }
+    }
+
+    /// Reads the JSON object lines of `input`, which errors name `source`, skipping empty lines
+    /// and lines that start with `#`. The caller closes `input`.
+    static List<JsonObject> readObjects(String source, InputStream input)
+            throws IOException
+    {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+        List<JsonObject> objects = new ArrayList<>();
+        String line;
+        int lineNo = 0;
+        while ((line = reader.readLine()) != null) {
+            lineNo++;
+            if (line.isEmpty() || line.charAt(0) == '#') {
+                continue;
+            }
+            objects.add(parseLine(source, lineNo, line));
         }
         return objects;
     }
