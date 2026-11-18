@@ -395,6 +395,26 @@ public class TestRe2Set
     }
 
     @Test
+    public void testMatchingPatternIdsRecordsScannedMatchesBeforeCacheReset()
+    {
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "a", "b", "c", "d");
+        Slice text = toSlice("ab".repeat(Dfa.MANY_MATCH_SCAN_STATES) + "dc");
+        // This search caches every state but the one 'c' enters.
+        assertThat(set.matchingPatternIds(text.slice(0, text.length() - 1))).containsExactlyInAnyOrder(0, 1, 3);
+        Dfa.DfaInstance dfa = set.dfaForDiagnostics();
+        int resetCount = dfa.resetCount();
+
+        // The byte scan steps through the matching states that 'a' and 'b' enter, more of them
+        // than one scan holds, so it stops once with no room for another. The next scan steps on
+        // through the state that 'd' enters and stops at the uncomputed transition for 'c', whose
+        // new state does not fit the cache. The search records the states that scan matched before
+        // it resets the cache, from the tables that held them.
+        dfa.failStateAllocationsForTesting(1);
+        assertThat(set.matchingPatternIds(text)).containsExactlyInAnyOrder(0, 1, 2, 3);
+        assertThat(dfa.resetCount()).isEqualTo(resetCount + 1);
+    }
+
+    @Test
     public void testMatchingPatternIdsPreservesLargeMatchPayload()
     {
         int patternCount = 512;
