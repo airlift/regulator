@@ -58,10 +58,7 @@ public class BenchmarkPatternCollections
         @Setup
         public void setup()
         {
-            patterns = new Slice[patternCount];
-            for (int index = 0; index < patternCount; index++) {
-                patterns[index] = Slices.utf8Slice("prefix" + index + "-[0-9]+");
-            }
+            patterns = buildPatterns(patternCount);
 
             byte[] bytes = new byte[sourceLength];
             Arrays.fill(bytes, (byte) '.');
@@ -75,6 +72,37 @@ public class BenchmarkPatternCollections
             for (int index = 0; index < allAtomIds.length; index++) {
                 allAtomIds[index] = index;
             }
+        }
+    }
+
+    @State(Scope.Thread)
+    public static class MatchDenseData
+    {
+        @Param({"16", "128"})
+        int patternCount;
+
+        @Param({"1024", "32768"})
+        int sourceLength;
+
+        private Re2Set re2Set;
+        Slice source;
+
+        @Setup
+        public void setup()
+        {
+            Slice[] patterns = buildPatterns(patternCount);
+
+            // Matches of the patterns in ID order, cycled until the text is full, so the search keeps
+            // entering matching states. At 128 patterns, 1,024 bytes end inside pattern 79's text,
+            // so only patterns 0 to 78 match.
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; text.length() < sourceLength; index = (index + 1) % patternCount) {
+                text.append("prefix").append(index).append("-123 ");
+            }
+            text.setLength(sourceLength);
+            source = Slices.utf8Slice(text.toString());
+
+            re2Set = buildRe2Set(patterns);
         }
     }
 
@@ -92,6 +120,12 @@ public class BenchmarkPatternCollections
 
     @Benchmark
     public int[] matchingSetPatternIds(BenchmarkData data)
+    {
+        return data.re2Set.matchingPatternIds(data.source);
+    }
+
+    @Benchmark
+    public int[] matchingSetPatternIdsMatchDense(MatchDenseData data)
     {
         return data.re2Set.matchingPatternIds(data.source);
     }
@@ -118,6 +152,15 @@ public class BenchmarkPatternCollections
     public int[] matchingFilteredPatternIds(BenchmarkData data)
     {
         return data.filteredRe2.matchingPatternIds(data.source, data.allAtomIds);
+    }
+
+    private static Slice[] buildPatterns(int patternCount)
+    {
+        Slice[] patterns = new Slice[patternCount];
+        for (int index = 0; index < patternCount; index++) {
+            patterns[index] = Slices.utf8Slice("prefix" + index + "-[0-9]+");
+        }
+        return patterns;
     }
 
     private static Re2Set buildRe2Set(Slice[] patterns)
