@@ -214,9 +214,10 @@ public class TestDfaCountMatches
         // text. The fixed-width, candidate-cursor and Trino patterns find the same five: the
         // growth text has no uppercase letters or bytes above 0x7F, and no match begins in the
         // dense rare-class bytes. The inner-literal count is checked against a count at the
-        // default budget.
+        // default budget. At 1.5 MiB, the first pattern's unmatched tail after the fifth match
+        // builds a state per byte and holds two generations in either object layout.
         for (CountBailCase countBailCase : List.of(
-                CountBailCase.of(Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20)), input, SHORT_STATE_GROWTH_TEXT, 5),
+                CountBailCase.of(Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 19)), input, SHORT_STATE_GROWTH_TEXT, 5),
                 CountBailCase.of(fixedWidth, Slices.wrappedBuffer(denseRareClassBytes), Slices.wrappedBuffer(denseRareClassShortBytes), 5),
                 CountBailCase.of(candidateCursor, input, SHORT_STATE_GROWTH_TEXT, 5),
                 CountBailCase.of(innerLiteral, denseLiteralText, denseLiteralShortText, Re2.compile(innerLiteralPattern, Re2.Options.latin1()).count(denseLiteralText)),
@@ -258,7 +259,9 @@ public class TestDfaCountMatches
     @Test
     public void testCountBailStreakSkipsDfaForNextCounts()
     {
-        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
+        // At 1.5 MiB, the unmatched tail after the fifth match builds a state per byte and holds
+        // two generations in either object layout, so every long count bails.
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 19));
         var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
 
         // One bailing count skips nothing: the next count runs the DFA, which completes and ends
@@ -291,7 +294,9 @@ public class TestDfaCountMatches
     public void testCountBailWindowBoundsConcurrentSkips()
             throws Exception
     {
-        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
+        // At 1.5 MiB, the unmatched tail after the fifth match builds a state per byte and holds
+        // two generations in either object layout, so every long count bails.
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 19));
         var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
         assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
         assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
@@ -405,8 +410,14 @@ public class TestDfaCountMatches
         // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
         // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
         // and the pinned native RE2 count still holds.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(3L << 19));
-        var input = Slices.wrappedBuffer(stateExplosionInput(2 * 1024 * 1024));
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(1L << 20));
+        // 4 KiB of '!' after the text keep the last search, after the last match, as long as the
+        // fixed-distance scan needs (MIN_SELECTIVE_SCAN_SEARCH_BYTES). A dense tail under that
+        // cutoff would make the last search build a state per byte, which could reset the cache
+        // twice and bail the count. '!' neither begins nor ends a match.
+        byte[] bytes = Arrays.copyOf(stateExplosionInput(2 * 1024 * 1024), 2 * 1024 * 1024 + 4096);
+        Arrays.fill(bytes, 2 * 1024 * 1024, bytes.length, (byte) '!');
+        var input = Slices.wrappedBuffer(bytes);
 
         // Pinned native RE2 finds 1,074 non-overlapping matches in this deterministic input.
         assertThat(pattern.countMatches(input)).isEqualTo(1_074);
