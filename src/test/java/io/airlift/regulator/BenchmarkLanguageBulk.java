@@ -282,6 +282,14 @@ public class BenchmarkLanguageBulk
             };
         }
 
+        long rebarCount()
+        {
+            if (!input.model().equals("count") || !(pattern instanceof Re2 re2)) {
+                throw new IllegalArgumentException("rebar count requires an RE2 count workload");
+            }
+            return RebarRunner.countMatches(re2, input.haystack());
+        }
+
         void trace(BufferedWriter writer)
                 throws IOException
         {
@@ -445,6 +453,14 @@ public class BenchmarkLanguageBulk
             }
         }
         return count;
+    }
+
+    /// The Rebar runner's count route for RE2, for the budget-curve timing; timing-only. Unlike
+    /// execute(), a DFA count that bails falls back to a plain matcher find loop.
+    @Benchmark
+    public long rebarCount(BenchmarkData data)
+    {
+        return data.rebarCount();
     }
 
     static List<Slice> lines(Slice input)
