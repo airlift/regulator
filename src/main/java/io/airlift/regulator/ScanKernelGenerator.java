@@ -659,13 +659,12 @@ final class ScanKernelGenerator
 
         /// Charges a failed run to the work budget up to where it stopped, which a failed run
         /// returns as its complement in `stop`. A run that fails on its first byte made a
-        /// bounded check and is not charged.
+        /// bounded check, returns `-1`, and is not charged.
         private IfStatement chargeFailedRun()
         {
-            BytecodeExpression stopped = stop.bitwiseXor(constantInt(-1));
             return IfStatement.builder()
-                    .condition(stopped.greaterThan(cursor))
-                    .then(scanned.set(invokeStatic(Math.class, "max", int.class, scanned, stopped)))
+                    .condition(stop.notEqual(constantInt(-1)))
+                    .then(scanned.set(invokeStatic(Math.class, "max", int.class, scanned, stop.bitwiseXor(constantInt(-1)))))
                     .build();
         }
 
