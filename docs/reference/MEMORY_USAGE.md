@@ -8,7 +8,7 @@ contract: [Compiled patterns](REGULATOR_API.md#compiled-patterns),
 
 ## The memory budget
 
-Each compiled regular expression has a planning budget, 32 MiB by default. It
+Each compiled regular expression has a planning budget, 24 MiB by default. It
 covers the compiled program, its lazily built DFA caches, and the specialized
 matchers that compilation plans for it. Parsing is not charged, and a compiled
 pattern does not keep its parse tree. Each capture search in progress may also
@@ -22,7 +22,7 @@ The default budgets of comparable engines:
 
 | Engine | Default budget | What it covers |
 |---|---|---|
-| Regulator | 32 MiB per pattern | The program, every DFA cache, and planned matchers, two thirds for forward search and one third for reverse |
+| Regulator | 24 MiB per pattern | The program, every DFA cache, and planned matchers, two thirds for forward search and one third for reverse |
 | RE2 | 8 MiB per pattern (`max_mem`) | The program, its one-pass table, and every DFA cache, with the same split |
 | Rust `regex` crate | 10 MiB per NFA (`size_limit`) and 2 MiB per lazy DFA cache (`dfa_size_limit`) | Each concurrent search holds its own caches, so the total grows with threads |
 | JDK `java.util.regex` and Joni | None | Memory is bounded only by the heap and thread stack |
@@ -31,11 +31,12 @@ The default budgets of comparable engines:
 A Regulator pattern's DFA caches are shared by every thread inside its one
 budget, as
 [How threads share a pattern's memory](#how-threads-share-a-patterns-memory)
-describes. Its default is 4 times RE2's because Regulator is built for data
+describes. Its default is 3 times RE2's because Regulator is built for data
 processing, where one compiled pattern runs over many rows. The budget is a
-cap, not a reservation, and the default keeps the large DFA graphs of nearly
-every benchmarked pattern cached without resets. A pattern that needs more to
-compile, or to keep its DFAs cached, takes a larger budget from `setMaxMemory`.
+cap, not a reservation, and when the JVM uses compressed object pointers, the
+default keeps the large DFA graphs of nearly every benchmarked pattern cached
+without resets. A pattern that needs more to compile, or to keep its DFAs
+cached, takes a larger budget from `setMaxMemory`.
 
 ## Measuring what a pattern holds
 

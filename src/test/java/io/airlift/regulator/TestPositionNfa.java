@@ -132,7 +132,9 @@ public class TestPositionNfa
             throws ReflectiveOperationException
     {
         String expression = "[a-q]|[r-z0-9 ][^u-z]{20,400}[x\\xE0-\\xFF]";
-        CompiledPattern pattern = rustBytes(expression);
+        // At 32 MiB the first window fits BitState's text limit, so only the bitmap cap refuses it.
+        RustRegexp.Options options = RustRegexp.Options.bytes().setUnicode(false).setMaxMemory(32L << 20);
+        CompiledPattern pattern = RustRegexp.compile(utf8Slice(expression), options);
         starveDfas(pattern);
         Prog program = pattern.forwardProgramForDiagnostics();
         assertThat(program.positionNfa().maxLength()).isEqualTo(402);
@@ -151,7 +153,7 @@ public class TestPositionNfa
         Field workspaceField = RegexpMatcher.class.getDeclaredField("positionNfaWorkspace");
         workspaceField.setAccessible(true);
         assertThat(workspaceField.get(matcher)).isNotNull();
-        assertThat(spans).hasSize(1020).isEqualTo(spans(rustBytes("(" + expression + ")").matcher(text), 1));
+        assertThat(spans).hasSize(1020).isEqualTo(spans(RustRegexp.compile(utf8Slice("(" + expression + ")"), options).matcher(text), 1));
     }
 
     /// Boolean searches of short lines judge the resets of the DFA they share across searches:

@@ -116,7 +116,7 @@ Re2 pattern = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=(?<value>[0-9]+)"));
 
 Compilation copies the pattern bytes and snapshots the mutable `Re2.Options`.
 The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching,
-and a 32 MiB compilation, DFA-cache and capture-search budget. A non-positive
+and a 24 MiB compilation, DFA-cache and capture-search budget. A non-positive
 public memory budget is rejected. Each capture search in progress also holds at
 most the forward program's two-thirds share of the budget in working memory at
 once, beside what the compiled pattern retains, plus a copy of at most 64
@@ -146,7 +146,7 @@ program. Trino keeps only the set for such a pattern, and compiles
 Java, and Rust keep the program wherever it fits the budget, so `english-10`
 retains about 14.7 MB under a 96 MiB budget, and a set with its skip table
 counts on the set beside the program.
-Under a budget the program does not fit, such as any below about 24 MiB for
+Under a budget the program does not fit, such as any below about 23.9 MiB for
 `english-10`, they keep only the set instead of failing, and answer every
 operation from it. Such a pattern compiles where a temporary trie of all its
 literals fits the forward share, and then where the set and the list of
@@ -187,7 +187,7 @@ the default, and the `maxMemoryBytes()` a `RegexpCompileMemoryLimitException`
 or `RegexpMatchMemoryLimitException` for the same compile reports. Every
 compiled pattern, `TrinoRegexp`, and `Re2Set` provides it. Each pattern of a
 `FilteredRe2` keeps the budget of its options, and its atom search keeps the one
-`FilteredRe2.Builder.setAtomSearchMaxMemory` sets, 32 MiB by default.
+`FilteredRe2.Builder.setAtomSearchMaxMemory` sets, 24 MiB by default.
 `TrinoLikePattern` has no budget.
 
 The estimate leaves out:
@@ -738,7 +738,7 @@ FilteredRe2.PatternMatch first = rules.firstMatchResult(input);
 `build()` compiles an atom search beside the patterns: an `Re2Set` in `FIND`
 mode with one quoted member for each atom, in the collection's encoding, whose
 member ID is the atom's index in `atoms()`. A collection without atoms has no
-atom search. The atom search's budget is `setAtomSearchMaxMemory`, 32 MiB by
+atom search. The atom search's budget is `setAtomSearchMaxMemory`, 24 MiB by
 default, and takes part in equality. A collection whose atom search exceeds
 that budget still builds, without it: the methods taking found atom IDs work,
 and `matchingPatternIds(input)` and `firstMatchResult(input)` throw

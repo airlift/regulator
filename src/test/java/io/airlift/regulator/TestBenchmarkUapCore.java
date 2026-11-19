@@ -109,8 +109,8 @@ class TestBenchmarkUapCore
         Checksums expected = CHECKSUMS.get(corpus);
         BenchmarkUapCore.SharedParsers parsers = new BenchmarkUapCore.SharedParsers();
         parsers.corpus = corpus;
-        parsers.ruleMemoryMiB = 32;
-        parsers.atomSetMemoryMiB = 32;
+        parsers.ruleMemoryMiB = 24;
+        parsers.atomSetMemoryMiB = 24;
         parsers.setup();
         assertThat(parsers.userAgentCount()).isEqualTo(expected.userAgentCount());
 
