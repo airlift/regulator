@@ -124,6 +124,10 @@ class TestBenchmarkUapCore
         assertThat(benchmark.parseOs(data)).isEqualTo(expected.parseOs());
         assertThat(benchmark.parseBrowserShared(parsers)).isEqualTo(expected.parseBrowser());
         assertThat(benchmark.parseOsShared(parsers)).isEqualTo(expected.parseOs());
+        assertThat(benchmark.parseBrowserOneCall(data)).isEqualTo(expected.parseBrowser());
+        assertThat(benchmark.parseOsOneCall(data)).isEqualTo(expected.parseOs());
+        assertThat(benchmark.parseBrowserSharedOneCall(parsers)).isEqualTo(expected.parseBrowser());
+        assertThat(benchmark.parseOsSharedOneCall(parsers)).isEqualTo(expected.parseOs());
     }
 
     private static byte[] readResource(String resourceName)
