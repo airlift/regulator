@@ -1,0 +1,81 @@
+# prio	group	benchmark	row	language	mode	jar	max_memory_mib	jvm_extra	note
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	base	32	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	bench	32	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	base	24	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	bench	24	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	base	16	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	bench	16	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	base	8	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	safe	bench	8	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	base	32	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	bench	32	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	base	24	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	bench	24	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	base	16	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	bench	16	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	base	8	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	trino-url	bulk.execute	wild/url/search	trino	native	bench	8	-	resets/9 ops main->I21: 32 0->0 (8192->6262 rows), 24 0->0 table released->held, 16 9->0, 8 71->50
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	base	24	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	bench	24	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	base	16	-	0->0 resets, released both, 4096->5552 rows
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	bench	16	-	0->0 resets, released both, 4096->5552 rows
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	native	base	16	-	0->0 resets, released both, 4096->5552 rows
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	native	bench	16	-	0->0 resets, released both, 4096->5552 rows
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	base	8	-	resets 58->32
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	bench	8	-	resets 58->32
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	native	base	8	-	resets 58->32
+P1	url-tld	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	native	bench	8	-	resets 58->32
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	base	24	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	bench	24	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	base	16	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	bench	16	-	identical counters (control)
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	base	8	-	resets 50->27
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	bench	8	-	resets 50->27
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	native	base	8	-	resets 50->27
+P1	url-tld	bulk.execute	url-tld-1of4 (f89b99da…)	trino	native	bench	8	-	resets 50->27
+P1	context	bulk.execute	curated/10-bounded-repeat/context	re2	safe	base	32	-	resets 14->36: more counts finish on the DFA before the bail window reopens
+P1	context	bulk.execute	curated/10-bounded-repeat/context	re2	safe	bench	32	-	resets 14->36: more counts finish on the DFA before the bail window reopens
+P1	context	bulk.execute	curated/10-bounded-repeat/context	re2	native	base	32	-	resets 14->36: more counts finish on the DFA before the bail window reopens
+P1	context	bulk.execute	curated/10-bounded-repeat/context	re2	native	bench	32	-	resets 14->36: more counts finish on the DFA before the bail window reopens
+P1	context	bulk.execute	curated/10-bounded-repeat/context	rust	safe	base	32	-	resets 14->36, as RE2
+P1	context	bulk.execute	curated/10-bounded-repeat/context	rust	safe	bench	32	-	resets 14->36, as RE2
+P1	context	bulk.execute	curated/10-bounded-repeat/context	rust	native	base	32	-	resets 14->36, as RE2
+P1	context	bulk.execute	curated/10-bounded-repeat/context	rust	native	bench	32	-	resets 14->36, as RE2
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	base	32	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	bench	32	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	base	24	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	bench	24	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	base	16	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	bench	16	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	base	8	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	wild/url/search	trino	safe	bench	8	-XX:-UseCompressedOops	oops off: resets/op 0/0, 0/0 (released both), 1.44/1.44, 13.44/11.89
+P2	oops-off	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	base	16	-XX:-UseCompressedOops	oops off: resets/op 1.00/1.11, 9.00/9.00
+P2	oops-off	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	bench	16	-XX:-UseCompressedOops	oops off: resets/op 1.00/1.11, 9.00/9.00
+P2	oops-off	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	base	8	-XX:-UseCompressedOops	oops off: resets/op 1.00/1.11, 9.00/9.00
+P2	oops-off	bulk.execute	url-tld-1of2 (20c6af1e…)	trino	safe	bench	8	-XX:-UseCompressedOops	oops off: resets/op 1.00/1.11, 9.00/9.00
+P2	oops-off	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	base	8	-XX:-UseCompressedOops	oops off: resets/op 7.22/6.89
+P2	oops-off	bulk.execute	url-tld-1of4 (f89b99da…)	trino	safe	bench	8	-XX:-UseCompressedOops	oops off: resets/op 7.22/6.89
+P3	re2-url	bulk.execute	wild/url/search	re2	safe	base	16	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	safe	bench	16	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	safe	base	8	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	safe	bench	8	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	native	base	16	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	native	bench	16	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	native	base	8	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	re2-url	bulk.execute	wild/url/search	re2	native	bench	8	-	16: table released->held, 0 resets; 8: resets 300->240
+P3	java-url	bulk.execute	wild/url/search	java	safe	base	8	-	resets 399->299
+P3	java-url	bulk.execute	wild/url/search	java	safe	bench	8	-	resets 399->299
+P3	two-phase	bulk.execute	twophase-ab (17040ec8…)	trino	safe	base	16	-	same states and resets; tables 8192->7533 fwd (control)
+P3	two-phase	bulk.execute	twophase-ab (17040ec8…)	trino	safe	bench	16	-	same states and resets; tables 8192->7533 fwd (control)
+P3	rust-words	bulk.execute	curated/08-words/long-russian	rust	native	base	8	-	reverse DFA ~2 more resets per 100 ops (316-317 -> 318-320)
+P3	rust-words	bulk.execute	curated/08-words/long-russian	rust	native	bench	8	-	reverse DFA ~2 more resets per 100 ops (316-317 -> 318-320)
+P3	uap-rule51	uap.rule51FindResult	UA	-	safe	base	16	-	no I21 counters: prediction from mechanism only
+P3	uap-rule51	uap.rule51FindResult	UA	-	safe	bench	16	-	no I21 counters: prediction from mechanism only
+P3	uap-rule51	uap.rule51FindResult	UA	-	safe	base	8	-	no I21 counters: prediction from mechanism only
+P3	uap-rule51	uap.rule51FindResult	UA	-	safe	bench	8	-	no I21 counters: prediction from mechanism only
+P3	control	bulk.execute	curated/03-date/ascii	rust	safe	base	32	-	identical counters (control)
+P3	control	bulk.execute	curated/03-date/ascii	rust	safe	bench	32	-	identical counters (control)
+P3	control	bulk.execute	imported/lh3lh3-reb/email	trino	safe	base	32	-	identical counters (control)
+P3	control	bulk.execute	imported/lh3lh3-reb/email	trino	safe	bench	32	-	identical counters (control)
+P3	control	bulk.execute	imported/sherlock/holmes-coword-watson	trino	safe	base	32	-	identical counters (control)
+P3	control	bulk.execute	imported/sherlock/holmes-coword-watson	trino	safe	bench	32	-	identical counters (control)
