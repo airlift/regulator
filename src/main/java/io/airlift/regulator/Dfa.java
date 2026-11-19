@@ -2637,9 +2637,11 @@ final class Dfa
             return ManyMatchResult.RESOURCE_EXHAUSTED;
         }
 
-        // The byte scan's matched states: slot 0 holds the count, and the following slots the
-        // matched state offsets.
-        int[] matchedStates = new int[MANY_MATCH_SCAN_STATES + 1];
+        // The byte scan's matched states live in the match set's dense tail, which saves the
+        // search an allocation: the slot at scanBase holds the count, and the following slots the
+        // matched state offsets. The set fills only the slots before scanBase, its maximum size.
+        int[] matchedStates = matches.scratchTail();
+        int scanBase = matches.maxSize();
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -2675,16 +2677,16 @@ final class Dfa
                 int position = textBegin;
                 int[] transitions = tables.transitions;
                 while (position < textEnd) {
-                    long scanned = scanManyBytes(transitions, dfa.bytemap, bytes, position, textEnd, stateOffset, matchedStates);
+                    long scanned = scanManyBytes(transitions, dfa.bytemap, bytes, position, textEnd, stateOffset, matchedStates, scanBase);
                     position = (int) (scanned >>> 32);
                     stateOffset = (int) scanned;
                     // Record the states the scan matched in the tables it read them from, before
                     // the step that handles the byte the scan stopped at can compute a transition,
                     // reset, or retry.
-                    int matchedCount = matchedStates[0];
+                    int matchedCount = matchedStates[scanBase];
                     if (matchedCount != 0) {
                         matched = true;
-                        for (int index = 1; index <= matchedCount; index++) {
+                        for (int index = scanBase + 1; index <= scanBase + matchedCount; index++) {
                             recordMatches(dfa.stateData(tables, matchedStates[index]), matches);
                         }
                     }
@@ -2783,15 +2785,18 @@ final class Dfa
 
     // Steps from position toward end through the many-match transition table, from stateOffset,
     // stopping before a transition that is uncomputed, dead, or full-match, which searchMany's own
-    // step handles. matchedStates holds the count in slot 0 and the matched state offsets in the
-    // following slots. The scan steps through a matching transition, appending the state it enters
-    // unless that state is the one it appended last, and stops before a matching transition when
-    // matchedStates is full. Four bytes a step keep it larger than FreqInlineSize, so C2 compiles
-    // it on its own and allocates its registers from its own few live values rather than from
-    // searchMany's whole graph. Returns the position and state reached as position << 32 | state.
-    private static long scanManyBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int end, int stateOffset, int[] matchedStates)
+    // step handles. matchedStates holds the count at base and the matched state offsets in the
+    // following slots, through its end. The scan steps through a matching transition, appending the
+    // state it enters unless that state is the one it appended last, and stops before a matching
+    // transition when matchedStates is full. Four bytes a step keep it larger than FreqInlineSize,
+    // so C2 compiles it on its own and allocates its registers from its own few live values rather
+    // than from searchMany's whole graph. Returns the position and state reached as
+    // position << 32 | state.
+    private static long scanManyBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int end, int stateOffset, int[] matchedStates, int base)
     {
-        int count = 0;
+        // The slot of the last state appended, or base while none is.
+        int slot = base;
+        int lastSlot = matchedStates.length - 1;
         int lastMatchedState = -1;
         int unrolledEnd = end - 3;
         while (true) {
@@ -2846,17 +2851,17 @@ final class Dfa
             }
             int matchedState = flagged & ~T_MATCH_BIT;
             if (matchedState != lastMatchedState) {
-                if (count == matchedStates.length - 1) {
+                if (slot == lastSlot) {
                     break;
                 }
-                count++;
-                matchedStates[count] = matchedState;
+                slot++;
+                matchedStates[slot] = matchedState;
                 lastMatchedState = matchedState;
             }
             stateOffset = matchedState;
             position++;
         }
-        matchedStates[0] = count;
+        matchedStates[base] = slot - base;
         return ((long) position << 32) | stateOffset;
     }
 

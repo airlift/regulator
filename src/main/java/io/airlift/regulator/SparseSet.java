@@ -28,7 +28,21 @@ final class SparseSet
 
     public SparseSet(int maxSize)
     {
-        resize(maxSize);
+        this(maxSize, 0);
+    }
+
+    /// Creates a set whose dense array holds `tailSize` scratch ints past `maxSize`, which
+    /// [#scratchTail()] lends out.
+    SparseSet(int maxSize, int tailSize)
+    {
+        if (maxSize < 0) {
+            throw new IllegalArgumentException("maxSize must be >= 0: " + maxSize);
+        }
+        if (tailSize < 0) {
+            throw new IllegalArgumentException("tailSize must be >= 0: " + tailSize);
+        }
+        sparse = new int[maxSize];
+        dense = new int[maxSize + tailSize];
     }
 
     public int size()
@@ -48,7 +62,7 @@ final class SparseSet
 
     public int maxSize()
     {
-        return dense.length;
+        return sparse.length;
     }
 
     /// Clears the set in O(1).
@@ -63,17 +77,11 @@ final class SparseSet
             throw new IllegalArgumentException("newMaxSize must be >= 0: " + newMaxSize);
         }
 
-        if (sparse == null) {
-            sparse = new int[newMaxSize];
-            dense = new int[newMaxSize];
-            size = 0;
-            return;
-        }
-
         if (newMaxSize > maxSize()) {
             int oldMaxSize = maxSize();
+            int tailSize = dense.length - oldMaxSize;
             int[] newSparse = new int[newMaxSize];
-            int[] newDense = new int[newMaxSize];
+            int[] newDense = new int[newMaxSize + tailSize];
             System.arraycopy(sparse, 0, newSparse, 0, oldMaxSize);
             System.arraycopy(dense, 0, newDense, 0, oldMaxSize);
             sparse = newSparse;
@@ -89,6 +97,15 @@ final class SparseSet
     int[] clearAndBorrowDense()
     {
         size = 0;
+        return dense;
+    }
+
+    /// Returns the dense array, whose ints from [#maxSize()] on are the scratch tail the set was
+    /// built with, free for the caller while the set holds at most `maxSize` elements in front of
+    /// it. The many-match scan buffer lives in the match set's dense tail, which saves a search
+    /// one allocation, so `maxSize` is `sparse.length`, no longer `dense.length`.
+    int[] scratchTail()
+    {
         return dense;
     }
 

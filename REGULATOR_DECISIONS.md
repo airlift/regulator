@@ -5437,10 +5437,12 @@ states into a 64-state buffer, and `searchMany` records them from the same
 tables before handling the byte the scan stopped at. Measured with perf counters
 on Xeon 6975P-C (r8i) and Graviton (r9g), every fork kept the state in a
 register. Cycles per byte were 0.85 (r8i) and 0.91 (r9g) of the inline loop's on
-rare-match text, and 0.67 and 0.78 on match-dense text. The cost is one
-280-byte buffer per collecting search; no per-thread scratch fits, because the
-DFA instance is shared across threads. `TestHotMethodSize` keeps the scan above
-the inline limit and caps its size.
+rare-match text, and 0.67 and 0.78 on match-dense text. No per-thread scratch
+fits the buffer, because the DFA instance is shared across threads, so it is a
+65-int tail on the dense array of the match set `matchingPatternIds` already
+allocates: each call allocates 256 or 264 more bytes on that array, by the set
+size's alignment, and no buffer object of its own. `TestHotMethodSize` keeps the
+scan above the inline limit and caps its size.
 
 ## Bounded Candidate-Start Cursor
 

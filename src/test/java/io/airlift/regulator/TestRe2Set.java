@@ -415,6 +415,17 @@ public class TestRe2Set
     }
 
     @Test
+    public void testMatchingPatternIdsKeepsScannedStatesOutOfFullMatchSet()
+    {
+        // Every pattern matches, so the match set fills to its maximum size on the first 'a' and
+        // 'b'. Once the search has cached their states, the alternating states fill the scan
+        // buffer, which follows the set's elements in its dense array.
+        Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "a", "b");
+        Slice text = toSlice("ab".repeat(Dfa.MANY_MATCH_SCAN_STATES + 1));
+        assertThat(set.matchingPatternIds(text)).containsExactlyInAnyOrder(0, 1);
+    }
+
+    @Test
     public void testMatchingPatternIdsPreservesLargeMatchPayload()
     {
         int patternCount = 512;

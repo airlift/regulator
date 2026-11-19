@@ -103,7 +103,7 @@ public final class Re2Set
             return new int[0];
         }
 
-        SparseSet matches = new SparseSet(size);
+        SparseSet matches = new SparseSet(size, Dfa.MANY_MATCH_SCAN_STATES + 1);
         Dfa.ManyMatchResult result = Dfa.searchMany(program, text, matches);
         if (result == Dfa.ManyMatchResult.RESOURCE_EXHAUSTED) {
             throw new RegexpMatchMemoryLimitException(compileInputs.maxMemory());
