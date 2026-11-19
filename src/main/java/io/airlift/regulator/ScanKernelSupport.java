@@ -188,7 +188,7 @@ final class ScanKernelSupport
         int maximum = run.maximum();
         int limit = maximum < 0 ? end : cursor + Math.min(maximum, end - cursor);
         int stop = runScan(run, input, cursor, limit);
-        return stop - cursor >= minimum ? stop : ~stop;
+        return stop - cursor >= minimum ? stop : stop > cursor ? ~stop : -1;
     }
 
     /// A copy of `ScanPlanRun.matchMinimum`.
@@ -198,7 +198,7 @@ final class ScanKernelSupport
         boolean[] members = run.members();
         for (int count = 0; count < minimum; count++) {
             if (cursor >= end || !members[input[cursor] & 0xFF]) {
-                return ~cursor;
+                return count == 0 ? -1 : ~cursor;
             }
             cursor++;
         }
@@ -212,7 +212,7 @@ final class ScanKernelSupport
         int maximum = run.maximum();
         if (maximum < 0 && minimum <= 1) {
             int stop = re2RunScan(run, input, cursor, end);
-            return stop - cursor >= minimum ? stop : ~stop;
+            return stop - cursor >= minimum ? stop : -1;
         }
         int count = 0;
         int limit = maximum < 0 ? minimum : maximum;
@@ -222,7 +222,7 @@ final class ScanKernelSupport
             count++;
         }
         if (count < minimum) {
-            return ~cursor;
+            return count == 0 ? -1 : ~cursor;
         }
         return maximum < 0 ? re2RunScan(run, input, cursor, end) : cursor;
     }
@@ -234,7 +234,7 @@ final class ScanKernelSupport
         for (int count = 0; count < minimum; count++) {
             int width = re2RunMemberWidth(run, input, cursor, end);
             if (width == 0) {
-                return ~cursor;
+                return count == 0 ? -1 : ~cursor;
             }
             cursor += width;
         }
@@ -371,7 +371,7 @@ final class ScanKernelSupport
         int maximum = run.maximum();
         if (maximum < 0 && minimum <= 1) {
             int stop = re2SetRunScan(run, input, cursor, end);
-            return stop - cursor >= minimum ? stop : ~stop;
+            return stop - cursor >= minimum ? stop : -1;
         }
         int count = 0;
         int limit = maximum < 0 ? minimum : maximum;
@@ -381,7 +381,7 @@ final class ScanKernelSupport
             count++;
         }
         if (count < minimum) {
-            return ~cursor;
+            return count == 0 ? -1 : ~cursor;
         }
         return maximum < 0 ? re2SetRunScan(run, input, cursor, end) : cursor;
     }
@@ -393,7 +393,7 @@ final class ScanKernelSupport
         for (int count = 0; count < minimum; count++) {
             int width = re2SetRunMemberWidth(run, input, cursor, end);
             if (width == 0) {
-                return ~cursor;
+                return count == 0 ? -1 : ~cursor;
             }
             cursor += width;
         }

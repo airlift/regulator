@@ -1779,7 +1779,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1787,7 +1787,7 @@ final class ScanPlan
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1811,7 +1811,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1819,7 +1819,7 @@ final class ScanPlan
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1843,7 +1843,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1851,7 +1851,7 @@ final class ScanPlan
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1989,7 +1989,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -1997,7 +1997,7 @@ final class ScanPlan
                         }
                         int stop = step.run.match(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -2021,7 +2021,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -2029,7 +2029,7 @@ final class ScanPlan
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -2053,7 +2053,7 @@ final class ScanPlan
                             if (stop >= 0) {
                                 return stop;
                             }
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
@@ -2061,7 +2061,7 @@ final class ScanPlan
                         }
                         int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
-                            if (~stop > cursor) {
+                            if (stop != -1) {
                                 scanned = Math.max(scanned, ~stop);
                             }
                             failed = true;
