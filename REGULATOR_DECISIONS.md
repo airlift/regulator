@@ -359,7 +359,7 @@ Upstream's own never-capture test uses only unnamed groups.
   engines unchanged. Each entry is a copy of the body's start, which holds the
   entries of the loops nested in it, so in both languages a nest of such loops
   grows with the square of its depth: the default memory budget rejects a nest
-  of about 250 loops such as `(?:a?b?(?:a?b?...)*)*`, which the JDK and Joni
+  of about 280 loops such as `(?:a?b?(?:a?b?...)*)*`, which the JDK and Joni
   run. In Java, the simplifier drops a repeated empty group and cuts any other
   body that matches only the empty string, such as an assertion or `\b+$`, to
   one copy, since the JDK never runs its second iteration. A counted
@@ -545,7 +545,7 @@ original pattern, including when quoting rewrites it before parsing.
   describes the patterns this accepts. The two limits disagree in both
   directions: Regulator accepts some patterns the crate rejects as too large,
   and, at the default budget, rejects some the crate accepts, such as
-  `\w{99}x`.
+  `\w{n}x` for the larger n the reference gives.
 
 ## Trino Compatibility Adapter
 
@@ -755,7 +755,7 @@ text, so the pair scan rejects little that a first-byte scan would not.
 
 ## Memory Budgets And DFA Caching
 
-- Public compilation defaults to a 32 MiB planning budget, four times
+- Public compilation defaults to a 24 MiB planning budget, three times
   upstream's 8 MiB. The budget caps the memory the planning model charges a
   compiled pattern, its program, DFA caches and planned matchers, however many
   threads share it, and caps each capture search's working memory at the
@@ -765,14 +765,14 @@ text, so the pair scan rejects little that a first-byte scan would not.
   are collected. It is a cap, not a reservation: published benchmark rows
   settle at a median of about 10 KB and a 90th percentile of 113 to 320 KB, so
   the default does not shape ordinary patterns. It sets the worst case an
-  operator plans around, and the earlier 96 MiB default let a hostile or
-  accidental pattern hold three times as much.
-- At 32 MiB every published benchmark row still compiles, and only
-  `curated/10-bounded-repeat/context` needs more to keep its speed: it fills
-  about 30 MB of DFA states, and slows at 72 MiB and below, 15 to 21 times at
-  32 MiB. Benchmarks run it and its compile sibling at a budget of their own,
-  for every engine with a memory limit, as
-  [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
+  operator plans around, and the earlier defaults of 32 MiB and 96 MiB let a
+  hostile or accidental pattern hold a third more and four times as much.
+- At 24 MiB every published benchmark row still compiles.
+  `curated/10-bounded-repeat/context` and its compile sibling run at a budget
+  of their own, for every engine with a memory limit, as
+  [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes:
+  the search fills about 30 MB of DFA states, slows at 72 MiB and below, and
+  took 15 to 21 times as long at 32 MiB.
 
   `unicode/overlapping-words` english and russian run at each engine's
   default, comparators included: the class-run counter decides their captures,
@@ -780,27 +780,50 @@ text, so the pair scan rejects little that a first-byte scan would not.
   captures](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures)
   describes, so the pattern compiles no program and retains about 34 KB.
   RE2, Java, and Rust `dictionary/search/english-10` and its compile sibling
-  run at the default too, comparators included: they keep their program from
-  about 24 MiB, so at 32 MiB they take the same route and retain the same
-  bytes as at 96 MiB.
-  Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
-  `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
-- BitState's anchored text limit falls with the forward share: from 105–210 KB
-  to 52–105 KB for small capture programs such as `(a+)(b+)` and `(?:(a)|a)*`,
-  and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB. A capture
-  over a match between the two limits that used BitState now runs on the
-  capture NFA; the 32 KiB unanchored bitmap cap is unchanged.
-- A lower default was rejected: at 24 MiB Trino `url/search` slows 5% in safe
-  mode, and at 16 MiB `url/search` slows 1.3 to 7 times in every language and
-  `english-15` 1.2 to 1.5 times. When this was decided, `overlapping-words`
-  also did not compile at 24 MiB; on the class-run counter it now compiles
-  far below either budget.
-- Lowering the default in a 2.x release breaks compatibility for a pattern
-  that needed 32 to 96 MiB: it now throws `RegexpCompileMemoryLimitException`
-  at the default, and where a bound is proven the message says the pattern
-  needs a larger memory budget and reports the proven lower bound, rounded up;
-  compilation may still need more. Regulator has no users yet who rely on the
-  larger default.
+  run at the default too, comparators included. Regulator keeps their program
+  from about 23.9 MiB, just under the default, but at 24 MiB compiles it by a
+  different route than at 32 MiB: the pattern does not keep the reverse
+  program's input, and compilation plans its capture searches with a bounded
+  window of slots rather than an unbounded one. At 24 MiB, Java's search row
+  took 0.999 of its 32 MiB time on r9g and 0.997 on r8i.
+  When the default was 32 MiB, every other published row ran at it as at
+  96 MiB on r9g and r8i, `url/search` included (0.997 of its 96 MiB time on
+  r9g and 0.999 on r8i in Trino safe mode).
+- BitState's anchored text limit falls with the forward share: from 150–210 KB
+  to 75–105 KB for small capture programs such as `(a+)(b+)` and `(?:(a)|a)*`,
+  and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB, when the
+  default fell from 96 MiB to 32 MiB. At 24 MiB it halves again for the small
+  programs, `(a+)(b+)` from 75 KB to 37 KB and `(?:(a)|a)*` from 105 KB to
+  52 KB, and `[0-9]+.(.*)` keeps 44 KB. A capture that used BitState over a
+  match between the limits before and after a lowering now runs on the capture
+  NFA; the 32 KiB unanchored bitmap cap is unchanged.
+- A lower default was first rejected: at 24 MiB Trino `url/search` slowed 5%
+  in safe mode, and at 16 MiB `url/search` slowed 1.3 to 7 times in every
+  language and `english-15` 1.2 to 1.5 times. `overlapping-words` also did not
+  compile at 24 MiB then; on the class-run counter it now compiles far below
+  either budget. DFA state tables now grow only as far as the budget funds
+  them, so Trino `url/search` holds its whole graph and its pointer table at
+  24 MiB, and takes 1.00 of its 32 MiB time on r9g and r8i in safe and native
+  modes. Without compressed object pointers, which a JVM turns off above about
+  a 32 GB heap, it gives its pointer table back at 24 MiB and takes 1.10 to
+  1.20 of its 32 MiB time in safe mode.
+- Other rows that change at 24 MiB, timed against 32 MiB on r9g and r8i:
+  `curated/10-bounded-repeat/context` resets less but more of its counts bail,
+  and takes 1.02 to 1.03 of its 32 MiB time through `count()` and 1.02 to 1.05
+  through the Rebar runner's count route, where it thrashes at both budgets;
+  RE2 and Rust `dictionary/search/english-10` take 1.00 to 1.01. Without
+  compressed object pointers, Rust `curated/13-noseyparker/single` no longer
+  holds its 7,231 DFA states, which need 30 MiB in that layout, and takes 2.2
+  times its 32 MiB time on r9g and 2.4 on r8i; with them it holds every state
+  at 24 MiB and does not change. On a heap too large for compressed object
+  pointers, a pattern like it keeps its states with a 30 MiB `setMaxMemory`.
+- Each lowering of the default, from 96 MiB to 32 MiB in 2.1 and to 24 MiB in
+  2.2, breaks compatibility for a pattern that needs more than the lowered
+  default but no more than the one before: it now throws
+  `RegexpCompileMemoryLimitException` at the default, and where a bound is
+  proven the message says the pattern needs a larger memory budget and reports
+  the proven lower bound, rounded up; compilation may still need more.
+  Regulator has no users yet who rely on the larger default.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to reverse search: a lazily compiled reverse program, less what an
   eagerly compiled inner literal search retains from that third.
@@ -5494,7 +5517,7 @@ is read. It also makes each state a pair of a frontier and the previous
 frontier's matches. Over 20,000 synthetic 1 KiB texts built from fragments of
 the atoms, the 945 literal atoms that `FilteredRe2` extracts from the uap-core
 user-agent parsers reached 44,156 such states and 39.7 MB of cache, measured
-with a 1 GiB budget. That footprint exceeds the 32 MiB default budget, under
+with a 1 GiB budget. That footprint exceeds the 24 MiB default budget, under
 which the cache resets. They pass through only 6,259 frontiers.
 
 When no instruction of a set's program is an empty-width assertion, whether a
@@ -5504,7 +5527,7 @@ and a search reports them when it enters the state. The start state holds the
 empty members' matches, and `matchingPatternIds` skips the end-of-text step,
 which has nothing left to report. A state is then a function of its frontier alone, so a literal
 set's DFA is bounded by its trie rather than by the trie times the previous
-byte's outputs. Measured under the 32 MiB default budget, the user-agent atoms
+byte's outputs. Measured under the 24 MiB default budget, the user-agent atoms
 reach 6,259 states and 5.2 MB on the same texts with no reset, and the 371 OS
 atoms 1,421 states and 1.0 MB, down from 13,662 and 9.2 MB with the 1 GiB
 budget. The tagged alternation program, which picks a match's branch with a
@@ -5862,7 +5885,7 @@ temporary trie of every literal that spells the full-match list below must fit
 it, and then the automaton must fit it together with that list. Where both pass,
 the pattern keeps only the automaton and the list, and every operation runs the
 automaton, as in Trino, with no reverse expression; otherwise the compile fails
-as it would without this route. `english-10`, whose program needs about 24 MiB,
+as it would without this route. `english-10`, whose program needs about 23.9 MiB,
 compiles this way below that, from 3.11 MiB, a budget the temporary trie sets,
 and retains about 2.8 MB; Trino compiles it from 2.63 MiB.
 Dropping the program wherever the longest-match DFA cannot initialize, as for

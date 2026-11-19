@@ -49,7 +49,7 @@ public class TestTrinoRegexpFunctions
     @Test
     public void testMemoryBudget()
     {
-        assertThat(TrinoRegexp.Options.defaults().maxMemory()).isEqualTo(32L << 20);
+        assertThat(TrinoRegexp.Options.defaults().maxMemory()).isEqualTo(24L << 20);
         assertThatThrownBy(() -> TrinoRegexp.Options.defaults().setMaxMemory(0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("greater than zero");

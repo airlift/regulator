@@ -135,10 +135,10 @@ public class BenchmarkUapCore
         @Param
         Corpus corpus;
 
-        @Param("32")
+        @Param("24")
         int ruleMemoryMiB;
 
-        @Param("32")
+        @Param("24")
         int atomSetMemoryMiB;
 
         private TestingUapCoreParser browserParser;

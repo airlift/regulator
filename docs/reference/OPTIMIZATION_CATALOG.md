@@ -1503,10 +1503,10 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   pair of a frontier and the previous frontier's matches. A literal set's DFA
   is then bounded by its trie. Over 20,000 synthetic texts, the 945 uap-core
   user-agent atoms reached 44,156 states and 39.7 MB of cache, measured with a
-  1 GiB budget. That exceeds the 32 MiB default, under which the cache resets.
+  1 GiB budget. That exceeds the 24 MiB default, under which the cache resets.
   With states holding their own matches, they reach 6,259 states and 5.2 MB
   with no reset under the default, and the 371 OS atoms go from 13,662 states
-  (1 GiB) to 1,421 (32 MiB), reporting the same IDs.
+  (1 GiB) to 1,421 (24 MiB), reporting the same IDs.
 
 ## DFA pointer table
 
@@ -2706,7 +2706,7 @@ change is described.
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
 | Many-match DFA; a state of a program without empty-width assertions holds its own matches, as [Many-match states that hold their own matches](#many-match-states-that-hold-their-own-matches) describes | [O-DFA-019] | `Dfa.searchMany` |
 | Reverse program compiled lazily with swapped assertions | [O-COMP-017] | `CompiledPattern.reverseProg` |
-| Options defaults: UTF-8 and leftmost-first; the default budget is 32 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
+| Options defaults: UTF-8 and leftmost-first; the default budget is 24 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
 | Forward and reverse memory split | [O-RE2-002] | `CompiledPattern.build`, `CompiledPattern.reverseProgramMemory` |
 | Required literal prefix split | [O-RE2-003] | `CompiledPattern.build`, `CompiledPattern.matchesRequiredPrefix` |
 | Capture engine cascade and DFA result checks | [O-RE2-005], [O-RE2-006], [O-RE2-007], [O-RE2-010] | `CompiledPattern.runSubmatchEngine`, `CompiledPattern.matchOnOrdinaryEngine` |

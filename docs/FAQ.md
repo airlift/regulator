@@ -121,7 +121,7 @@ describe, so a crafted pattern cannot force hash collisions in every process.
 
 ## How much memory does a pattern use?
 
-Each compiled regular expression has a planning budget, 32 MiB by default,
+Each compiled regular expression has a planning budget, 24 MiB by default,
 that covers its program, its lazily built DFA caches, and the matchers that
 compilation plans for it; SQL `LIKE` patterns have no budget. The budget is a
 cap, not a reservation, so simple patterns retain only what they use;
