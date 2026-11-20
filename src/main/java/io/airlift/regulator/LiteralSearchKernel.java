@@ -35,8 +35,7 @@ final class LiteralSearchKernel
     // compare at most one byte per byte covered, such as "bba" over repeated "aabx", never switch,
     // while closely spaced candidates with long partial matches switch within a few candidates.
     // The prefix scans in Prog and VectorPrefixScanner apply the same rule through the static
-    // methods below, except the literal set scan, whose literals bound the comparisons at each
-    // candidate. VectorPrefixScanner.findPair writes comparisonBudgetSpent in line.
+    // methods below. VectorPrefixScanner.findPair writes comparisonBudgetSpent in line.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
     // Boolean contains and dot-star spans use Slice.indexOf below this window length.
     // The AWS sweep placed the crossover between 48 and 64 bytes, with an approximate

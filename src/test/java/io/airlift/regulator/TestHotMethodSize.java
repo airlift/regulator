@@ -541,12 +541,6 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(419);
-        // The literal set scan runs the same loop under the same rules, capped at the size it was
-        // added at.
-        assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
-                .as("VectorPrefixScanner.findLiteralSet bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(517);
     }
 
     /// Keeps the many-match search's byte scan larger than FreqInlineSize, so C2 compiles it on its
