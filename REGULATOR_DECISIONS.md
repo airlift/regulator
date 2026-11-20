@@ -2317,7 +2317,7 @@ ordinary engine: a match from the call's start cannot cross the first line feed,
 past which the matcher would search on for the literal. An unanchored call makes
 no long-window check, which for such a pattern would never shorten the search:
 its find plan is the contains plan, only a pattern that finds on the general
-engine or a lowered program checks long windows for a required literal, and the
+engine checks long windows for a required literal, and the
 matcher scans for the literal itself and stops at the region's end. The matcher
 calls the contains search itself, and `matchInto` calls the matcher. C2 limits
 inline depth below the method it compiles, and forwarding frames spend that
@@ -2376,8 +2376,8 @@ malformed input unspecified, keeps its engine's answer as its scan plans do. The
 plan does not check a gap's bytes. A leading or trailing gap can match empty, so
 it does not decide whether a match exists. The matcher's memory comes from the
 forward DFA budget, as Trino's ordered-literal subtype's does, so a pattern with
-a lowered boolean or tagged alternation program, or without room for the
-matcher, keeps the engine. Release 2.0 had no such plan outside Trino, and the
+a tagged alternation program, or without room for the matcher, keeps the
+engine. Release 2.0 had no such plan outside Trino, and the
 matcher [yields to the forward DFAs](#memory-budgets-and-dfa-caching). Trino's
 contains keeps its own ordered-literal subtype, which checks each `(?s:.)` gap
 against the characters the engine's dot accepts and asks the engine when one
@@ -2884,10 +2884,9 @@ end anchor (see
 and after the position automaton, which is charged to the forward program itself
 (see
 [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)),
-from the program that holds the forward DFA allowance (the lowered boolean
-program where there is one). It is kept only if every first-match and
-longest-match DFA that could initialize before the charge, start-byte tables
-included, still can. Trino's ordered-literal matcher, which
+from the program that holds the forward DFA allowance. It is kept only if every
+first-match and longest-match DFA that could initialize before the charge,
+start-byte tables included, still can. Trino's ordered-literal matcher, which
 its frontend reserves later, takes its memory first, with the fact's memory
 handed back, and the fact stays only where the same rule holds after both
 charges. The charge follows the
@@ -3288,10 +3287,10 @@ adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
 `,z`, scanned a 16 KiB chunk that ends in `,z` twice, 1.19 to 1.29 times as
 long. Where an inner literal search stands in for the check, the routes that
 skip it, BitState's capture of groups and a search that skips the DFA, scan the
-window for its literal when that is one exact literal. Neither its forward nor
-its lowered program has a prefix scan, a transparent start literal, or a [start
-literal filter](#start-literal-filter) that its first-match DFA can run and
-that groups of one bit also give. As with the [fixed-width yield
+window for its literal when that is one exact literal. Its forward program has
+no prefix scan, transparent start literal, or
+[start literal filter](#start-literal-filter) that its first-match DFA can run
+and that groups of one bit also give. As with the [fixed-width yield
 rule](#fixed-width-rare-class-candidates), the check was measured against
 filters of one-bit groups, so a filter that only wider groups give, such as
 that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check in
@@ -5619,11 +5618,9 @@ same context, and a one-pass program has a single path, so Java's priority
 rules cannot select a different match. Java's multiline anchors and Trino's
 multiline `^` and `$` keep a program off OnePass. Release 2.0 built no OnePass
 tables for a program with one of these end anchors, so such a program's tables
-[yield to the forward DFAs](#memory-budgets-and-dfa-caching) of the lowered
-boolean program when there is one; the program's own DFAs never run, since they
-cannot evaluate those anchors. The tables take their memory after every plan and
-route has reserved its own, so they never change which plans, routes, and lowered
-programs a maxMemory builds, and ahead of the
+[yield to the forward DFAs](#memory-budgets-and-dfa-caching). The tables take
+their memory after every plan and route has reserved its own, so they never
+change which plans and routes a maxMemory builds, and ahead of the
 [short-window required bytes](#short-window-required-bytes-reject), which give
 way to them. A program that drops them runs on BitState or the NFA. A program
 release 2.0 also made one-pass keeps its charge.
@@ -5682,9 +5679,7 @@ position after a terminal LF.
 
 Final-line, multiline begin-line, and Unicode-boundary assertions require
 surrounding input context that is not represented by the ordinary RE2
-empty-width flags. The semantic program retains these assertions and remains
-authoritative whenever explicit captures are observable or the lowered form
-cannot preserve group-zero boundaries.
+empty-width flags. The semantic program retains these assertions.
 
 Trino multiline begin-line uses the two spare DFA empty-width bits. A forward
 state after LF keeps the ordinary begin-line bit pending; transition
@@ -5709,30 +5704,16 @@ uses a count-only plan that returns one for the input start plus the number of
 LF bytes before the final byte. Other operations retain the semantic program,
 and other nullable expressions retain ordinary matcher iteration.
 
-Boolean `find` and `lookingAt` operations use operation-specific plans:
-
-- exact terminal-literal shapes such as `literal$` and `\Aliteral$` compare the
-  literal at the absolute end or immediately before one final LF
-- eligible compound terminal expressions compile a second program in which a
-  terminal final-line assertion is lowered to `(?:\n)?\z`
-- expressions that retain another text-dependent assertion or full case folding
-  after lowering remain on the semantic program
-
-The consuming lowering generally changes match boundaries. For group-zero-only
-matching, the reverse lowered result is also boundary-equivalent when analysis
-proves that the semantic expression is nonempty and cannot consume LF. The
-semantic end is then the region end, excluding one final LF when present.
-Nullable expressions, LF-consuming expressions, stripped required prefixes,
-start-anchored expressions, and explicit capture requests retain the semantic
-program. Boolean `matches` never uses the lowered boundary route, although exact
-shapes may retain their pre-existing direct complete-match plan.
-
-Count, group-zero extraction, position, split, and replacement without capture
-references use the direct boundary route when eligible. A matcher reads the
-eligibility once, when it is created, and the pattern stores no field for it.
-The two forward programs and the lowered program's DFA share the original
-forward memory budget. No warm DFA search loop contains a frontend-specific
-branch; the Trino check runs only while an uncached transition is constructed.
+Boolean `find` and `lookingAt` of exact terminal-literal shapes such as
+`literal$` and `\Aliteral$` compare the literal at the absolute end or
+immediately before one final LF. Other expressions with a terminal final-line
+`$` run on the semantic program. A second program that lowered the terminal
+assertion to `(?:\n)?\z` for boolean and group-zero calls was removed: most
+rows it served ran faster without it, Trino's rust-src-tools rows in about a
+fifth of their time, and its one loss was a bimodal Trino host-and-port
+extraction on Graviton, 1.23 times as long on two of three forks. No warm DFA
+search loop contains a frontend-specific branch; the Trino check runs only
+while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call
@@ -5764,7 +5745,7 @@ to retain Joni's old table contents.
 Literals that require full folding compile to a shared-suffix graph whose size
 is linear in the folded literal length, and the reverse program that finds
 match starts mirrors it. Patterns that need only simple folding retain the
-ordinary compiler and lowered-program routes.
+ordinary compiler.
 
 Case-insensitive character classes fold in Joni's order. A bracket class's
 members, nested classes, and set operations are evaluated without folding, and
@@ -5778,8 +5759,7 @@ of a member's multi-character fold, as Joni's class string alternatives do:
 `(?i)[ﬃ]` matches `ffi`, `ﬀi`, and `fﬁ`. The spelling is matched inside the
 class and never merges with adjacent pattern literals, so `(?i)[ß]s` does not
 match `sß`. A negated class consumes one character. Each spelling is built
-from plain classes rather than a full-fold literal, so a class such as
-`(?i)[ß]` keeps the lowered program that full folding would disable.
+from plain classes rather than a full-fold literal.
 
 A run of literal characters written next to each other under the same
 case-insensitivity folds as one sequence: its Unicode 18.0 full case folding
@@ -5846,8 +5826,8 @@ language rule; Oniguruma
 [b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092)
 fixed it ([Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
 `TrinoRegexp` follows the Java semantics and has a direct regression test for
-this case. The final benchmark matrix must cover direct, lowered, short
-OnePass, allocation, and ordinary-route final-line cases.
+this case. The final benchmark matrix must cover direct, short OnePass,
+allocation, and ordinary-route final-line cases.
 
 ## Trino Specialized Byte Scans
 
@@ -5874,9 +5854,8 @@ one-byte ASCII set, or an unbounded run of every byte except the one-byte
 case-sensitive literal that follows it, and must contain a capture and a
 variable run. A capture-free plan must contain a character run or a variable
 literal repeat. These rules keep capture-free, fixed-width, and literal-only
-patterns on their direct routes. A lowered final-line plan takes precedence
-over a run-leading scan. A plan may also be led by a set of some non-ASCII
-characters, as [RE2 Scan Plans](#re2-scan-plans) records.
+patterns on their direct routes. A plan may also be led by a set of some
+non-ASCII characters, as [RE2 Scan Plans](#re2-scan-plans) records.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do

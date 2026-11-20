@@ -278,6 +278,25 @@ public class TestJavaScanPlan
     }
 
     @Test
+    public void testRunLedFinalLineDollarBeforeLineFeed()
+    {
+        // A run-led plan ending in `$`, interpreted and generated, matches as the JDK does. Under
+        // UNIX_LINES `$` matches at the end and before a final line feed only; without it, also
+        // before the other final terminators. Either way it matches before the line feed that ends
+        // the input, not before one that another line follows.
+        for (String expression : List.of("(?d)([a-z][a-z]*)=([a-z]*)$", "([a-z][a-z]*)=([a-z]*)$")) {
+            Pattern jdk = Pattern.compile(expression);
+            for (NamedRegexp regexp : planned(expression)) {
+                assertThat(regexp.regexp().usesScanPlanForDiagnostics()).as("%s %s", regexp.name(), expression).isTrue();
+                assertThat(regexp.regexp().usesGeneratedBytecode()).as("%s %s", regexp.name(), expression).isEqualTo(regexp.name().startsWith("generated"));
+                for (String input : List.of("a=b", "a=b\n", "a=b\nc", "a=b\n\n", "a=b\nc=d", "a=b\nc=d\n", "x a=\n", "a=b\r\n")) {
+                    assertThat(results(regexp.regexp(), input)).as("%s %s on [%s]", regexp.name(), expression, input).isEqualTo(results(jdk, input));
+                }
+            }
+        }
+    }
+
+    @Test
     public void testPlansMatchTheOrdinaryEngineOnMalformedInput()
     {
         // The JDK reads text, not bytes, so the ordinary engine decides malformed UTF-8.

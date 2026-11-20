@@ -255,7 +255,6 @@ final class ExpressionAnalysis
     private final boolean hasFoldCaseLiteral;
     private final boolean hasNonGreedyRepetition;
     private final boolean hasUnsupportedPositionAssertions;
-    private final boolean canConsumeLineFeed;
     private final LiteralSequence literalSequence;
 
     private ExpressionAnalysis(Regexp regexp, Node node, CaseFolding caseFolding)
@@ -270,7 +269,6 @@ final class ExpressionAnalysis
         this.hasFoldCaseLiteral = node.hasFoldCaseLiteral;
         this.hasNonGreedyRepetition = node.hasNonGreedyRepetition;
         this.hasUnsupportedPositionAssertions = node.hasUnsupportedPositionAssertions;
-        this.canConsumeLineFeed = node.canConsumeLineFeed;
         this.literalSequence = node.elements == null
                 ? null
                 : buildLiteralSequence(node.elements);
@@ -370,11 +368,6 @@ final class ExpressionAnalysis
     boolean hasUnsupportedPositionAssertions()
     {
         return hasUnsupportedPositionAssertions;
-    }
-
-    boolean canConsumeLineFeed()
-    {
-        return canConsumeLineFeed;
     }
 
     LiteralSequence literalSequence()
@@ -697,27 +690,6 @@ final class ExpressionAnalysis
         };
     }
 
-    private static boolean canConsumeLineFeed(Regexp regexp, boolean childCanConsumeLineFeed)
-    {
-        return switch (regexp.op()) {
-            case LITERAL -> regexp.rune() == '\n';
-            case LITERAL_STRING -> containsLineFeed(regexp.runes());
-            case CHAR_CLASS -> regexp.charClass().contains('\n');
-            case ANY_CHAR, ANY_BYTE -> true;
-            default -> childCanConsumeLineFeed;
-        };
-    }
-
-    private static boolean containsLineFeed(int[] runes)
-    {
-        for (int rune : runes) {
-            if (rune == '\n') {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static int maximumLength(Regexp regexp, List<Node> children, CaseFolding caseFolding)
     {
         return switch (regexp.op()) {
@@ -900,7 +872,6 @@ final class ExpressionAnalysis
                 default -> false;
             };
             boolean hasUnsupportedPositionAssertions = isUnsupportedPositionAssertion(regexp);
-            boolean childCanConsumeLineFeed = false;
             for (int childIndex = 0; childIndex < children.size(); childIndex++) {
                 Node child = children.get(childIndex);
                 childLengths[childIndex] = child.encodedLength;
@@ -908,7 +879,6 @@ final class ExpressionAnalysis
                 hasFoldCaseLiteral |= child.hasFoldCaseLiteral;
                 hasNonGreedyRepetition |= child.hasNonGreedyRepetition;
                 hasUnsupportedPositionAssertions |= child.hasUnsupportedPositionAssertions;
-                childCanConsumeLineFeed |= child.canConsumeLineFeed;
             }
 
             int encodedLength = MatchLength.combine(regexp, childLengths, caseFolding);
@@ -923,7 +893,6 @@ final class ExpressionAnalysis
                     hasFoldCaseLiteral,
                     hasNonGreedyRepetition,
                     hasUnsupportedPositionAssertions,
-                    canConsumeLineFeed(regexp, childCanConsumeLineFeed),
                     elements(regexp, children));
         }
 
@@ -946,6 +915,5 @@ final class ExpressionAnalysis
             boolean hasFoldCaseLiteral,
             boolean hasNonGreedyRepetition,
             boolean hasUnsupportedPositionAssertions,
-            boolean canConsumeLineFeed,
             List<Element> elements) {}
 }

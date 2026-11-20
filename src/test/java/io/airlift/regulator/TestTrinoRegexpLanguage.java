@@ -261,34 +261,11 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testTerminalFinalLineDollarUsesLoweredBooleanProgram()
+    public void testTerminalFinalLineDollar()
     {
         TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice("[a-z]+$")).re2();
-        assertThat(pattern.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
-        assertThat(pattern.lookingAtPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
-        assertThat(pattern.matchesPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.GENERAL);
-        assertThat(pattern.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
-        assertThat(pattern.forwardProgramForDiagnostics().dfaMemory()).isZero();
-        assertThat(pattern.booleanProgramForDiagnostics()).isNotNull();
-        assertThat(pattern.booleanProgramForDiagnostics().hasTextDependentAssertions()).isFalse();
-        assertThat(pattern.booleanProgramForDiagnostics().dfaMemory()).isPositive();
-        long forwardMemory = CompiledPattern.forwardMemory(Re2.Options.DEFAULT_MAX_MEMORY);
-        assertThat(
-                Compiler.estimatedProgramMemory(pattern.forwardProgramForDiagnostics()) +
-                        Compiler.estimatedProgramMemory(pattern.booleanProgramForDiagnostics()) +
-                        pattern.booleanProgramForDiagnostics().dfaMemory())
-                .isEqualTo(forwardMemory);
-        assertThat(pattern.booleanProgramForDiagnostics().onePassMemory()).isPositive();
-        assertThat(pattern.isReverseProgramComputed()).isFalse();
-
         assertThat(pattern.matchInto(utf8Slice("123abc\n"), CompiledPattern.Anchor.UNANCHORED, null)).isTrue();
-        assertThat(pattern.isReverseProgramComputed()).isFalse();
-
         assertThat(pattern.find(utf8Slice("123abc\n"))).isTrue();
-        assertThat(pattern.isReverseProgramComputed()).isTrue();
-        assertThat(pattern.reverseProgramIfComputedForDiagnostics()).isNotNull();
-        assertThat(pattern.reverseProgramIfComputedForDiagnostics().hasTextDependentAssertions()).isFalse();
-
         assertThat(pattern.find(utf8Slice("123\n"))).isFalse();
         assertThat(pattern.lookingAt(utf8Slice("abc\n"))).isTrue();
         assertThat(pattern.lookingAt(utf8Slice("123abc\n"))).isFalse();
@@ -298,36 +275,39 @@ public class TestTrinoRegexpLanguage
         TrinoCompiledPattern alternation = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2();
         assertThat(alternation.find(utf8Slice("prefixfoobar\n"))).isTrue();
         assertThat(alternation.find(utf8Slice("prefixbaz\n"))).isFalse();
-        assertThat(alternation.isReverseProgramComputed()).isTrue();
-        assertThat(alternation.reverseProgramIfComputedForDiagnostics()).isNotNull();
-        assertThat(alternation.reverseProgramIfComputedForDiagnostics().hasTextDependentAssertions()).isFalse();
 
         TrinoCompiledPattern nonterminal = TrinoRegexp.compile(utf8Slice("a$\\n")).re2();
-        assertThat(nonterminal.booleanProgramForDiagnostics()).isNull();
         assertThat(nonterminal.find(utf8Slice("a\n"))).isTrue();
 
         TrinoCompiledPattern repeatedAssertion = TrinoRegexp.compile(utf8Slice("(?:a$)+")).re2();
-        assertThat(repeatedAssertion.booleanProgramForDiagnostics()).isNull();
         assertThat(repeatedAssertion.find(utf8Slice("a\n"))).isTrue();
 
         TrinoCompiledPattern unicodeBoundary = TrinoRegexp.compile(utf8Slice("\\ba$")).re2();
-        assertThat(unicodeBoundary.booleanProgramForDiagnostics()).isNull();
         assertThat(unicodeBoundary.find(utf8Slice(" a\n"))).isTrue();
 
         TrinoCompiledPattern fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss$")).re2();
-        assertThat(fullFold.booleanProgramForDiagnostics()).isNull();
         assertThat(fullFold.find(utf8Slice("SS\n"))).isTrue();
 
         TrinoCompiledPattern nullable = TrinoRegexp.compile(utf8Slice("(?:a?)*$")).re2();
-        assertThat(nullable.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
-        assertThat(nullable.lookingAtPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(nullable.find(utf8Slice("bbb\n"))).isTrue();
 
         TrinoCompiledPattern finalLineEnd = TrinoRegexp.compile(utf8Slice("$")).re2();
-        assertThat(finalLineEnd.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineEnd.find(utf8Slice("abc\n"))).isTrue();
         assertThat(finalLineEnd.lookingAt(utf8Slice("\n"))).isTrue();
         assertThat(finalLineEnd.lookingAt(utf8Slice("abc\n"))).isFalse();
+    }
+
+    @Test
+    public void testTerminalFinalLineDollarContains()
+    {
+        // Trino's `$` matches before a final line feed: `[a-z]+$` finds no letters before the line
+        // feed that ends 32,767 digits, and finds those of the other row.
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice("[a-z]+$"));
+        byte[] absentBytes = new byte[32_768];
+        Arrays.fill(absentBytes, (byte) '1');
+        absentBytes[absentBytes.length - 1] = '\n';
+        assertThat(pattern.contains(wrappedBuffer(absentBytes))).isFalse();
+        assertThat(pattern.contains(utf8Slice("123abc\n"))).isTrue();
     }
 
     @Test
@@ -371,42 +351,10 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testTerminalFinalLineDollarResultOperationsUseLoweredCandidate()
-    {
-        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("([a-z]+)$"));
-        TrinoCompiledPattern pattern = regexp.re2();
-
-        assertThat(pattern.isReverseProgramComputed()).isFalse();
-        assertThat(regexp.extract(utf8Slice("1111111111111111abc\n"))).isEqualTo(utf8Slice("abc"));
-        assertThat(pattern.isReverseProgramComputed()).isTrue();
-    }
-
-    @Test
-    public void testTerminalFinalLineDollarCandidateSearchIsBounded()
-    {
-        TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice("([a-z]+)$")).re2();
-
-        Slice shortMatch = utf8Slice("1111111111111111abc\n");
-        assertThat(pattern.findLoweredCandidateStart(shortMatch, 0, shortMatch.length(), 0)).isEqualTo(16);
-
-        Slice noMatch = utf8Slice("11111111111111111111\n");
-        assertThat(pattern.findLoweredCandidateStart(noMatch, 0, noMatch.length(), 0)).isEqualTo(Dfa.SEARCH_NO_MATCH);
-
-        Slice longMatch = utf8Slice("a".repeat(1_024) + "\n");
-        assertThat(pattern.findLoweredCandidateStart(longMatch, 0, longMatch.length(), 0))
-                .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
-    }
-
-    @Test
-    public void testTerminalFinalLineDollarGroupZeroBoundaryUsesLoweredProgram()
+    public void testTerminalFinalLineDollarFindsLongMatch()
     {
         TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2();
         Slice input = utf8Slice("foo".repeat(1_024) + "\n");
-
-        assertThat(pattern.findLoweredCandidateStart(input, 0, input.length(), 0))
-                .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
-        assertThat(pattern.findLoweredGroupZeroBoundary(input, 0, input.length(), 0))
-                .isEqualTo(input.length() - 1L);
 
         RegexpMatcher matcher = pattern.matcher(input, 0);
         assertThat(matcher.find()).isTrue();
@@ -416,48 +364,26 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testTerminalFinalLineDollarGroupZeroSearchEligibility()
-    {
-        assertThat(TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2().hasDirectLoweredGroupZeroSearch()).isTrue();
-        assertThat(TrinoRegexp.compile(utf8Slice("(?s:.+)$")).re2().hasDirectLoweredGroupZeroSearch()).isFalse();
-        assertThat(TrinoRegexp.compile(utf8Slice("[a-z]*$")).re2().hasDirectLoweredGroupZeroSearch()).isFalse();
-    }
-
-    @Test
-    public void testLoweredProgramMemoryFallback()
+    public void testFinalLineDollarAtSmallestBudget()
     {
         Slice patternSlice = utf8Slice("(?:a+?){2,}$");
         Slice source = utf8Slice("aaa");
 
-        for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
-            TrinoRegexp regexp;
-            try {
-                regexp = TrinoRegexp.compile(
-                        patternSlice,
-                        TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-            }
-            catch (RegexpCompileMemoryLimitException ignored) {
-                continue;
-            }
-
-            TrinoCompiledPattern pattern = regexp.re2();
-            if (pattern.booleanProgramForDiagnostics() == null) {
-                assertThat(pattern.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
-                assertThat(regexp.contains(source)).isTrue();
-                assertThat(regexp.count(source)).isEqualTo(1);
-                assertThat(regexp.position(source)).isEqualTo(1);
-                assertThat(regexp.extract(source)).isEqualTo(source);
-                assertThat(regexp.extractAll(source)).containsExactly(source);
-                assertThat(regexp.split(source)).containsExactly(utf8Slice(""), utf8Slice(""));
-                assertThat(regexp.replace(source, utf8Slice("_"))).isEqualTo(utf8Slice("_"));
-                assertThat(regexp.replace(source, groups -> {
-                    assertThat(groups).isEmpty();
-                    return utf8Slice("_");
-                })).isEqualTo(utf8Slice("_"));
-                return;
-            }
-        }
-        throw new AssertionError("no memory budget retained only the semantic program");
+        LongFunction<TrinoCompiledPattern> compiler = maxMemory -> TrinoRegexp.compile(patternSlice, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
+        long smallestBudget = compileAtSmallestBudget(compiler, _ -> true).maxMemoryBytes();
+        TrinoRegexp regexp = TrinoRegexp.compile(patternSlice, TrinoRegexp.Options.defaults().setMaxMemory(smallestBudget));
+        assertThat(regexp.re2().forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
+        assertThat(regexp.contains(source)).isTrue();
+        assertThat(regexp.count(source)).isEqualTo(1);
+        assertThat(regexp.position(source)).isEqualTo(1);
+        assertThat(regexp.extract(source)).isEqualTo(source);
+        assertThat(regexp.extractAll(source)).containsExactly(source);
+        assertThat(regexp.split(source)).containsExactly(utf8Slice(""), utf8Slice(""));
+        assertThat(regexp.replace(source, utf8Slice("_"))).isEqualTo(utf8Slice("_"));
+        assertThat(regexp.replace(source, groups -> {
+            assertThat(groups).isEmpty();
+            return utf8Slice("_");
+        })).isEqualTo(utf8Slice("_"));
     }
 
     @Test
@@ -801,41 +727,24 @@ public class TestTrinoRegexpLanguage
         assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
         assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
 
-        // Release 2.0 built no OnePass tables for a program with $, so the tables yield to the
-        // lowered boolean program, which takes the forward DFA budget. At the least budget that
-        // keeps the lowered program, and at the least at which each of its DFAs initializes, the
-        // tables would cost it, so the program runs without them, as in 2.0.
-        LongFunction<TrinoCompiledPattern> compiler = maxMemory -> TrinoRegexp.compile(utf8Slice("(a|b)+c$"), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
-        List<TrinoCompiledPattern> thresholds = List.of(
-                compileAtSmallestBudget(compiler, pattern -> pattern.findPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM),
-                compileAtSmallestBudget(compiler, pattern -> pattern.booleanProgramForDiagnostics() != null && pattern.booleanProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH) != null),
-                compileAtSmallestBudget(compiler, pattern -> pattern.booleanProgramForDiagnostics() != null && pattern.booleanProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null));
-        for (int index = 0; index < thresholds.size(); index++) {
-            TrinoCompiledPattern threshold = thresholds.get(index);
-            String label = "threshold " + index;
-            assertThat(threshold.findPlanForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
-            assertThat(threshold.forwardProgramForDiagnostics().isOnePass()).as(label).isFalse();
-            assertThat(threshold.find(utf8Slice("xabc\n"))).as(label).isTrue();
-        }
-        TrinoCompiledPattern defaultBudget = compiler.apply(TrinoRegexp.Options.defaults().maxMemory());
-        assertThat(defaultBudget.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
+        TrinoCompiledPattern defaultBudget = TrinoRegexp.compile(utf8Slice("(a|b)+c$")).re2();
         assertThat(defaultBudget.forwardProgramForDiagnostics().isOnePass()).isTrue();
         RegexpMatcher anchored = defaultBudget.matcher(utf8Slice("abac\n"));
         assertThat(anchored.lookingAt()).isTrue();
         assertThat(anchored.group(1)).isEqualTo(utf8Slice("a"));
         assertThat(anchored.onePassWorkspaceInitializedForDiagnostics()).isTrue();
 
-        // The default budget keeps the required bytes beside the tables, but the required bytes
-        // only save work, so they give way to them. At the least budget at which the lowered
-        // program's pattern keeps its tables, too little is left for the required bytes, and the
-        // pattern keeps no short-window check.
-        assertThat(defaultBudget.requiredBytesRetainedSizeForDiagnostics()).isPositive();
-        TrinoCompiledPattern tablesFirst = compileAtSmallestBudget(compiler, pattern -> pattern.findPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM && pattern.forwardProgramForDiagnostics().isOnePass());
-        assertThat(tablesFirst.requiredBytesRetainedSizeForDiagnostics()).isZero();
-        RegexpMatcher tablesFirstMatcher = tablesFirst.matcher(utf8Slice("abc"));
-        assertThat(tablesFirstMatcher.lookingAt()).isTrue();
-        assertThat(tablesFirstMatcher.group(1)).isEqualTo(utf8Slice("b"));
-        assertThat(tablesFirstMatcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+        // At the least budget that compiles the pattern, a find before a final line feed and an
+        // anchored match report the last letter before `c`.
+        LongFunction<TrinoCompiledPattern> compiler = maxMemory -> TrinoRegexp.compile(utf8Slice("(a|b)+c$"), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
+        TrinoCompiledPattern smallBudget = compileAtSmallestBudget(compiler, _ -> true);
+        assertThat(smallBudget.find(utf8Slice("xabc\n"))).isTrue();
+        RegexpMatcher found = smallBudget.matcher(utf8Slice("xabc\n"));
+        assertThat(found.find()).isTrue();
+        assertThat(found.group(1)).isEqualTo(utf8Slice("b"));
+        RegexpMatcher smallBudgetAnchored = smallBudget.matcher(utf8Slice("abc"));
+        assertThat(smallBudgetAnchored.lookingAt()).isTrue();
+        assertThat(smallBudgetAnchored.group(1)).isEqualTo(utf8Slice("b"));
     }
 
     // Properties hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558 MODIFIER LETTER
@@ -958,7 +867,7 @@ public class TestTrinoRegexpLanguage
             }
         }
         TrinoCompiledPattern ordinary = TrinoRegexp.compile(utf8Slice("(?i)hello|help")).re2();
-        assertThat(ordinary.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(ordinary.forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isFalse();
         assertThat(ordinary.reverseProgramSize()).isGreaterThan(0);
         Regexp ordinaryTree = TrinoRegexpParser.parse(utf8Slice("(?i)hello|help"), Regexp.LIKE_PERL).regexp();
         assertThat(ordinaryTree.op()).isEqualTo(RegexpOp.CONCAT);
@@ -994,7 +903,7 @@ public class TestTrinoRegexpLanguage
             }
         }
         TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice("(?i:s+ss)")).re2();
-        assertThat(pattern.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
+        assertThat(pattern.forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isTrue();
         assertThat(Nfa.fullMatch(pattern.forwardProgramForDiagnostics(), utf8Slice("sß"))).isTrue();
         assertFirstMatchMatchesJoni("(".repeat(270) + "(?i:s+ss)" + ")".repeat(270), "sß");
         assertNoMatchMatchesJoni("(".repeat(270) + "(?i)s{2}ss" + ")".repeat(270), "sßs");
@@ -1004,7 +913,7 @@ public class TestTrinoRegexpLanguage
         assertFirstMatchMatchesJoni("\\A(?i:ff{1})\\z", "ﬀ");
         assertFirstMatchMatchesJoni("\\A(?i:ff{1}?)\\z", "ﬀ");
         assertFirstMatchMatchesJoni("\\A(?i:ff{1,1})\\z", "ﬀ");
-        assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).re2().forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).re2().forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isFalse();
         // Capital sharp S joined Unicode in 5.1; pinned Joni's fold tables are Unicode 4.1 data,
         // so it does not fold it. Regulator follows its pinned Unicode full case folding.
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:ss)")).extract(utf8Slice("ẞ"))).isEqualTo(utf8Slice("ẞ"));
@@ -1251,19 +1160,16 @@ public class TestTrinoRegexpLanguage
         assertThat(finalLine.reverseProgramSize()).isEqualTo(-1);
 
         TrinoCompiledPattern fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).re2();
-        assertThat(fullFold.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
+        assertThat(fullFold.forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isTrue();
         assertThat(fullFold.reverseProgramSize()).isGreaterThan(0);
 
         TrinoCompiledPattern simpleFold = TrinoRegexp.compile(utf8Slice("(?i)hello")).re2();
-        assertThat(simpleFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(simpleFold.forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isFalse();
         assertThat(simpleFold.reverseProgramSize()).isGreaterThan(0);
 
         TrinoCompiledPattern classFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]")).re2();
-        assertThat(classFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(classFold.forwardProgramForDiagnostics().hasFullCaseFoldForDiagnostics()).isFalse();
         assertThat(classFold.reverseProgramSize()).isGreaterThan(0);
-        TrinoCompiledPattern finalLineClassFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]$")).re2();
-        assertThat(finalLineClassFold.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
-        assertThat(finalLineClassFold.lookingAtPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
 
         ParseResult nonAsciiSimpleFold = TrinoRegexpParser.parse(utf8Slice("(?i)seek"), Regexp.LIKE_PERL);
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefix(nonAsciiSimpleFold.caseFolding())).isNull();

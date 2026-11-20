@@ -732,7 +732,6 @@ public class TestDfaCandidateStartCursor
         Prog program = pattern.forwardProgramForDiagnostics();
         long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
         long requiredBytesSize = pattern.requiredBytesRetainedSizeForDiagnostics();
-        assertThat(pattern.booleanProgramForDiagnostics()).isNull();
         assertThat(requiredBytesSize).isPositive();
         List<Boolean> outcomes = new ArrayList<>();
         List<Boolean> requiredBytesOutcomes = new ArrayList<>();

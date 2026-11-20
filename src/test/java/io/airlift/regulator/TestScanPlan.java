@@ -169,8 +169,7 @@ public class TestScanPlan
     @Test
     public void testPlanUsesTheForwardMemoryBudget()
     {
-        // The unanchored cases cover the literal-leading reservation and the run-leading
-        // reservation that happens only after the lowered program is rejected.
+        // The unanchored cases cover the literal-leading and the run-leading reservations.
         for (String expression : List.of("(?s)^([^/]+)/.*$", "^([a-z]+):([^/:]{2,4})/$", "^(?:(a)(b))?ab([^/]+)/$", "https?://([^/]+)/", "([^/]+)/")) {
             Slice pattern = utf8Slice(expression);
             ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
@@ -1082,6 +1081,23 @@ public class TestScanPlan
         }
     }
 
+    @Test
+    public void testRunLedFinalLineDollarBeforeLineFeed()
+    {
+        // Trino's `$` matches at the end and before a final line feed only, so a run-led plan
+        // ending in `$` matches before the line feed that ends the input, and not before one that
+        // another line follows, interpreted and generated, as Joni does.
+        String expression = "([a-z][a-z]*)=([a-z]*)$";
+        List<Slice> sources = new ArrayList<>();
+        for (String text : List.of("a=b", "a=b\n", "a=b\nc", "a=b\n\n", "a=b\nc=d", "a=b\nc=d\n", "x a=\n", "a=b\r\n")) {
+            sources.add(utf8Slice("padding" + text + "outside").slice(7, utf8Slice(text).length()));
+        }
+        for (TrinoRegexp.Options options : List.of(TrinoRegexp.Options.defaults(), TrinoRegexp.Options.defaults().setGenerateBytecode(true))) {
+            assertThat(TrinoRegexp.compile(utf8Slice(expression), options).usesGeneratedBytecode()).isEqualTo(options.generateBytecode());
+            verifySourcesAgainstJoni(expression, options, sources, true);
+        }
+    }
+
     private static int candidateAttempts(String expression, String input)
     {
         return candidateAttempts(expression, ByteFrequencies.uniform(), input);
@@ -1574,8 +1590,7 @@ public class TestScanPlan
         assertThat(planOnly.findInto(utf8Slice("https://host/a\nb"), 0, "https://host/a\nb".length(), groups)).isFalse();
         assertThat(groups).containsOnly(-1);
 
-        // Anchored and literal-leading plans reserve before the lowered program is considered;
-        // run-leading unanchored plans reserve only when no lowered program was built.
+        // Anchored, literal-leading, and run-leading unanchored plans each reserve their memory.
         // URL keeps its plan at its first admitted budget, 8,687; this pattern drops it at 4,007.
         assertSmallestBudgetKeepsOrdinaryRoute("^([a-z]+)-([0-9]+)-([a-z]+)$", "ab-12-cd", "ab");
         assertSmallestBudgetKeepsOrdinaryRoute("https?://([^/]+)/", "x https://host/path", "host");

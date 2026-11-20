@@ -280,7 +280,7 @@ public class TestTrinoRegexpDifferential
             InnerLiteralSearch innerLiteralSearch = regexp.re2().innerLiteralSearchForDiagnostics();
             Prog reverse = pattern.endsWith("= value") ? innerLiteralSearch.reversePrefixProgramForDiagnostics() : regexp.re2().reverseProgramIfComputedForDiagnostics();
             assertThat(reverse).as(pattern).isNotNull();
-            assertThat(reverse.hasFullCaseFold()).as(pattern).isTrue();
+            assertThat(reverse.hasFullCaseFoldForDiagnostics()).as(pattern).isTrue();
         }
     }
 

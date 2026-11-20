@@ -797,7 +797,7 @@ final class Prog
         return textDependentAssertions;
     }
 
-    public boolean hasFullCaseFold()
+    public boolean hasFullCaseFoldForDiagnostics()
     {
         return hasFullCaseFold;
     }
