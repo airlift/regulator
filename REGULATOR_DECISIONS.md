@@ -89,12 +89,13 @@ semantics.
   DFA exhausts the configured memory budget. Exhaustion is not reported as no
   match, and `matchingPatternIds` never returns partial IDs. Unlike ordinary
   `Re2` matching, the set path cannot fall back to the NFA because that engine
-  does not retain the many-match pattern IDs.
-  The collecting path continues through cache thrashing rather than using the
-  boolean search's early-bail policy. Its initialization gate retains ample
-  headroom for reset recovery, which needs at most the start state, current
-  state, and next transition state. Tests cover default and 64 KiB budgets,
-  repeated reset/restore, end-text transitions, and a 512-ID match payload.
+  does not retain the many-match pattern IDs. As in upstream `RE2::Set`, both
+  `matchesAny` and `matchingPatternIds` continue through cache thrashing rather
+  than bail as an ordinary search does when it resets too often. The many-match
+  DFA's initialization gate retains ample headroom for reset recovery, which
+  needs at most the start state, current state, and next transition state.
+  Tests cover default and 64 KiB budgets, repeated reset/restore, end-text
+  transitions, and a 512-ID match payload.
 - A `FilteredRe2` whose atom search exceeded its budget when it was built throws
   `IllegalStateException` from `matchingPatternIds(input)` and
   `firstMatchResult(input)` rather than report no match; its methods taking
