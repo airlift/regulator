@@ -2025,8 +2025,7 @@ final class Prog
     /// `bytes`, which [ByteFrequencies#foldedProbePair] chooses under the caller's
     /// `byteFrequencies`, or under English text in place of the default uniform one, and whether
     /// the dense kernel scans it, as [#usesDenseFoldCaseScan] decides from how many vectors the
-    /// same distribution predicts hold a candidate. The folded prefix scan and the folded inner
-    /// literal search both choose here.
+    /// same distribution predicts hold a candidate. The folded prefix scan chooses here.
     static FoldedPairScan foldedPairScan(byte[] bytes, int size, ByteFrequencies byteFrequencies)
     {
         ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();

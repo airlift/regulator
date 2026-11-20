@@ -314,10 +314,8 @@ public class TestRequiredBytes
             assertThat(noqa.matcher(ending).find()).as("ending matcher at %s", length).isTrue();
         }
 
-        // A single required byte checks every short window beside an inner literal search too, so
-        // a line takes one route whatever its length, and the search still runs from its minimum,
-        // as for the folded literal `=noqa`. A gated one-byte search for that byte itself, the
-        // email's `@` and Trino's `=`, runs at every length in place of the check on the ordinary
+        // A gated one-byte search, for the email's `@` and the `=` before a case-insensitive
+        // literal, runs at every length in place of the required bytes' check on the ordinary
         // engine's route, which, for a pattern on the literal-neighbor plan, as the email is, runs
         // only when that matcher leaves the find undecided, and the pattern keeps no required
         // bytes.
@@ -326,15 +324,10 @@ public class TestRequiredBytes
                 String description = "%s %s".formatted(compiled.getKey(), pattern);
                 CompiledPattern regexp = compiled.getValue();
                 InnerLiteralSearch search = regexp.innerLiteralSearchForDiagnostics();
-                boolean searchesByte = pattern.equals(EMAIL) || compiled.getKey().equals("Trino");
-                assertThat(search.checksShortWindows()).as(description).isEqualTo(searchesByte);
-                assertThat(regexp.requiredBytesForDiagnostics() == null).as(description).isEqualTo(searchesByte);
+                assertThat(search.checksShortWindows()).as(description).isTrue();
+                assertThat(regexp.requiredBytesForDiagnostics()).as(description).isNull();
                 for (int length = 0; length < RequiredBytes.SHORT_WINDOW_LIMIT; length++) {
-                    Slice input = utf8Slice("x".repeat(length));
-                    if (!searchesByte) {
-                        assertThat(regexp.shortWindowLacksRequiredBytes(input, 0, length)).as("%s at %s", description, length).isTrue();
-                    }
-                    assertThat(regexp.searchesInnerLiteralWindow(length)).as("%s at %s", description, length).isEqualTo(searchesByte || length >= search.minimumSearchBytes());
+                    assertThat(regexp.searchesInnerLiteralWindow(length)).as("%s at %s", description, length).isTrue();
                 }
             }
         }
@@ -372,15 +365,14 @@ public class TestRequiredBytes
             }
         }
 
-        // One byte short of the search's minimum, 96 bytes for the folded literal `=noqa` and 64 for
-        // Trino's `=`, the check rejects a window without `=`, and in Trino the search does, so a
-        // find starts no forward DFA there either.
+        // At 63 bytes, the `=` search rejects the window in every language, so a find starts no
+        // forward DFA there either.
         for (Map.Entry<String, CompiledPattern> compiled : compile(NOQA_ASSIGNMENT).entrySet()) {
-            CompiledPattern folded = compiled.getValue();
-            int length = folded.innerLiteralSearchForDiagnostics().minimumSearchBytes() - 1;
+            CompiledPattern pattern = compiled.getValue();
+            int length = pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes() - 1;
             String description = "%s at %s".formatted(compiled.getKey(), length);
-            assertThat(folded.find(utf8Slice("x".repeat(length)))).as(description).isFalse();
-            assertNoForwardDfa(folded, description);
+            assertThat(pattern.find(utf8Slice("x".repeat(length)))).as(description).isFalse();
+            assertNoForwardDfa(pattern, description);
         }
     }
 

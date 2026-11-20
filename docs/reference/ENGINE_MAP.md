@@ -101,9 +101,7 @@ also admits fewer routes:
 - no prefix literal set (`Prog.configurePrefixAccelBytes`);
 - no folded literal alternation (`LiteralAlternationSpanMatcher.analyzeFolded`)
   and no Trino full-case-fold alternation;
-- no fixed-width block search and no literal-set root skip;
-- no folded inner literal without a searched head: exact leading bytes other
-  than a single letter, digit, or whitespace byte.
+- no fixed-width block search and no literal-set root skip.
 
 With 64-lane preferred vectors (such as x86 with AVX-512), compilation drops a
 no-prefix folded run that starts every match (`Compiler.foldedRunForAccel`),
@@ -1262,13 +1260,14 @@ and confirm forward.
   single exact ASCII literal of up to 64 bytes, which must be neither a
   letter, digit, nor whitespace when it is one byte long; a set of 2 to 8
   ASCII literals of 3 to 64 bytes each that a
-  [start literal filter](#start-literal-filter) can search; a pair of rare
-  adjacent ASCII classes; or an ASCII case-folded literal.
+  [start literal filter](#start-literal-filter) can search; or a pair of rare
+  adjacent ASCII classes. A case-insensitive literal is skipped like any
+  other element without an exact literal.
 - **Bounds:** memory from the reverse share, at most half for the prefix
   program, whose DFA must initialize. A minimum window per kind
-  (`InnerLiteralSearch.minimumSearchBytes`): 96 bytes for a single or folded
-  literal, 64 for one byte or a class pair, 256 for a literal set (1,024 behind
-  a class run), 1,024 for a folded literal with no searched head. Beside a
+  (`InnerLiteralSearch.minimumSearchBytes`): 96 bytes for a single literal, 64
+  for one byte or a class pair, and 256 for a literal set (1,024 behind a
+  class run). Beside a
   short fixed-width matcher every minimum is 64 bytes, and a literal-set count
   not behind a class run starts at 64 bytes.
 - **Falls back:** `FALLBACK` to the DFA when the first hit is within 64 bytes

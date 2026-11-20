@@ -2837,12 +2837,11 @@ to each window length.
   64 to 1023 bytes took 2.0 to 3.0x the pair scan's time on r9g and 1.4 to 2.4x
   on r8i, and lh3lh3's date lines of 64 to 127 bytes, searched for `/`, took
   1.37x on r9g and 1.43x on r8i, its email lines, for `@`, 1.15x and 1.30x.
-- A single literal of two or more bytes searches from 96 bytes, also a
-  case-insensitive literal searched by its exact head. Its word-at-a-time scan
-  took 5 to 15% longer than the DFA in 63- to 65-byte windows for `ing` in
-  `[a-zA-Z]+ing`, about the same at 96 to 100 bytes, and 5 to 13% less at 127. A
-  128-byte minimum left `\w+\s+Holmes` up to 7% slower than the search in 112-
-  and 127-byte windows on r9g.
+- A single literal of two or more bytes searches from 96 bytes. Its
+  word-at-a-time scan took 5 to 15% longer than the DFA in 63- to 65-byte
+  windows for `ing` in `[a-zA-Z]+ing`, about the same at 96 to 100 bytes, and 5
+  to 13% less at 127. A 128-byte minimum left `\w+\s+Holmes` up to 7% slower
+  than the search in 112- and 127-byte windows on r9g.
 - A literal set searches from 256 bytes, where its scan takes the scalar filter
   below the vector byte-set scan's cutoff,
   `Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES`, 1024 bytes. The crossover
@@ -2864,15 +2863,6 @@ to each window length.
   at every length, so the higher minimum keeps it there below the cutoff. A
   single literal or class pair behind such a run keeps its kind's minimum:
   `[a-zA-Z]+ing` and `\w+[?!.]["']` ran in 0.19 to 0.32x the DFA's time from 300
-  bytes.
-- A case-insensitive literal with no exact head, or with a head of one common
-  byte, searches from the vector cutoff, 1024 bytes, where vector support is
-  available, and takes no search otherwise. Only the folded pair kernel
-  searches such a literal; below its cutoff the pattern runs the DFA. This
-  minimum reuses the folded prefix scan's vector cutoff and is unmeasured for
-  this search. Such a literal gives way to a later element's search, judged by
-  that element's own literal as without vector support, where that search
-  starts from a shorter window: `[a-z](?i: noqa)@x` searches `@x` from 96
   bytes.
 - A pattern with a short-search fixed-width matcher runs the search from 64
   bytes, whatever its literal kind, because a shorter window runs that matcher,
@@ -2911,20 +2901,8 @@ A single literal's scan over at least 1024 bytes, where vector support
 is available, uses the prefix scans' kernels and cutoff: the vector byte-set
 scan for a one-byte literal and the fused pair scan for a longer one. A shorter
 scan, including the find loop's probe, uses the word-at-a-time scan. A
-case-insensitive literal, such as `# noqa` in `\s*# (?i:noqa)`, takes the
-prefix scans' folded pair kernel over its first nine bytes from the same cutoff,
-and checks the rest of each hit with ASCII case folding. The kernel accepts
-either case of every letter, so each hit is checked again from the first exact
-letter among the kernel's bytes, or from their end when they hold none. A
-shorter scan keeps the word-at-a-time scan for the exact head, `# `, and the
-same check. A literal with no exact head, such as `holmes` in
-`\w+\s(?i)holmes\b`, which RE2 and Rust search as `holme` because `s` also
-folds to the long s, or with only one common byte before its first folded
-letter, is searched only by the kernel. With no exact head, the no-earlier-match
-proofs count both cases of every letter, exact ones included; a one-byte head
-is proven by that byte. The prefix of `(?:QHO)?(?i:ho)` cannot consume the
-lowered `ho`, but its match `QHOho` spans the occurrence `HO`, so the search
-would report `HO`; such a pattern takes no search.
+case-insensitive literal is not an inner literal; a pattern searches another
+exact literal, if any.
 
 The earlier check of short windows was accepted with costs measured before RE2,
 Java, and Rust shared the fixed-width matchers, 3 hosts a side. The Rust
@@ -3328,8 +3306,7 @@ needs three things.
   `Holmes` has no word starting at or after the first match's end.
 
 Five proofs give `x* <= L`. Others admit a search, but not this. Each compares
-the prefix with the literal's exact bytes, so a case-insensitive literal, whose
-other cases they do not see, takes the full confirmation.
+the prefix with the literal's exact bytes.
 
 - A single literal the prefix cannot consume every byte of, the crate's first
   proof: a prefix that covers the hit at `L` either holds the whole occurrence
@@ -4264,19 +4241,19 @@ prefix scan's case-mapped pair bytes, the scan plan's contains search, the two
 three-byte groups of the [start literal filter](#start-literal-filter)'s
 two-literal check, and the two sides of an
 [inner literal class pair](#inner-literal-class-pairs); a later paragraph
-covers scans that stop at any of several bytes. The folded inner literal search
-shares the folded prefix scan's kernels. Where C2 compiles vector code with SVE
-and a 16-byte preferred byte vector, as on r9g (Graviton5), each loaded vector
-is XORed with its probe byte, the differences are ORed, and one compare with
-zero gives the mask; the start literal filter first takes the unsigned minimum
-of its two groups' differences, and the class-pair scan the unsigned minimum of
-each side's differences from its up to three bytes. Everywhere else these five
-compare each byte and AND the masks, except that on x86 with 64-byte vectors
-the literal prefix scan of a single literal compares its second byte under the
-first byte's mask, as a later paragraph records, and the start literal filter's
-check of two literals without masks takes the XOR form, as that section
-records. The JVM's `UseSVE` flag is read once, through the HotSpot diagnostic
-MXBean, on aarch64 only; if the flag cannot be read, the scans compare and AND.
+covers scans that stop at any of several bytes. Where C2 compiles vector code
+with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5), each
+loaded vector is XORed with its probe byte, the differences are ORed, and one
+compare with zero gives the mask; the start literal filter first takes the
+unsigned minimum of its two groups' differences, and the class-pair scan the
+unsigned minimum of each side's differences from its up to three bytes.
+Everywhere else these five compare each byte and AND the masks, except that on
+x86 with 64-byte vectors the literal prefix scan of a single literal compares
+its second byte under the first byte's mask, as a later paragraph records, and
+the start literal filter's check of two literals without masks takes the XOR
+form, as that section records. The JVM's `UseSVE` flag is read once, through
+the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be read,
+the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -4338,8 +4315,8 @@ literal filter's other scan changes, which did not separate them. SVE wider than
 16 bytes, including 512-bit SVE, as on A64FX, and any other architecture with
 64-byte vectors keep the platform choice, since the gate tests for x86.
 
-The folded pair kernels, the counted and dense forms that the folded prefix
-scan and the folded inner literal search share, take the XOR form under the
+The folded pair kernels, the counted and dense forms of the folded prefix
+scan, take the XOR form under the
 same key, through one selector for each kernel. Their loaded bytes are ORed with
 `0x20` first at letter probes, and the XOR form then XORs each probe's bytes
 with its lower-case byte. On r9g with JDK 25 it took 0.84x to 0.89x the
