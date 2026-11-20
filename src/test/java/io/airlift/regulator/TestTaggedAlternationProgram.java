@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -73,6 +74,7 @@ public class TestTaggedAlternationProgram
         }
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testOrderedBranchCaptureUsesTaggedRoute()
     {
@@ -153,6 +155,7 @@ public class TestTaggedAlternationProgram
         assertThat(matcher.group(1).toStringUtf8()).isEqualTo("a");
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testWordBoundaryUsesContextOutsideExactMatch()
     {
@@ -175,6 +178,7 @@ public class TestTaggedAlternationProgram
         assertThat(rejected.nfaWorkspaceInitializedForDiagnostics()).isFalse();
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testMatcherRegionBoundsAreAssertionContext()
     {
@@ -239,6 +243,7 @@ public class TestTaggedAlternationProgram
         assertNoAuxiliaryProgram("((?:(?:(?:a?)*?){64})*?)|(z)", 33_137);
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testAuxiliaryProgramSharesForwardMemoryBudgetAndFallsBack()
     {
@@ -281,6 +286,7 @@ public class TestTaggedAlternationProgram
         assertThat(fallbackMatcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testConcurrentMatchingAndCacheReset()
             throws Exception
@@ -321,6 +327,7 @@ public class TestTaggedAlternationProgram
         }
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testCacheResetInsideOneSearch()
     {
@@ -362,6 +369,7 @@ public class TestTaggedAlternationProgram
         assertThat(taggedDfa.resetCount()).isGreaterThan(resets);
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testThrashingManyMatchDfaIsSkipped()
     {

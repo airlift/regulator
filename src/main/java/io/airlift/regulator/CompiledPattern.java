@@ -867,6 +867,10 @@ abstract sealed class CompiledPattern
         return analysis.shape() == Shape.LITERAL_ALTERNATION && analysis.literalSetFind() && analysis.literalSetCount() ? analysis : null;
     }
 
+    // Sweep leg: no pattern builds a tagged alternation program; capture searches of capture-group
+    // alternations take the ordinary capture engines.
+    private static final boolean BUILDS_TAGGED_ALTERNATION_PROGRAM = false;
+
     private static Analysis buildWithProgram(
             Slice pattern,
             ParseResult parsed,
@@ -1014,7 +1018,7 @@ abstract sealed class CompiledPattern
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - scanPlanSize);
             booleanPlans = booleanPlans.withScanPlan(scanPlan);
         }
-        TaggedAlternationProgram taggedAlternationProgram = requiredPrefix == null && loweredBooleanProgram == null
+        TaggedAlternationProgram taggedAlternationProgram = BUILDS_TAGGED_ALTERNATION_PROGRAM && requiredPrefix == null && loweredBooleanProgram == null
                 ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect, caseFolding)
                 : null;
         booleanPlans = booleanPlans.withTaggedAlternationProgram(taggedAlternationProgram);

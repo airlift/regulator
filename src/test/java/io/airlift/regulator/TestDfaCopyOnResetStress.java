@@ -108,15 +108,9 @@ public class TestDfaCopyOnResetStress
             addCachedDfas(resettable, reversed);
         }
         Re2 tagged = Re2.compile(utf8Slice(TAGGED_ALTERNATION));
-        assertThat(tagged.usesTaggedAlternationForDiagnostics()).as("tagged alternation").isTrue();
+        // Sweep leg m-no-e12: no pattern builds a tagged alternation program, so the capture
+        // engines answer this case and no many-match DFA is reset.
         cases.add(Case.of("RE2 tagged alternation", text -> matcherResults(tagged.matcher(text), text), texts));
-        // The capture's branch comes from the searchMany DFA, not from a capture engine fallback.
-        Slice routeText = texts.get(9);
-        RegexpMatcher route = tagged.matcher(routeText);
-        matcherResults(route, routeText);
-        assertThat(route.bitStateWorkspaceInitializedForDiagnostics()).as("tagged alternation BitState fallback").isFalse();
-        assertThat(route.nfaWorkspaceInitializedForDiagnostics()).as("tagged alternation NFA fallback").isFalse();
-        resettable.add(tagged.taggedAlternationProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.MANY_MATCH));
         addCachedDfas(resettable, tagged.forwardProgramForDiagnostics());
         addCachedDfas(resettable, tagged.reverseProgramIfComputedForDiagnostics());
 

@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -208,6 +209,7 @@ public class TestDfaStartStateFailure
         assertThat(Dfa.search(program, input, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(1);
     }
 
+    @Disabled("Sweep leg m-no-e12: pins the switched-off mechanism")
     @Test
     public void testSecondStartStateFailureUsesTaggedAlternationFallback()
     {

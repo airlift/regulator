@@ -279,11 +279,10 @@ public class TestJavaRegexp
         assertThat(matcher.dfaQuitStreak()).isZero();
         assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
 
-        // Where the cursor finds a match, the tagged DFA picks its branch beside é, and the streak
-        // never starts.
+        // Where a find matches beside é, the streak never starts. (Sweep leg m-no-e12: the capture
+        // engines, not a tagged DFA, pick the branch, so the group-zero cursor is not pinned.)
         JavaRegexp branches = JavaRegexp.compile(utf8Slice("(a)|(a\\b)"));
-        assertThat(branches.taggedAlternationProgramForDiagnostics()).isNotNull();
-        assertQuitStreaks(branches, "aé".repeat(6), List.of(0, 0, 0, 0, 0, 0));
+        assertQuitStreaks(branches, "aé".repeat(6), List.of(0, 0, 0, 0, 0, 0), false);
     }
 
     @Test
@@ -325,6 +324,11 @@ public class TestJavaRegexp
     // after it, which Java reads as one character that is not a word character, as the JDK reads #.
     private static void assertQuitStreaks(JavaRegexp pattern, String text, List<Integer> expectedStreaks)
     {
+        assertQuitStreaks(pattern, text, expectedStreaks, true);
+    }
+
+    private static void assertQuitStreaks(JavaRegexp pattern, String text, List<Integer> expectedStreaks, boolean groupZeroCursor)
+    {
         RegexpMatcher matcher = pattern.matcher(truncatedLeads(text));
         Matcher jdkMatcher = Pattern.compile(pattern.pattern().toStringUtf8()).matcher(text);
         List<Integer> streaks = new ArrayList<>();
@@ -338,7 +342,9 @@ public class TestJavaRegexp
         }
         assertThat(jdkMatcher.find()).isFalse();
         assertThat(streaks).isEqualTo(expectedStreaks);
-        assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
+        if (groupZeroCursor) {
+            assertThat(matcher.groupZeroForwardCursorInitializedForDiagnostics()).isTrue();
+        }
     }
 
     private static void assertDfaFindsJdkSpans(String pattern, String... texts)
