@@ -280,10 +280,7 @@ pattern needs (`CP.requiredProgramBudget`, `CP.withRequiredTrinoBudget`).
 
 `CP.tryReserveForwardDfaMemory` hands back the memory charge of the required
 bytes, charges the route, then charges the required bytes again with their
-step-down. A
-Trino pattern also keeps the analyzed repeat (`SingleByteRepeatMatcher.Repeat`)
-of a [single-byte repeat matcher](#single-byte-repeat-matcher), which is built
-on first use.
+step-down.
 
 Trino routes match Joni on valid UTF-8. On malformed input every Trino route
 returns the ordinary engine's answer, so no route choice changes a result
@@ -506,13 +503,13 @@ class overrides it:
 | Operation | Base route |
 |---|---|
 | `contains` | the shape's `find` |
-| `count` | 0 outside the span-length bounds; the single-byte table at any length; the [single-byte repeat matcher](#single-byte-repeat-matcher); the shape's `countMatches`; a group-zero matcher loop |
+| `count` | 0 outside the span-length bounds; the single-byte table at any length; the shape's `countMatches`; a group-zero matcher loop |
 | `forEachMatch` | `matcher(source, 0)` loop as an all-match operation; span and generated matchers ignore the all-match hooks |
-| `position` | the single-byte repeat cursor, else a group-zero matcher `find` from the start and once per extra occurrence, not as an all-match operation |
+| `position` | a group-zero matcher `find` from the start and once per extra occurrence, not as an all-match operation |
 | `extract` | a start-anchored scan plan for a nonzero group, without a matcher; for a nonzero group, null when the checks before a matcher reject the input (`TrinoRegexp.captureSearchFailsBeforeMatcher`); else one matcher `find` |
-| `extractAll`, `split` | the single-byte repeat cursor; for a nonzero group, no matches when the checks before a matcher fail (`TrinoRegexp.captureSearchFailsBeforeMatcher`); else a matcher loop |
-| `replace` with a template | `TrinoReplacementPlan` (the template is cached); the repeat cursor; a group-zero matcher when no group is referenced, else a matcher keeping groups 1 through the highest referenced |
-| `replace` with a function | the repeat cursor without captures, else a matcher loop |
+| `extractAll`, `split` | for a nonzero group, no matches when the checks before a matcher fail (`TrinoRegexp.captureSearchFailsBeforeMatcher`); else a matcher loop |
+| `replace` with a template | `TrinoReplacementPlan` (the template is cached); a group-zero matcher when no group is referenced, else a matcher keeping groups 1 through the highest referenced |
+| `replace` with a function | a matcher loop |
 | `matcher(source, n)` | the class's span matcher (literal alternation, literal set, fixed width, full-case-fold alternation) or the generated class's `CompiledScanMatcher`; a group-zero matcher for `n == 0`; a deferred matcher when the pattern keeps required bytes and a capture find runs the general search (`RM.captureFindRunsGeneralSearch`: no start-anchored scan plan or anchored submatch route, not Rust), built once a find passes its length and required-byte checks or a result accessor needs it (`TrinoRegexpMatcher.deferredEngine`); else `RegexpMatcher` |
 
 The span classes (literal alternation, literal set, dot-star literal, exact
@@ -1370,14 +1367,6 @@ when there is no byte run; otherwise it uses the class counter when there is
 one, else the DFA. A group-zero matcher uses the table with fewer than
 64 bytes left. Trino's `count` uses the table at any length.
 
-#### Single-byte repeat matcher
-
-Trino only: a greedy unbounded `x*` of a non-empty one-byte member set under
-optional captures, with no required prefix or text-dependent assertions
-(`SingleByteRepeatMatcher`), built on first use and not charged to the budget.
-Trino's `count`, `position`, `extractAll`, `split`, and replacements iterate on
-it.
-
 #### Class-run counter
 
 One pass over runs of a character class, cut by the repeat bounds
@@ -1502,7 +1491,6 @@ With `setGenerateBytecode(true)`:
 | [Reverse program](#reverse-program) | yes | none with directional repetition, or with the assertions above unless the lowered boolean program removes them (`$` and `\Z` under `UNIX_LINES`) | yes | none with `$` unless the lowered boolean program removes it | — |
 | [No-program routes](#compile-failure-routes) | literal set and compact class counter, leftmost-first only | literal set, compact class counter | literal set, compact class counter | literal alternation, literal set, fixed width, compact class counter | always |
 | [Literal search kernel](#literal-search-kernel) for a literal of 2 to 64 bytes | yields | yields | yields | fits | always |
-| Single-byte repeat matcher | no | no | no | yes | — |
 | Matcher rules | longest match turns off the cursors | a region starting on the LF of a CR LF may run the Pike NFA ([Matcher iteration](#matcher-iteration)) | outside bytes mode, empty matches that split a character are skipped and ranged calls check character boundaries ([Decision flow](#decision-flow-per-operation)) | span classes and a deferred capture matcher | — |
 | Operations | `find`, `matches`, `lookingAt`, captures, `count`, `forEachMatch`, matcher, `replaceFirst`, `replaceAll`, `extract` | RE2's without `replaceFirst`, `replaceAll`, and `extract` | RE2's without `replaceFirst`, `replaceAll`, and `extract` | `contains`, `count`, `forEachMatch`, `position`, `extract`, `extractAll`, `split`, `replace`, matcher | `matches` |
 | Multi-pattern | `Re2Set`, `FilteredRe2` | — | — | — | — |
