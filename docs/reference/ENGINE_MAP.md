@@ -129,7 +129,7 @@ exclude it.
 
 | # | Route | Admitted when | Rule |
 |---|---|---|---|
-| 1 | [Compact class counter](#class-run-counter) | Not longest-match; a large Unicode class repeat, or a class-run alternation with captures (`CP.compactRouteRegexp`, `BoundedCharacterClassCounter.analyzeCompactRoute`); counter plus a placeholder program within the forward share. Returns at once with shape `CLASS_RUN`; a [retained count DFA](#retained-class-count-dfa) may be kept beside it | fits |
+| 1 | [Compact class counter](#class-run-counter) | Not longest-match; a large Unicode class repeat, or a class-run alternation with captures (`CP.compactRouteRegexp`, `BoundedCharacterClassCounter.analyzeCompactRoute`); counter plus a placeholder program within the forward share. Returns at once with shape `CLASS_RUN` | fits |
 | 2 | [Required prefix](#required-prefix) | The pattern is a concatenation of one or more start-of-text anchors followed directly by a literal (`Regexp.requiredPrefix`); a multiline `^` or a capture before the literal gives none, and a Trino full-case-fold literal qualifies only if its folds stay within ASCII | — |
 | 3 | Forward program | Always, from the suffix after any required prefix (`Compiler.compileNormalized`); prefix acceleration and the folded prefix run are configured on it, and the required prefix stays on the pattern (`CP.requiredPrefix`) | throws if it does not fit |
 | 4 | Final-line OnePass tables released | The program is one-pass only because of a Java or Trino final-line end; restored later if they yield | — |
@@ -447,7 +447,7 @@ matcher to skip the forward DFA.
 | `LITERAL_KERNEL` | the dot-star literal's count | `countOnEngine` |
 | `LITERAL_ALTERNATION` | the trie's `countOrDecline`, or the literal set's count when `literalSetCount` | `DECLINED`: `countDfaMatches`; otherwise `countOnEngine` |
 | `FIXED_WIDTH` | `countOrBail` | `countOnEngine` on the rest after a bail |
-| `CLASS_RUN` | the [retained class count DFA](#retained-class-count-dfa), else the counter | the counter |
+| `CLASS_RUN` | the counter | none |
 | `BYTE_TABLE` | the single-byte table on input of at most 64 bytes without a byte run | the class counter, else `countDfaMatches` |
 | `SCAN_PLAN` | an unanchored plan's search loop (`CP.countUnanchoredScanMatches`); a start-anchored plan with `singleAttemptCount` makes one attempt | handoff: the ordinary engine; other anchored plans: `countOnEngine` |
 
@@ -866,8 +866,7 @@ for a start-anchored program, a DFA that does not initialize, a start state
 that cannot be allocated, a quit, or an empty match, and `COUNT_BAILED` when a
 search fails, the cache resets too often, or the count is one of the 16 that
 follow two bailed counts in a row ([When the DFA fails](#when-the-dfa-fails)).
-Callers: `CP.countDfaMatches`, the inner and window literal count loops, and
-the [retained class count DFA](#retained-class-count-dfa).
+Callers: `CP.countDfaMatches` and the inner and window literal count loops.
 [Thrashing DFA skipped across calls](OPTIMIZATION_CATALOG.md#thrashing-dfa-skipped-across-calls),
 [Count Fallback After Repeated Bails](../../REGULATOR_DECISIONS.md#count-fallback-after-repeated-bails).
 
@@ -1332,8 +1331,7 @@ One pass over runs of a character class, cut by the repeat bounds
 
 - **Compact route:** a large Unicode class repeat, or a class-run alternation
   with captures (`ClassRunAlternationCaptures`, which writes the groups from
-  the run length), compiles with no real program, unless it keeps a
-  [retained count DFA](#retained-class-count-dfa), and takes `CLASS_RUN`.
+  the run length), compiles with no real program and takes `CLASS_RUN`.
 - **Matcher route:** a single large Unicode class or a greedy class repeat
   with no captures; serves group-zero matcher finds and counts.
 - **Count route:** built on first use from the class repeat when neither is
@@ -1342,14 +1340,6 @@ One pass over runs of a character class, cut by the repeat bounds
 - **Catalog:** [Class-run counter](OPTIMIZATION_CATALOG.md#class-run-counter),
   [Class-run alternation captures](OPTIMIZATION_CATALOG.md#class-run-alternation-captures).
 - **Decision:** [Bounded Character-Class Counting](../../REGULATOR_DECISIONS.md#bounded-character-class-counting).
-
-#### Retained class count DFA
-
-A DFA count program kept beside the compact class counter when the class
-repeat's expansion is small enough (`RetainedCharacterClassCountDfa.supports`)
-and its DFA allowance is at least 128 KiB. It counts input of at least 1 MiB
-whose sample is not dense, and the counter takes the rest and any bail.
-[Class-run counter](OPTIMIZATION_CATALOG.md#class-run-counter).
 
 #### Word-run matcher
 

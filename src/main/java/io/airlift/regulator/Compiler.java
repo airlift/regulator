@@ -174,11 +174,6 @@ final class Compiler
         return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies);
     }
 
-    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
-    {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect, caseFolding, byteFrequencies);
-    }
-
     static long estimatedProgramMemory(Prog program)
     {
         return flattenedProgramMemory(program.size()) + program.onePassMemory() + program.prefixScanMemory();

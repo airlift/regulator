@@ -167,8 +167,7 @@ abstract sealed class CompiledPattern
         LITERAL_ALTERNATION,
         // A fixed-width pattern, found by the fixed-width byte span matcher.
         FIXED_WIDTH,
-        // A large Unicode class repeat, found by the compact class counter, and counted on the
-        // counter or on an optional retained count DFA.
+        // A large Unicode class repeat, found and counted by the compact class counter.
         CLASS_RUN,
         // A one-byte member or member run, found by the single-byte table on short inputs.
         BYTE_TABLE,
@@ -186,8 +185,6 @@ abstract sealed class CompiledPattern
     /// @param matcherClassCounter off the compact route, the counter that finds a class pattern's
     ///         matches, whose memory is reserved, or `null`
     /// @param singleByteMatcher the single-byte table, whose memory is reserved, or `null`
-    /// @param retainedClassCountDfa whether a [Shape#CLASS_RUN] pattern counts on the retained
-    ///         class count DFA rather than its counter
     /// @param ordinaryShortBooleanMatch whether unanchored boolean calls of a
     ///         [Shape#SCAN_PLAN] pattern's start-anchored plan run on the ordinary engine over
     ///         short inputs
@@ -229,7 +226,6 @@ abstract sealed class CompiledPattern
             Shape shape,
             BoundedCharacterClassCounter matcherClassCounter,
             SingleByteMatcher singleByteMatcher,
-            boolean retainedClassCountDfa,
             boolean ordinaryShortBooleanMatch,
             boolean singleAttemptCount,
             boolean literalKernelFind,
@@ -858,19 +854,6 @@ abstract sealed class CompiledPattern
             Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory, compilerDialect, caseFolding);
             placeholderProgram.setDfaMemory(0);
             BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
-            Prog partialProgram = placeholderProgram;
-            if (RetainedCharacterClassCountDfa.supports(entireRegexp)) {
-                try {
-                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, compilerDialect, availableMemory);
-                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);
-                    if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
-                        partialProgram = countProgram;
-                    }
-                }
-                catch (RegexpCompileException ignored) {
-                    // The optional DFA could not fit; the compact counter remains the fallback.
-                }
-            }
             return selectRoutes(
                     flags,
                     maxMemory,
@@ -884,7 +867,7 @@ abstract sealed class CompiledPattern
                     false,
                     expressionAnalysis.length().encoded(),
                     -1,
-                    partialProgram,
+                    placeholderProgram,
                     booleanPlans,
                     capturingGroupCount,
                     parsed.capturingGroupNames(),
@@ -1275,10 +1258,8 @@ abstract sealed class CompiledPattern
         // pattern takes the single-byte, short ordinary, span, or byte-run route.
         Shape shape;
         boolean general = false;
-        boolean retainedClassCountDfa = false;
         if (compactBoundedCharacterClass != null) {
             shape = Shape.CLASS_RUN;
-            retainedClassCountDfa = partialProg.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY;
         }
         else {
             shape = switch (booleanPlans.find()) {
@@ -1446,7 +1427,6 @@ abstract sealed class CompiledPattern
                 shape,
                 matcherClass,
                 singleByteMatcher,
-                retainedClassCountDfa,
                 ordinaryShortMatch,
                 singleAttemptCount,
                 literalKernelFind,
@@ -3528,12 +3508,11 @@ abstract sealed class CompiledPattern
         return rest < 0 ? rest : FixedWidthByteSpanMatcher.countBeforeBail(count) + rest;
     }
 
-    /// The count of the compact class counter, on the retained count DFA when it has one.
-    final long countOnClassRun(Slice text, boolean retainedClassCountDfa)
+    /// The count of the compact class counter.
+    final long countOnClassRun(Slice text)
     {
         requireNonNull(text, "text is null");
-        BoundedCharacterClassCounter counter = boundedCharacterClassCounter;
-        return retainedClassCountDfa ? RetainedCharacterClassCountDfa.count(counter, partialProg, text) : counter.count(text);
+        return boundedCharacterClassCounter.count(text);
     }
 
     /// The count of a one-byte member: the single-byte table over at most

@@ -32,8 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestClassRunAlternationCaptures
 {
-    // Holds 31 ASCII characters and U+0100: enough ranges for the compact route, and UTF-8 paths
-    // short enough for its count DFA.
+    // Holds 31 ASCII characters and U+0100: enough ranges for the compact route.
     private static final String SPARSE_CLASS = "[13579ACEGIKMOQSUWYacegikmoqsuwy\\x{100}]";
 
     private static final List<Function<String, CompiledPattern>> LANGUAGES = List.of(
@@ -44,9 +43,9 @@ public class TestClassRunAlternationCaptures
 
     // The rebar overlapping-words pattern, and smaller ones of the same shape: one of a smaller
     // class, one whose last branch is a single member, which the parser writes as the member
-    // itself, one with named groups, one whose counter keeps a count DFA as its partial program,
-    // one with more slots than the 64 the group copy takes, and one whose branches differ in
-    // flags, admitted where the flag leaves the class as it is.
+    // itself, one with named groups, one of a sparse class, one with more slots than the 64 the
+    // group copy takes, and one whose branches differ in flags, admitted where the flag leaves
+    // the class as it is.
     private static final List<Expression> ELIGIBLE = List.of(
             new Expression(runs("\\p{L}", 14, 5)),
             new Expression(runs("\\p{Lu}", 3, 2)),
@@ -68,9 +67,6 @@ public class TestClassRunAlternationCaptures
                 // A matcher with groups finds on the counter as a matcher without them does.
                 assertThat(pattern.matcher(utf8Slice("")).characterClassCounterEnabledForDiagnostics()).as(eligible.expression()).isTrue();
             }
-        }
-        for (Function<String, CompiledPattern> language : LANGUAGES) {
-            assertThat(language.apply(runs(SPARSE_CLASS, 3, 2)).forwardProgramForDiagnostics().dfaMemory()).isPositive();
         }
         // Lengths that rise or skip a value, first or later; branches of a range of lengths;
         // lengths that change class; a branch that is not a group around a run, a group inside
