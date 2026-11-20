@@ -1627,22 +1627,16 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `BoundedCharacterClassCounter.byteRunEnd`,
   `BoundedCharacterClassCounter.vectorRunEnd`,
   `BoundedCharacterClassCounter.packMemberRanges`,
-  `VectorByteSetScanner.findOutsideRanges`,
-  `RetainedCharacterClassCountDfa.supports`,
-  `RetainedCharacterClassCountDfa.count`
+  `VectorByteSetScanner.findOutsideRanges`
 - **Applies when:** Non-nullable, unanchored greedy repeats of one class, and
   counts of one member of a class, any character, or any byte whose first
   bytes make up at least half of English text; on text of 4 KiB or more whose
   sample finds the members sparse, such a count prefers the DFA and keeps the
   counter for a DFA count that bails. Span searches serve matcher finds and
-  anchored matching, not counts. In UTF-8, with a DFA budget of at least
-  128 KiB, a count of a small case-sensitive
-  greedy class with a positive minimum runs on a DFA instead when class
-  members are sparse; input of 1 MiB or more is sampled first, and shorter
-  input, or input whose sample holds many members, uses the counter. The
-  run-end vector scan needs the Vector API, a byte or ASCII class whose
-  members fit in at most four ranges of at most 128 bytes each, and a repeat
-  whose maximum, if any, passes the handoff length
+  anchored matching, not counts. The run-end vector scan needs the Vector
+  API, a byte or ASCII class whose members fit in at most four ranges of at
+  most 128 bytes each, and a repeat whose maximum, if any, passes the handoff
+  length
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text

@@ -40,51 +40,34 @@ public class TestBoundedCharacterClassCounter
     private static final String ALL_NON_ASCII_CLASS = "[\\x{80}-\\x{10FFFF}!#%')+\\-/13579;=?ACEGIKMOQSUWY\\[\\]_acegikmoqsuwy{}]";
 
     @Test
-    public void testSelectiveUnicodeClassUsesRetainedDfaOnlyForLargeCounts()
+    public void testSelectiveUnicodeClassCountsOnCompactCounter()
     {
+        // A selective Unicode class counts on the compact counter at the default budget and at
+        // smaller ones, on short and long inputs.
         Re2 greek = Re2.compile(utf8Slice("\\p{Greek}+"));
 
         assertThat(greek.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
-        Prog countProgram = greek.forwardProgramForDiagnostics();
-        assertThat(countProgram.dfaMemory()).isPositive();
-        assertThat(countProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
 
         Slice shortInput = utf8Slice("1αβγ!δε?");
         assertThat(greek.find(shortInput)).isTrue();
         assertThat(greek.countMatches(shortInput)).isEqualTo(2);
-        assertThat(countProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
-        assertThat(greek.forwardProgramForDiagnostics()).isSameAs(countProgram);
 
         Slice largeInput = largeSparseGreekInput();
         // Pinned native RE2 returns two non-overlapping Greek spans.
         assertThat(greek.countMatches(largeInput)).isEqualTo(2);
-        assertThat(countProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
 
         Re2 allLetters = Re2.compile(utf8Slice("\\p{L}+"));
         assertThat(allLetters.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
         assertThat(allLetters.forwardProgramForDiagnostics().dfaMemory()).isZero();
         assertThat(allLetters.countMatches(largeInput)).isEqualTo(2);
-        assertThat(allLetters.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
-    }
 
-    @Test
-    public void testSelectiveUnicodeClassDfaMemoryAccounting()
-    {
-        long maxMemory = 512L << 10;
-        Re2 greek = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(maxMemory));
-        BoundedCharacterClassCounter counter = greek.createBoundedCharacterClassCounter();
-        Prog countProgram = greek.forwardProgramForDiagnostics();
-        assertThat(countProgram.dfaMemory()).isGreaterThanOrEqualTo(128L << 10);
-        assertThat(Compiler.estimatedProgramMemory(countProgram) +
-                counter.estimatedRetainedSize() +
-                countProgram.dfaMemory())
-                .isLessThanOrEqualTo(maxMemory - (maxMemory / 3));
-        assertThat(greek.countMatches(largeSparseGreekInput())).isEqualTo(2);
+        Re2 smallerBudget = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(512L << 10));
+        assertThat(smallerBudget.countMatches(largeInput)).isEqualTo(2);
 
-        Re2 compactOnly = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(128L << 10));
-        assertThat(compactOnly.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
-        assertThat(compactOnly.forwardProgramForDiagnostics().dfaMemory()).isZero();
-        assertThat(compactOnly.countMatches(largeSparseGreekInput())).isEqualTo(2);
+        Re2 tightBudget = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(128L << 10));
+        assertThat(tightBudget.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+        assertThat(tightBudget.forwardProgramForDiagnostics().dfaMemory()).isZero();
+        assertThat(tightBudget.countMatches(largeInput)).isEqualTo(2);
     }
 
     @Test
@@ -92,31 +75,25 @@ public class TestBoundedCharacterClassCounter
     {
         Re2 oneRun = Re2.compile(utf8Slice("\\p{Greek}+"));
         Slice oneRunInput = utf8Slice("α".repeat(1_100_000));
-        Prog oneRunCountProgram = oneRun.forwardProgramForDiagnostics();
 
         // Pinned native RE2 returns one match for the complete run.
         assertThat(oneRun.countMatches(oneRunInput)).isEqualTo(1);
-        assertThat(oneRunCountProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
 
         Re2 greek = Re2.compile(utf8Slice("\\p{Greek}+"));
         Slice denseInput = utf8Slice(("α".repeat(7) + ".").repeat(131_072));
-        Prog countProgram = greek.forwardProgramForDiagnostics();
 
         // Pinned native RE2 returns one non-overlapping match for each seven-code-point run.
         assertThat(greek.countMatches(denseInput)).isEqualTo(131_072);
-        assertThat(countProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
 
         Re2 delayedGreek = Re2.compile(utf8Slice("\\p{Greek}+"));
         Slice delayedDenseInput = utf8Slice(".".repeat(400_000) + ("α".repeat(7) + ".").repeat(80_000));
-        Prog delayedCountProgram = delayedGreek.forwardProgramForDiagnostics();
 
         // Pinned native RE2 returns the same matches when the dense region follows a sparse prefix.
         assertThat(delayedGreek.countMatches(delayedDenseInput)).isEqualTo(80_000);
-        assertThat(delayedCountProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
     }
 
     @Test
-    public void testSelectiveUnicodeClassConcurrentReuseAndCacheReset()
+    public void testSelectiveUnicodeClassConcurrentReuse()
             throws Exception
     {
         Re2 greek = Re2.compile(utf8Slice("\\p{Greek}+"));
@@ -132,15 +109,6 @@ public class TestBoundedCharacterClassCounter
                 assertThat(count.get()).isEqualTo(2);
             }
         }
-
-        Prog countProgram = greek.forwardProgramForDiagnostics();
-        Dfa.DfaInstance dfa = countProgram.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa).isNotNull();
-        int resetCount = dfa.resetCount();
-        dfa.resetCacheExternal();
-        assertThat(greek.countMatches(largeInput)).isEqualTo(2);
-        assertThat(greek.forwardProgramForDiagnostics()).isSameAs(countProgram);
-        assertThat(dfa.resetCount()).isGreaterThan(resetCount);
     }
 
     private static Slice largeSparseGreekInput()

@@ -1919,9 +1919,7 @@ Decided (Dain, 2026-11-06): without native access, the DFA uses the same
 tagged pointer table on the Java heap, reversing the earlier decision that kept
 the table native-only. The AWS r9g and r8i comparison against object rows, in
 both memory modes, passed the project's performance gate with the one accepted
-loss below. With a table in both modes, a pattern counted by the compact
-character-class counter may also keep its optional count DFA without native
-access, which it previously kept only with it.
+loss below.
 
 A/B result (AWS r9g and r8i, JDK 25, two hosts per platform and two rounds, JMH
 average time; each figure is the time with this change divided by the time
@@ -1955,8 +1953,7 @@ too often, by the rules of
 A public count whose DFA count gives up falls back for that call: it counts its
 text with a matcher whose finds skip the forward DFA, the inner-literal search,
 the end-anchored reverse DFA, the candidate start cursor, and the group-zero
-forward cursor, so its fallback adds no resets. The retained-class counter
-falls back to its compact counter instead. Either way, the answer is the
+forward cursor, so its fallback adds no resets. Either way, the answer is the
 fallback's, so a count that gives up or skips the DFA is exact.
 
 Each upstream RE2 search judges its own DFA work, and gives up on a thrashing
@@ -2209,9 +2206,8 @@ the literal-alternation shape of a pattern that compiled no program, a class of
 its own because it routes `matchInternal` to the set and so leaves the
 program-bearing class untouched. Each override makes one call to a final
 route method of `CompiledPattern`, so a call site that sees one class can
-inline one route. The class selects the routes; within them, the class-run
-shape holds one immutable per-instance fact, whether it counts on the retained
-count DFA, and the scan-plan shape three: whether `find` keeps its literal
+inline one route. The class selects the routes; within them, the scan-plan
+shape holds three immutable per-instance facts: whether `find` keeps its literal
 kernel, whether a start-anchored plan counts with one attempt, and whether
 short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
@@ -4790,7 +4786,10 @@ times, or repeated without a fixed count, and an
 [alternation of groups around runs of such a class](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures),
 whose captures its count decides; it is charged against the forward budget, and
 a budget too small for it compiles the pattern's program instead, as for any
-other pattern. Compact count and boolean find can use it. The matcher counter
+other pattern. Compact count and boolean find can use it. A compact pattern
+once also kept a count DFA for sparse counts of 1 MiB or more; it was removed,
+since it bought only synthetic Greek code-point counts, which take 2.0 times as
+long without it on Graviton and 1.5 times on Intel. The matcher counter
 serves a pattern that is one large Unicode class, such as `\pL` or `\p{Greek}`,
 or a greedy repeat of any class with a minimum of at least one, such as `\w+` or
 `[0-9]{2,3}`, except a repeat that RE2 or Trino case-folds; Java and Rust fold a
@@ -4839,11 +4838,11 @@ from 0x80 up as the most common ASCII byte, which would admit rare non-ASCII
 classes such as `\p{Greek}` on their lead bytes alone. A dense member can still
 be sparse in the text, as ASCII `\w` is in Russian, where the counter took 4.8
 to 6.4 times the DFA count's time, so a count of at least 4 KiB samples four
-256-byte windows, as the compact counter's count DFA does, and takes the DFA
-count when they hold at most 64 members. The sample decodes at most a quarter of
-the text and stops at its 65th member, and a DFA count that bails counts on the
-counter. Each language's class carries its own reading of malformed UTF-8 and of
-line terminators, as for a repeat. When no matcher counter was retained, a
+256-byte windows and takes the DFA count when they hold at most 64 members. The
+sample decodes at most a quarter of the text and stops at its 65th member, and
+a DFA count that bails counts on the counter. Each language's class carries its
+own reading of malformed UTF-8 and of line terminators, as for a repeat. When
+no matcher counter was retained, a
 single-member count builds its counter on first use, so the exemption from
 `maxMemory` above covers the counter and the class's ranges the pattern retains
 for it. The ranges add to the counter's size: Rust `\w` retains 112 KiB of
