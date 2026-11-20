@@ -2239,8 +2239,8 @@ abstract sealed class CompiledPattern
     /// [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`.
     /// [RegexpMatcher#find()] searches it through [#groupZeroSpanSearch()], full-Slice find where
     /// the general engine would otherwise answer it on a longest-match DFA that cannot
-    /// initialize, and full-Slice count where it has its skip table or the first-match DFA cannot
-    /// initialize.
+    /// initialize, and full-Slice count where it has its skip table, the first-match DFA cannot
+    /// initialize, or a DFA count gives up.
     LiteralSetSpanMatcher literalSetSpanMatcherForDiagnostics()
     {
         return booleanPlans.literalSet();
@@ -2254,11 +2254,22 @@ abstract sealed class CompiledPattern
     /// Returns the span search that a group-zero [RegexpMatcher#find()] runs in place of the
     /// program, or `null`: an exact literal's own [#findExactLiteralSpan(Slice,int,int)], or the
     /// pattern's literal-alternation matcher, literal set, dot-star literal matcher, fixed-width
-    /// matcher, or short-search fixed-width matcher, in that order, the same one full-Slice count
-    /// searches. It reads only what compilation fixed, so a pattern stores no route of its own,
-    /// and a pattern with a single-byte table or a class counter, which answer the find
-    /// themselves, has none. The span search is immutable and shared; a matcher keeps any search
-    /// state it carries between finds.
+    /// matcher, or short-search fixed-width matcher, in that order. It reads only what compilation
+    /// fixed, so a pattern stores no route of its own, and a pattern with a single-byte table or a
+    /// class counter, which answer the find themselves, has none. The span search is immutable
+    /// and shared; a matcher keeps any search state it carries between finds.
+    ///
+    /// Full-Slice [#count(Slice)] first takes the count of the pattern's shape class, its
+    /// `countMatches`, which takes these searches only as follows. An exact literal always counts
+    /// on its literal. The literal-alternation matcher counts unless it declines, which leaves
+    /// the whole count to the DFA count, and the fixed-width matcher counts until it bails on
+    /// dense candidates, which leaves the rest of the text to the ordinary count. A literal set
+    /// counts only where the pattern keeps no fixed-width matcher and either the set has its skip
+    /// table or the first-match DFA cannot initialize. A dot-star literal matcher counts only in
+    /// the RE2, Java, and Rust literal-kernel classes, and the short-search matcher only on texts
+    /// too short for the inner literal search. Where that count gives up, `count` counts on a
+    /// group-zero matcher, which runs this search. [TrinoRegexp#count(Slice)] tries its own
+    /// routes first, its dot-star literal matcher among them.
     GroupZeroSpanSearch groupZeroSpanSearch()
     {
         if (singleByteMatcher != null || matcherClassCounter != null || usesCompactBoundedCharacterClassForDiagnostics()) {
