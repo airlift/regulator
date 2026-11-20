@@ -200,8 +200,8 @@ or nullable-start `find` as `LOWERED_PROGRAM`
 order: the matcher [class counter](#class-run-counter), the
 [single-byte table](#single-byte-table-and-byte-run), the restored final-line
 OnePass tables (yields), the position automaton (yields), the final form of
-the required bytes (yields, stepping down from a search-end bound to a
-long-window search to a short-window reject to none), and last the
+the required bytes (yields, stepping down from a long-window search to a
+short-window reject to none), and last the
 [prefix literal set](#prefix-acceleration) (leaves minimum). Then it picks one
 `Shape`:
 
@@ -431,12 +431,9 @@ APIs](REGULATOR_API.md#matching-apis) gives.
    `EXACT_LITERAL` with no capture groups (`CP.oneShotExactLiteral`),
    `LITERAL_KERNEL` with a dot-star literal (`CP.oneShotDotStarLiteral`), and
    `FIXED_WIDTH` (`CP.oneShotFixedWidth`, falling through on `BAILED`).
-2. An unanchored call over at least 256 bytes runs `CP.longWindowSearchEnd`.
-   A window that lacks the required literal or
-   [one-of bytes](#required-bytes) holds no match. With a
-   [search-end bound](#required-bytes), the search ends at the end of the last
-   occurrence of the required suffix, and when that suffix does not hold the
-   required literal, the window before that end must also hold the literal.
+2. An unanchored call over at least 256 bytes runs
+   `CP.longWindowLacksRequiredLiteral`: a window that lacks the required
+   literal or [one-of bytes](#required-bytes) holds no match.
 3. `CP.matchRegionInto` calls `matchInternal`. When the caller's buffer is
    wider than the pattern's groups and at most 64 slots are needed, it
    allocates a smaller buffer filled with `-1` and sets the caller's slots past
@@ -481,11 +478,12 @@ matcher to skip the forward DFA.
 | `BYTE_TABLE` | the single-byte table on input of at most 64 bytes without a byte run | the class counter, else `countDfaMatches` |
 | `SCAN_PLAN` | an unanchored plan's search loop (`CP.countUnanchoredScanMatches`); a start-anchored plan with `singleAttemptCount` makes one attempt | handoff: the ordinary engine; other anchored plans: `countOnEngine` |
 
-`CP.countDfaMatches` bounds the search end by the required suffix, then counts
-on the inner or window literal search when the input reaches that search's
-count minimum (`CP.countInnerLiteralMatches`, `CP.countWindowLiteralMatches`,
-each handing off to the DFA count near dense candidates), else on the
-[short fixed-width matcher](#short-fixed-width-matcher), else with
+`CP.countDfaMatches` counts none in a long input that lacks the long-window
+literal, then counts on the inner or window literal search when the input
+reaches that search's count minimum (`CP.countInnerLiteralMatches`,
+`CP.countWindowLiteralMatches`, each handing off to the DFA count near dense
+candidates), else on the [short fixed-width
+matcher](#short-fixed-width-matcher), else with
 [`Dfa.countMatches`](#dfa-counting). A count whose matches all end at the
 inner literal's end stops at the reverse DFA
 ([Inner Literal Counts To The Literal End](../../REGULATOR_DECISIONS.md#inner-literal-counts-to-the-literal-end)).
@@ -503,13 +501,12 @@ switches.
 ### RE2 replaceFirst, replaceAll, and extract
 
 `Re2.replaceFirst` and `Re2.extract` make one capture call through
-`CP.matchInto`. `Re2.replaceAll` bounds the search end once
-(`CP.loopSearchEnd`), checks the required literal near each next start with a
-back-off (`CP.nearRequiredLiteralScansInLoop`), and calls `matchInternal`
-through `CP.matchIntoAfterLoopCheck`. It uses no `RegexpMatcher` and skips the
-shapes' `matchInto` span shortcuts, so an `EXACT_LITERAL` or `FIXED_WIDTH`
-pattern runs the ordinary engine for each match; `matchInternal` shortcuts
-still apply.
+`CP.matchInto`. `Re2.replaceAll` checks the required literal near each next
+start with a back-off (`CP.nearRequiredLiteralScansInLoop`), and calls
+`matchInternal` through `CP.matchIntoAfterLoopCheck`. It uses no
+`RegexpMatcher` and skips the shapes' `matchInto` span shortcuts, so an
+`EXACT_LITERAL` or `FIXED_WIDTH` pattern runs the ordinary engine for each
+match; `matchInternal` shortcuts still apply.
 
 ### Trino operations
 
@@ -1201,21 +1198,19 @@ matcher class counter, single-byte table, and long-window required literal.
 A literal, or one of up to three bytes (the one-of bytes), that every match
 holds (`RequiredBytes.analyze`). Its final form is charged in `selectRoutes`,
 stepping down when it costs a forward DFA its initialization, from the
-search-end bound to the long-window literal to the short-window reject to
-none; the table lists those three forms in the reverse order:
+long-window literal to the short-window reject to none; the table lists those
+two forms in the reverse order:
 
 | Form | Checked by | Chosen when |
 |---|---|---|
 | Short-window reject | `CP.shortWindowLacksRequiredBytes`, in full-`Slice` `find`, unanchored scan-plan `find`, and matcher finds | Required bytes and no single-byte table; windows under 256 bytes, less beside an inner literal search |
-| Long-window literal | `CP.longWindowLacksRequiredLiteral`, `RM.findGeneral`, and `CP.longWindowSearchEnd` in DFA counts and unanchored one-shot calls | `CP.mayCheckRequiredLiteralOnLongWindows` and `CP.checksRequiredLiteralOnLongWindows`: a general pattern with no prefix, anchor, counter, scan plan, or other literal route that would search the same bytes |
-| Search-end bound | `CP.longWindowSearchEnd` in captures, counts, and `replaceAll` | The long-window literal's conditions, no lowered program, and assertions the DFA runs; the search ends at the end of the bytes every match ends with |
+| Long-window literal | `CP.longWindowLacksRequiredLiteral` in full-`Slice` `find`, DFA counts, unanchored one-shot calls, and `RM.findGeneral` | `CP.mayCheckRequiredLiteralOnLongWindows` and `CP.checksRequiredLiteralOnLongWindows`: a general pattern with no prefix, anchor, counter, scan plan, or other literal route that would search the same bytes |
 | Literal beside a route | the long-window check | The long-window check was refused, and `RequiredBytes.literalBesideRoutes` finds a rarer literal no other route searches |
 | Inner-literal handoff | `CP.findFromRequiredLiteral` | `CP.handsOffRequiredLiteral`: the inner literal search runs first, its minimum is at most 256 bytes, and the literal is the inner literal, or the inner literal plus one final byte that its suffix gate admits alone |
 
 [Required-byte and match-length rejects](OPTIMIZATION_CATALOG.md#required-byte-and-match-length-rejects),
 [Short-Window Required Bytes Reject](../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject),
-[Required Literal Absence On Long Windows](../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows),
-[Required Suffix Bound On Long Windows](../../REGULATOR_DECISIONS.md#required-suffix-bound-on-long-windows).
+[Required Literal Absence On Long Windows](../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows).
 
 #### Match-length rejects
 

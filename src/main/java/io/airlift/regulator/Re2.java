@@ -513,15 +513,10 @@ public sealed class Re2
         // see nearRequiredLiteralScansInLoop.
         int nearScans = 0;
         DynamicSliceOutput out = new DynamicSliceOutput(text.length() + rewrite.length());
-        // The bound of the whole text, computed once, ends every search, so no search computes
-        // its own; see loopSearchEnd.
-        int searchEnd = loopSearchEnd(text);
+        int searchEnd = text.length();
 
         while (position <= end) {
             int start = position - base;
-            if (searchEnd < start) {
-                break;
-            }
             nearScans = nearRequiredLiteralScansInLoop(text, start, searchEnd, nearScans);
             if (nearScans < 0 || !matchIntoAfterLoopCheck(text, start, searchEnd, groupOffsets)) {
                 break;
