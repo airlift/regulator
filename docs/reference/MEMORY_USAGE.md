@@ -59,13 +59,13 @@ Compilation that exceeds the budget throws `RegexpCompileMemoryLimitException`.
 Where compilation proves a lower bound on the budget the pattern needs, the
 message reports it; a larger budget may still be needed. During matching, a
 full DFA cache resets, or gives its pointer table back and goes on with Java
-object rows, and repeated resets fall back to the NFA, so ordinary matching
-never throws a memory-limit exception. `Re2Set` is the exception: it has no
-NFA to fall back to, so, as upstream `RE2::Set` does, its searches go on
-through repeated resets. When a reset cannot make room for the states a search
-needs, it throws `RegexpMatchMemoryLimitException` rather than report no
-match, and so do the `FilteredRe2` methods that run its atom search, an
-`Re2Set`. A `FilteredRe2` whose atom search exceeds its budget at build time
+object rows, and repeated resets fall back to engines that need no DFA cache,
+so ordinary matching never throws a memory-limit exception. `Re2Set` is the
+exception: it has no NFA to fall back to, so, as upstream `RE2::Set` does, its
+searches go on through repeated resets. When a reset cannot make room for the
+states a search needs, it throws `RegexpMatchMemoryLimitException` rather than
+report no match, and so do the `FilteredRe2` methods that run its atom search,
+an `Re2Set`. A `FilteredRe2` whose atom search exceeds its budget at build time
 still builds without it, and those methods throw `IllegalStateException`
 instead. See [Compiled
 patterns](REGULATOR_API.md#compiled-patterns) and

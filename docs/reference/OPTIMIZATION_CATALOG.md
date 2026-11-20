@@ -5,15 +5,16 @@ compilers and credits where each came from. An entry is a mechanism that
 skips work, does work in bulk, or swaps in a cheaper method, and it cites a
 measured win; the gates and fallbacks that guard a mechanism are part of its
 entry. Optimizations preserve each language's matching contract; Trino
-regular-expression routes promise agreement only on valid UTF-8. Regulator is
-pure Java, with no JNI library or bundled native code. The only native memory
-it allocates is the DFA's optional pointer table, and only with native access;
-otherwise that table is a Java array, as
-[Runtime acceleration](REGULATOR_API.md#runtime-acceleration) describes. The
-[RE2 optimization registry](OPTIMIZATION_REGISTRY.md) gives the exact triggers
-of the RE2 mechanisms cited here by ID, and
-[Limits and defaults](REGULATOR_API.md#limits-and-defaults) gives the memory
-limits and defaults these optimizations work within.
+regular-expression routes agree with Joni on valid UTF-8 and with the shared
+engine on malformed input. Regulator is pure Java, with no JNI library or
+bundled native code. The only native memory it allocates is the DFA's optional
+pointer table, and only with native access; otherwise that table is a Java
+array, as [Runtime acceleration](REGULATOR_API.md#runtime-acceleration)
+describes. The [RE2 optimization registry](OPTIMIZATION_REGISTRY.md) gives the
+exact triggers of the RE2 mechanisms cited here by ID, and [Limits and
+defaults](REGULATOR_API.md#limits-and-defaults) gives the memory limits and
+defaults these optimizations work within. The [engine map](ENGINE_MAP.md)
+gives the order in which routes are chosen and what runs when one declines.
 
 Most of these ideas were first built elsewhere: RE2, the Rust regex crate and
 its memchr and aho-corasick crates, Hyperscan, ClickHouse, .NET, Trino, and
@@ -300,7 +301,9 @@ answer, or reject the input before any engine runs.
   average with at least 4 KiB of the region left, for a pattern whose finds
   run both a forward and a reverse search, that has no literal route or
   byte scan estimated selective on English text, and whose forward density
-  sample would turn no byte scan on in the rest of the region
+  sample would turn no byte scan on in the rest of the region. A count
+  switches only where the pattern's own count route cannot answer, and a Trino
+  operation only where no span matcher answers it
 - **What it does:** One unanchored reverse many-match pass over the rest of
   the region marks every position where a match starts, in a bitset of at most
   1 MiB. Each later find takes the first marked start at or after its position
@@ -1527,9 +1530,10 @@ authoritative.
   ([hybrid/dfa.rs][ra-hybrid]). Regulator: absolute row addresses in native
   memory, tags in their low bits, a zero-based heap segment so one set of
   loops serves both forms, short-search promotion, the one-time wait for
-  pairing, and giving the table back before NFA fallback or when its rows in
-  use cost a quarter of the Java states at budget exhaustion ([#162], [#165],
-  [design][d-native]); base RE2 [O-DFA-001], [O-DFA-002], [O-DFA-013].
+  pairing, and giving the table back before the DFA abandons a search or when
+  its rows in use cost a quarter of the Java states at budget exhaustion
+  ([#162], [#165], [design][d-native]); base RE2 [O-DFA-001], [O-DFA-002],
+  [O-DFA-013].
 - **Where:** `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.allocateAbsolutePointerTable`,
   `Dfa.DfaInstance.classByteOffsets`,
@@ -1605,10 +1609,10 @@ those threads search.
 ## OnePass, BitState, and NFA
 
 Capture searches use RE2's OnePass, BitState, and NFA engines in RE2's order.
-A group-zero search of a pattern with bounded matches whose forward DFA fails
-runs the
+A group-zero or boolean search whose forward DFA fails runs the
 [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats)
-where the NFA would step the whole text. These entries cover what Regulator
+where the NFA would step the whole text, when the pattern meets the
+automaton's gates (bounded matches and at most 512 positions, among others). These entries cover what Regulator
 changed or added in OnePass and in that fallback. BitState's
 bitmap, text limit, and eligibility, and the NFA's bounded capture passes, are
 in [Limits and defaults](REGULATOR_API.md#limits-and-defaults), and the
@@ -2423,13 +2427,13 @@ and shapes, applies to every pattern, interpreted or generated.
   sealed. Compilation picks one shape subclass, such as exact literal, class
   run, or scan plan, whose entries each call the route chosen for that
   operation; a route may still pick among its own kernels, but a call site
-  sees no strategy switch. Trino compilation tries literal alternation and
-  literal set, then picks begin-line, ordered literal, dot-star literal, exact
-  literal, fixed-width byte, character class, or a generated class, falling
-  back to the compiled pattern, and these classes call their matchers
-  directly instead of through the compiled pattern's dispatch. With other
-  patterns run first, short rows take 0.92 of the time of the shared route
-  chain, and exact-literal `matches` 0.18 to 0.50 ([#108]).
+  sees no strategy switch. Trino has its own sealed classes, which call their
+  matchers directly instead of through the compiled pattern's dispatch;
+  compilation tries the literal alternation and literal set before it compiles
+  a program, then the other classes in the order the
+  [engine map](ENGINE_MAP.md#trino-regular-expressions) gives.
+  With other patterns run first, short rows take 0.92 of the time of the
+  shared route chain, and exact-literal `matches` 0.18 to 0.50 ([#108]).
 
 ### Generated class is the pattern
 
@@ -2451,10 +2455,11 @@ and shapes, applies to every pattern, interpreted or generated.
   `TrinoLikeKernelGenerator.generate`,
   `ScanKernelGenerator.ScanEmitter.definePattern`,
   `ScanKernelGenerator.ScanEmitter.defineTrino`, `CompiledPattern.find`
-- **Applies when:** Scan-plan and LIKE patterns; each routed public operation
-  is declared on the generated class with its route fixed, within C2's
-  325-byte hot-method inline limit; binding works on any pattern, generated or
-  not
+- **Applies when:** Case-sensitive regular-expression scan plans and every LIKE
+  strategy; for `TrinoRegexp`, only a pattern no specialized class claims; each
+  routed public operation is declared on the generated class with its route
+  fixed, within C2's 325-byte hot-method inline limit; binding works on any
+  pattern, generated or not
 - **What it does:** The plan compiles into one hidden class through the
   `io.airlift:classfile` library. The class extends the language's pattern
   class, so a call site sees the generated class directly. A caller can also
@@ -2664,9 +2669,12 @@ in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
 
 Regulator's engines are RE2's. Its lazy DFA builds states from work queues
 into a state cache over byte classes, with dead and full-match sentinel states
-and an earliest-match exit, and falls back to the NFA when cache resets thrash,
-or, for a group-zero search of a pattern with bounded matches, to the
-[bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats).
+and an earliest-match exit, and falls back to the submatch engines when cache
+resets thrash: OnePass for an anchored one-pass search, BitState on a short
+window, the
+[bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats)
+for a group-zero or boolean search of a pattern it admits (bounded matches and
+at most 512 positions, among other gates), else the Pike NFA.
 It caches start states per context as RE2 does ([O-DFA-014]), with
 Trino-line, after-CR (as regex-automata has it, [start.rs][ra-start]), and
 after-non-ASCII start contexts added ([#6], [#64]). With RE2's and .NET's
@@ -2701,7 +2709,7 @@ change is described.
 | Prefix acceleration in the DFA and NFA | [O-DFA-005], [O-RE2-004], [O-NFA-008] | `Prog.prefixAccel`, `Prog.prefixAccelSingleByteNoFoldCase`, `Prog.skipToStartCandidate` |
 | Byte classes; Regulator's builder skips small merged groups after 32 merges and renumbers active classes past 256 | [O-DFA-006], [O-PROG-003], [O-RE2-015] | `Prog.computeByteMap` |
 | Lock-free transition reads; publication changed in [Copy-on-reset readers](#copy-on-reset-readers) | [O-DFA-008] | `Dfa.DfaInstance.computeTransition` |
-| NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero search of a pattern with bounded matches runs the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
+| Engine fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero or boolean search of a pattern the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) admits runs it instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
 | Per-kind DFA budgets and a minimum state count; Regulator counts a longest-match state's marks and a reversed program's stack by the program's lists and instruction kinds, as [Memory Budgets And DFA Caching](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching) describes | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory`, `Dfa.DfaInstance.markSlots`, `Dfa.DfaInstance.stackLength` |
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
 | Many-match DFA; a state of a program without empty-width assertions holds its own matches, as [Many-match states that hold their own matches](#many-match-states-that-hold-their-own-matches) describes | [O-DFA-019] | `Dfa.searchMany` |

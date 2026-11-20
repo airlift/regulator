@@ -33,12 +33,12 @@ MatchResult result = pattern.findResult(inputBytes);
 
 Each compiler handles its own language's syntax and semantics. `RustRegexp`,
 `Re2`, `JavaRegexp`, and `TrinoRegexp` produce shared Regulator programs
-that run on the same bounded DFA, NFA, OnePass, and BitState engines.
-`TrinoRegexp` can also choose a specialized matcher for an operation when
-pattern analysis proves it will produce the same result. In all four
-languages, patterns of a few common extraction shapes also select a
-[scan plan](../benchmarks/SCAN_PLAN.md), except Latin-1 or longest-match RE2
-patterns.
+that run on the same bounded DFA, NFA, OnePass, and BitState engines. Every
+language also picks specialized matchers by pattern shape where analysis
+proves they produce the same result, and `TrinoRegexp` tries its own literal
+and span classes first. In all four languages, patterns of a few common
+extraction shapes also select a [scan plan](../benchmarks/SCAN_PLAN.md),
+except Latin-1 or longest-match RE2 patterns.
 
 `TrinoLikePattern` parses LIKE directly and has its own general wildcard
 matcher. It does not translate LIKE into regex text. LIKE and regex plans can

@@ -141,7 +141,7 @@ Compilation recognizes these and builds a dedicated route for each.
   wildcard patterns use the wildcard matcher.
 
 Each route must produce exactly the results of the ordinary engine, on valid
-UTF-8 and, for every language except Trino regular expressions, on any input.
+UTF-8 and malformed input alike.
 A regular expression that no plan fits runs on the shared engines.
 
 ## Make each DFA step cheap
@@ -346,6 +346,7 @@ Regulator takes. In the Regulator 2.1 preliminary results:
 
 - [FAQ](FAQ.md)
 - [Optimization catalog](reference/OPTIMIZATION_CATALOG.md)
+- [Engine map](reference/ENGINE_MAP.md)
 - [RE2 optimization registry](reference/OPTIMIZATION_REGISTRY.md)
 - [Specialized scan plan](benchmarks/SCAN_PLAN.md)
 - [Reverse DFA](reference/REVERSE_DFA.md)

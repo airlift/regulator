@@ -51,8 +51,9 @@ rejects text whose suffix cannot match and avoids scanning every possible start
 position from the left.
 
 If either DFA cannot be created, exhausts its cache without making progress, or
-quits on text it cannot evaluate, the public matcher falls back to NFA,
-BitState, or OnePass as appropriate.
+quits on text it cannot evaluate, the public matcher falls back to OnePass,
+BitState, the position automaton, or the Pike NFA, in that order of preference,
+as [the engine map](ENGINE_MAP.md#when-the-dfa-fails) describes.
 A DFA failure means "try another engine," not "no match."
 
 ## Boundary semantics
@@ -103,7 +104,12 @@ Following upstream RE2:
 - the reverse program receives one third, less what an inner or window literal
   search retains from it
 - a reverse longest-match DFA receives its program's complete remaining DFA
-  allowance because a reverse program has only one DFA kind
+  allowance
+
+While a dense all-match operation holds a match start set, the set's bitset is
+reserved from the reverse longest-match DFA's free state memory, and the set's
+many-match DFA borrows up to half of what is left and gives it back before the
+longest-match DFA would refuse a state of its own.
 
 An insufficient reverse compile budget is not fatal to an already valid `Re2`;
 the current match falls back to another linear-time engine.
