@@ -1054,9 +1054,6 @@ public class TestPositionNfa
     private static void starveDfas(CompiledPattern pattern)
     {
         pattern.forwardProgramForDiagnostics().setDfaMemory(0);
-        if (pattern.booleanProgramForDiagnostics() != null) {
-            pattern.booleanProgramForDiagnostics().setDfaMemory(0);
-        }
     }
 
     /// Returns each find's span of `group`, which is group zero's span in the capture-group form.

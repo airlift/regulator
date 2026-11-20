@@ -252,30 +252,6 @@ public class TestRe2Allocations
     }
 
     @Test
-    public void testTrinoFinalLineBooleanProgramDoesNotAllocate()
-    {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
-        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("[a-z]+$"));
-        byte[] absentBytes = new byte[32_768];
-        Arrays.fill(absentBytes, (byte) '1');
-        absentBytes[absentBytes.length - 1] = '\n';
-        Slice absent = Slices.wrappedBuffer(absentBytes);
-        Slice matched = Slices.utf8Slice("123abc\n");
-        Slice anchored = Slices.utf8Slice("abc\n");
-
-        for (int iteration = 0; iteration < 5; iteration++) {
-            assertThat(runFinalLineBooleanOperations(pattern, absent, matched, anchored)).isEqualTo(30_000);
-        }
-
-        long allocatedBytes = minimumAllocatedBytes(30_000, () -> runFinalLineBooleanOperations(pattern, absent, matched, anchored));
-
-        assertThat(allocatedBytes / 10_000).isZero();
-    }
-
-    @Test
     public void testTrinoCaptureMatcherRejectsRowWithoutEngineMatcher()
     {
         // Trino builds a capture matcher for each row, as for rebar's ruff-noqa and aws-keys rows.
@@ -594,17 +570,6 @@ public class TestRe2Allocations
             minimumAllocatedBytes = Math.min(minimumAllocatedBytes, allocatedBytes);
         }
         return minimumAllocatedBytes;
-    }
-
-    private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
-    {
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matchCount += !pattern.contains(absent) ? 1 : 0;
-            matchCount += pattern.contains(matched) ? 1 : 0;
-            matchCount += pattern.re2().lookingAt(anchored) ? 1 : 0;
-        }
-        return matchCount;
     }
 
     @Test

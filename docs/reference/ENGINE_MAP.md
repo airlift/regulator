@@ -62,12 +62,7 @@ what it covers. Compilation splits it as RE2 does:
   compiled in it, and what the program leaves is its DFA allowance
   (`Prog.dfaMemory`). Every optional plan and matcher is charged against that
   allowance, in the order [Analysis](#analysis-buildwithprogram) lists, so each
-  sees what the earlier ones left. With a [lowered boolean
-  program](#lowered-boolean-program), the pattern's own program keeps no DFA
-  allowance and the lowered program holds the rest; the transparent start
-  literal and folded start run, restored OnePass tables, and required bytes are
-  charged to it, while the position automaton still charges the pattern's own
-  program.
+  sees what the earlier ones left.
 - The reverse share is one third. An inner or window literal search takes its
   memory from it first; the reverse program, compiled lazily on first need,
   gets the rest (`CP.reverseProgramMemory`).
@@ -140,25 +135,23 @@ exclude it.
 | 4 | Final-line OnePass tables released | The program is one-pass only because of a Java or Trino final-line end; restored later if they yield | — |
 | 5 | [Exact literal](#exact-literal) | The pattern is one unanchored case-sensitive literal; its prefix scan is configured | throws if the shift table does not fit |
 | 6 | [Boolean plan kinds](#boolean-plan-kinds) | Always | — |
-| 7 | [Scan plan](#scan-plans), anchored or literal-led | Default scan-plan mode, not longest-match, cannot match empty, `ScanPlan.analyze` accepts | fits |
-| 8 | [Lowered boolean program](#lowered-boolean-program) | No scan plan; the find plan is general or nullable-start, or the `lookingAt` plan is general; lowering a final-line `$` changes the tree, and the lowered program compiles with no text-dependent assertions or full-case-fold literals | fits beside the program |
-| 9 | Scan plan, run-led | The analyzed plan is neither start-anchored nor literal-led, and there is no lowered program | fits |
-| 10 | [Tagged alternation program](#tagged-alternation-program) | No required prefix or lowered program; `TaggedAlternationProgram.compile` accepts | own split, below |
+| 7 | [Scan plan](#scan-plans) | Default scan-plan mode, not longest-match, cannot match empty, `ScanPlan.analyze` accepts | fits |
+| 8 | [Tagged alternation program](#tagged-alternation-program) | No required prefix; `TaggedAlternationProgram.compile` accepts | own split, below |
 | – | Capture-search plan | Always (`Nfa.planCaptureSearches`); the forward share is its allowance | throws when no plan fits |
-| 11 | [Word-run matcher](#word-run-matcher) | No required prefix or lowered program; `WordRunMatcher.analyze` | fits |
-| 12 | [Whole-input capture plan](#whole-input-capture-plan) | Same, `WholeInputCapturePlan.analyze` | fits |
-| 13 | [Inner literal search](#inner-literal-search), else [window literal search](#window-literal-search) | No required prefix, lowered program, exact literal, scan plan, or word-run matcher; not longest-match. Inner: not the dot-star-literal shape. Window: no inner search and no transparent start literal | reverse share |
-| 14 | [Required bytes](#required-bytes) candidate | `RequiredBytes.analyze` finds a literal or up to three bytes every match holds | charged in `selectRoutes` |
-| 15 | [Literal search kernel](#literal-search-kernel) | The find plan is `CONTAINS` and the literal has at least 2 bytes | Trino, or a literal over 64 bytes: fits; otherwise yields |
-| 16 | [Dot-star literal span](#dot-star-literal-span) | `DotStarLiteralSpanMatcher.analyze` | yields |
-| 17 | [Transparent start literal](#transparent-start-literal) and folded start run | `CP.searchesTransparentStartLiteral`, `Prog.buildTransparentStartLiteral`; the run when the DFA runs the program's assertions and the run's probe pair is more than four times rarer than the literal's (`CP.rarerFoldedStartRun`) | leaves minimum |
-| 18 | [Literal set](#literal-set) | Not longest-match; `LiteralSetSpanMatcher.analyze` (no captures, more than 64 literals); its root skip is dropped unless both forward DFAs still initialize beside the set measured without its search tables, and its dense rows and skip table are dropped together where they alone cost a forward DFA its initialization | fits |
-| 19 | [Ordered literals](#ordered-literals) | Find plan general, no scan plan, every inner gap matches any byte sequence (`CP.createByteGapOrderedLiteralMatcher`); no lowered or tagged alternation program | yields |
-| 20 | [Literal alternation](#literal-alternation) | Find plan general, no scan plan, not longest-match, `LiteralAlternationSpanMatcher.analyze` | fits |
-| 21 | [Fixed-width byte span](#fixed-width-byte-span) | Find plan general, no scan plan, no literal-alternation candidate analyzed, no captures, bounded length up to 1,024 bytes, no inner literal of 2 or more bytes, `FixedWidthByteSpanMatcher.analyze`, and the matcher does not step aside for the engine's scans (`CP.yieldsToEngineRoute`) | fits |
-| 22 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
-| 23 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
-| 24 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
+| 9 | [Word-run matcher](#word-run-matcher) | No required prefix; `WordRunMatcher.analyze` | fits |
+| 10 | [Whole-input capture plan](#whole-input-capture-plan) | Same, `WholeInputCapturePlan.analyze` | fits |
+| 11 | [Inner literal search](#inner-literal-search), else [window literal search](#window-literal-search) | No required prefix, exact literal, scan plan, or word-run matcher; not longest-match. Inner: not the dot-star-literal shape. Window: no inner search and no transparent start literal | reverse share |
+| 12 | [Required bytes](#required-bytes) candidate | `RequiredBytes.analyze` finds a literal or up to three bytes every match holds | charged in `selectRoutes` |
+| 13 | [Literal search kernel](#literal-search-kernel) | The find plan is `CONTAINS` and the literal has at least 2 bytes | Trino, or a literal over 64 bytes: fits; otherwise yields |
+| 14 | [Dot-star literal span](#dot-star-literal-span) | `DotStarLiteralSpanMatcher.analyze` | yields |
+| 15 | [Transparent start literal](#transparent-start-literal) and folded start run | `CP.searchesTransparentStartLiteral`, `Prog.buildTransparentStartLiteral`; the run when the DFA runs the program's assertions and the run's probe pair is more than four times rarer than the literal's (`CP.rarerFoldedStartRun`) | leaves minimum |
+| 16 | [Literal set](#literal-set) | Not longest-match; `LiteralSetSpanMatcher.analyze` (no captures, more than 64 literals); its root skip is dropped unless both forward DFAs still initialize beside the set measured without its search tables, and its dense rows and skip table are dropped together where they alone cost a forward DFA its initialization | fits |
+| 17 | [Ordered literals](#ordered-literals) | Find plan general, no scan plan, every inner gap matches any byte sequence (`CP.createByteGapOrderedLiteralMatcher`); no tagged alternation program | yields |
+| 18 | [Literal alternation](#literal-alternation) | Find plan general, no scan plan, not longest-match, `LiteralAlternationSpanMatcher.analyze` | fits |
+| 19 | [Fixed-width byte span](#fixed-width-byte-span) | Find plan general, no scan plan, no literal-alternation candidate analyzed, no captures, bounded length up to 1,024 bytes, no inner literal of 2 or more bytes, `FixedWidthByteSpanMatcher.analyze`, and the matcher does not step aside for the engine's scans (`CP.yieldsToEngineRoute`) | fits |
+| 20 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
+| 21 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
+| 22 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
 
 The tagged alternation program compiles in the program's DFA allowance; a
 third of what remains goes to its many-match DFA, which must initialize at
@@ -182,10 +175,7 @@ RE2's UTF-8 `a.*` gets `CONTAINS` for `find`, `STARTS_WITH` for `lookingAt`,
 and `GENERAL` for `matches`. Every other plan is `GENERAL`, except that the
 empty pattern's `find` is `LITERAL_SEARCH` and a `find` that can match empty
 with no required prefix is `NULLABLE_START`. Later analysis relabels a general
-or nullable-start `find` as `LOWERED_PROGRAM`
-([lowered boolean program](#lowered-boolean-program)), a general `find` as
-`ORDERED_LITERALS` ([ordered literals](#ordered-literals)), and a general
-`lookingAt` as `LOWERED_PROGRAM`.
+`find` as `ORDERED_LITERALS` ([ordered literals](#ordered-literals)).
 
 #### Shape (`selectRoutes`)
 
@@ -199,9 +189,8 @@ a short-window reject to none). Then it picks one `Shape`:
 1. A compact class counter gives `CLASS_RUN`.
 2. Otherwise the find plan decides: `GENERAL` gives `ENGINE`;
    `LITERAL_SEARCH` gives `EXACT_LITERAL` for a non-empty literal and
-   `ENGINE` for the empty pattern; `NULLABLE_START` and `LOWERED_PROGRAM` give
-   `ENGINE`; every other plan, `ORDERED_LITERALS` included, gives
-   `LITERAL_KERNEL`.
+   `ENGINE` for the empty pattern; `NULLABLE_START` gives `ENGINE`; every
+   other plan, `ORDERED_LITERALS` included, gives `LITERAL_KERNEL`.
 3. A single-byte table on a pattern whose find plan is `GENERAL` (a general
    pattern) gives `BYTE_TABLE`.
 4. A scan plan gives `SCAN_PLAN`, overriding every shape above, and sets three
@@ -369,8 +358,7 @@ A full-`Slice` boolean `find` (Trino `contains`) dispatches on the shape:
    empty match at the start answers true
    (`CP.canReturnEmptyAtStartForBooleanMatch`).
 4. Otherwise the [ordinary engine](#the-ordinary-engine) runs, unanchored, on
-   the [lowered boolean program](#lowered-boolean-program) if there is one,
-   else on the forward program.
+   the forward program.
 
 `CP.findOnScanPlan` runs these steps in order; each answers or falls through:
 
@@ -394,9 +382,7 @@ literal in place of step 4.
 
 A full-`Slice` `matches` or `lookingAt` of an `EXACT_LITERAL` pattern compares
 directly. Otherwise the operation's plan kind decides. A literal plan kind
-answers by comparison (`CP.matchLiteralPlan`), and a `LOWERED_PROGRAM`
-`lookingAt` runs the ordinary engine on the lowered program, anchored at the
-start (`CP.matchLoweredBooleanProgram`). A `GENERAL` plan of a `SCAN_PLAN`
+answers by comparison (`CP.matchLiteralPlan`). A `GENERAL` plan of a `SCAN_PLAN`
 pattern uses `CP.matchOnScanPlan` (a start-anchored plan's executor, or one
 anchored attempt of an unanchored plan; neither hands off), or in a generated
 class that class's own `matches` and `lookingAt`; a `GENERAL` plan of any
@@ -686,7 +672,6 @@ zero serve only a matcher that keeps no groups beyond it:
 | [Candidate start cursor](#candidate-start-cursor) | Group zero; none of the three above, and `CP.createCandidateStartCursor` builds one |
 | [Group-zero forward cursor](#group-zero-forward-cursor) | No class counter, and the matcher keeps only group zero or the pattern has a tagged alternation program; built on first use |
 | Start-anchored [scan plan](#scan-plans) | Any matcher; no single-byte table and the plan is start-anchored |
-| Lowered searches | The pattern has a [lowered boolean program](#lowered-boolean-program): the lowered candidate start for any matcher, the direct lowered group-zero search for group zero |
 
 `RM.find` takes the first route that applies: the start-anchored scan plan,
 which answers only the first find; the span search (`RM.findSpanSearch`); the
@@ -737,8 +722,7 @@ any match start set it holds.
    search will run, when the matcher was marked after a bailed count, or when
    the quit streak reached 4 on a quitting DFA; the forward cursor is also
    skipped when this find's candidate cursor quit.
-5. The direct lowered group-zero search and the lowered candidate start.
-6. `CP.matchRegionInto`, which reaches `matchInternal` and the
+5. `CP.matchRegionInto`, which reaches `matchInternal` and the
    [ordinary engine](#the-ordinary-engine) with the matcher as its workspace.
 
 `RM.matches` and `RM.lookingAt` skip the boolean plans and enter
@@ -789,9 +773,7 @@ and kind, shared by every thread searching the pattern.
 - **Chosen:** by the ordinary engine, the counts, the cursors, and the literal
   searches' confirmations; never for a program with DFA-unsupported assertions:
   Java's `$`, `\Z`, `(?m)^`, and, outside `UNIX_LINES`, `(?m)$`, and Trino's
-  `$`. For boolean calls, the [lowered boolean
-  program](#lowered-boolean-program) may rewrite a terminal Trino `$`, and
-  Java's `$` and `\Z` under `UNIX_LINES`, so the DFA can run them.
+  `$`.
 - **Bounds:** `Prog.dfaBudget` gives each forward kind half the program's DFA
   allowance, a reverse longest-match DFA all of the reverse program's, and a
   many-match DFA all of its program's, except the match start set's, which
@@ -953,29 +935,15 @@ another failure lets the ordinary engine run.
 
 The forward program reversed, with its assertions swapped, compiled lazily on
 the first search that needs a match start (`CP.reverseProg`), in the reverse
-share less any inner or window literal search. It compiles from the lowered
-program's normalized expression when the pattern has one, otherwise from the
-normalized suffix, so a pattern whose lowered program rewrites a terminal
-Trino `$`, or Java's `$` or `\Z` under `UNIX_LINES`, has one. There is none
-when that program has DFA-unsupported assertions or a directional repetition
-(a Java counted repeat of at least two required copies whose body matches
-empty only through an assertion), when the stored reverse expression's
-retained size exceeds the reverse share at compile time, or when its compile
-runs out of memory; searches then run without it. Its longest-match DFA gets
-all of its DFA allowance and lends up to half of its free memory to the match
-start set's many-match DFA. See [Reverse DFA](REVERSE_DFA.md).
+share less any inner or window literal search. It compiles from the normalized
+suffix. There is none when the forward program has DFA-unsupported assertions or
+a directional repetition (a Java counted repeat of at least two required copies
+whose body matches empty only through an assertion), when the stored reverse
+expression's retained size exceeds the reverse share at compile time, or when
+its compile runs out of memory; searches then run without it. Its longest-match
+DFA gets all of its DFA allowance and lends up to half of its free memory to the
+match start set's many-match DFA. See [Reverse DFA](REVERSE_DFA.md).
 [RE2 optimizations used as ported](OPTIMIZATION_CATALOG.md#re2-optimizations-used-as-ported).
-
-#### Lowered boolean program
-
-A second program in which a terminal final-line `$` (Trino's `$`, Java's `$`
-and `\Z` under `UNIX_LINES`) is lowered so the DFA can run it
-(`BooleanRegexpLowering.lowerTerminalFinalLineEnds`,
-`CP.compileLoweredBooleanProgram`). Kept only without a scan plan and when the
-lowered program has no text-dependent assertions or full case folding; the
-pattern's own program then has no DFA allowance. Boolean `find`, `lookingAt`,
-and the matcher's lowered searches run on it.
-[Assertions on the DFA with lazy quit](OPTIMIZATION_CATALOG.md#assertions-on-the-dfa-with-lazy-quit).
 
 #### OnePass
 
@@ -1478,7 +1446,7 @@ With `setGenerateBytecode(true)`:
 | Front end | shared analysis, longest-match option | shared analysis | shared analysis | own classes, then shared analysis | own planner, no program |
 | Memory budget | yes | yes | yes | yes | none |
 | [DFA-unsupported assertions](#lazy-dfa) | none | `$`, `\Z`, `(?m)^`, and, outside `UNIX_LINES`, `(?m)$` | none | `$` | — |
-| [Reverse program](#reverse-program) | yes | none with directional repetition, or with the assertions above unless the lowered boolean program removes them (`$` and `\Z` under `UNIX_LINES`) | yes | none with `$` unless the lowered boolean program removes it | — |
+| [Reverse program](#reverse-program) | yes | none with directional repetition or the assertions above | yes | none with `$` | — |
 | [No-program routes](#compile-failure-routes) | literal set and compact class counter, leftmost-first only | literal set, compact class counter | literal set, compact class counter | literal alternation, literal set, fixed width, compact class counter | always |
 | [Literal search kernel](#literal-search-kernel) for a literal of 2 to 64 bytes | yields | yields | yields | fits | always |
 | Matcher rules | longest match turns off the cursors | a region starting on the LF of a CR LF may run the Pike NFA ([Matcher iteration](#matcher-iteration)) | outside bytes mode, empty matches that split a character are skipped and ranged calls check character boundaries ([Decision flow](#decision-flow-per-operation)) | span classes and a deferred capture matcher | — |

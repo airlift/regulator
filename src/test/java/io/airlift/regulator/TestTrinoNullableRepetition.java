@@ -247,7 +247,6 @@ public class TestTrinoNullableRepetition
         })).isEqualTo(utf8Slice("_"));
 
         TrinoRegexp finalLineRegexp = TrinoRegexp.compile(utf8Slice("(?:a+?){2,}$"));
-        assertThat(finalLineRegexp.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineRegexp.contains(source)).isTrue();
         assertThat(finalLineRegexp.extract(source)).isEqualTo(utf8Slice("aaa"));
 
