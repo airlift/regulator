@@ -1335,8 +1335,7 @@ One pass over runs of a character class, cut by the repeat bounds
 - **Matcher route:** a single large Unicode class or a greedy class repeat
   with no captures; serves group-zero matcher finds and counts.
 - **Count route:** built on first use from the class repeat when neither is
-  held; counts runs from their starts for an unbounded byte-class repeat, and
-  hands long runs to a vector scan.
+  held; counts runs from their starts for an unbounded byte-class repeat.
 - **Catalog:** [Class-run counter](OPTIMIZATION_CATALOG.md#class-run-counter),
   [Class-run alternation captures](OPTIMIZATION_CATALOG.md#class-run-alternation-captures).
 - **Decision:** [Bounded Character-Class Counting](../../REGULATOR_DECISIONS.md#bounded-character-class-counting).

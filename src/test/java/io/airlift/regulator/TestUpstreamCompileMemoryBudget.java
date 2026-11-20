@@ -361,7 +361,7 @@ public class TestUpstreamCompileMemoryBudget
                 // A compact counter in place of a program measures exactly what it needs. A
                 // budget too small for the counter compiles the program, so a sparse class whose
                 // counter's bitset reaches U+100000 reports what its smaller program needs.
-                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 53_987, 53_987, 1, 8_000),
+                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 53_963, 53_963, 1, 8_000),
                 new RejectedPattern("sparse high class", Language.RE2, sparseHighClass, 13_211, 13_211, 1, 2_000),
                 new RejectedPattern("sparse high class", Language.JAVA, sparseHighClass, 13_211, 13_211, 1, 2_000),
                 new RejectedPattern("sparse high class", Language.RUST, sparseHighClass, 13_211, 13_211, 1, 2_000),
