@@ -49,6 +49,10 @@ introduction. Defaults, budgets, limits, safety bounds, and other
 configuration go in the [API guide](reference/REGULATOR_API.md). A minor
 technique that misses the bar gets no entry.
 
+A change that adds, removes, or reorders a route, or changes when one is
+chosen, what bounds it, or what runs when it declines, updates the
+[engine map](reference/ENGINE_MAP.md) in the same change.
+
 ## Protected areas
 
 Treat these as performance-sensitive unless analysis proves otherwise:

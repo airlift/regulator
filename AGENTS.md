@@ -18,6 +18,7 @@ regular expressions, and Trino SQL LIKE.
 - `docs/README.md` -- Documentation index and authority rules
 - `docs/porting/WORKFLOW.md` -- Development workflow and conventions
 - `docs/reference/REGULATOR_API.md` -- Public API, ownership, matching, captures, and resources
+- `docs/reference/ENGINE_MAP.md` -- Every engine and kernel, how one is chosen for each operation, and what runs when it declines
 - `docs/integrations/TRINO.md` -- Trino compatibility boundary and adoption requirements
 - `docs/benchmarks/METHODOLOGY.md` -- Benchmarking and performance-analysis guide
 - `docs/benchmarks/QUALIFICATION_PLAN.md` -- Final candidate benchmark plan
@@ -78,6 +79,7 @@ and the complete campaign is preserved privately.
   5. Test must pass - fix is NOT complete until test passes
   See `docs/MAINTAINING_REGULATOR.md` for the correctness and performance gates.
 - **Catalog every optimization worth knowing.** An optimization that meets the catalog's bar (a mechanism, with a measured win cited, that someone building another engine would want to know) adds its entry to `docs/reference/OPTIMIZATION_CATALOG.md` in the same change, crediting any earlier source found by a prior-art search, and a change that alters or removes an optimization updates or deletes its entry. Gates, fallbacks, and variants extend the entry they serve; defaults, budgets, limits, and other configuration go in `docs/reference/REGULATOR_API.md`; minor techniques get no entry. See Release and measurement policy in `docs/MAINTAINING_REGULATOR.md`.
+- **Keep the engine map with route changes.** A change that adds, removes, or reorders a route, or changes when one is chosen, what bounds it, or what runs when it declines, updates `docs/reference/ENGINE_MAP.md` in the same change.
 
 ## Upstream Source
 
