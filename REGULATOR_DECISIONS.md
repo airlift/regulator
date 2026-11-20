@@ -3388,22 +3388,20 @@ The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
 must have no other route that already searches for a literal at least as fast.
 So it has no required prefix, exact literal, literal kernel or literal search,
-scan plan, class counter, literal set or alternation, span, byte-run, word-run,
-or disjoint suffix-repeat matcher, or whole-input capture plan, and no inner
-literal search but one that only the
-[class-run proof](#inner-literal-class-run-prefix) admits. Such a pattern
-decides as it would without that search, so the proof neither adds the check nor
-takes it away. Nor does the
-[literal-neighbor find plan](#boolean-partial-match-specializations) take the
-check away: it answers full-Slice boolean find alone, and the pattern's other
-operations keep the ordinary engine. Nor does the
-[window literal search](#window-literal-search): BitState's capture of groups
-and a find that skips the DFA never run it, and without the check
-`((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz` that the check
-rejects with one scan. On the window search's own route the check scans the
-stretch before the next occurrence once more, which costs no more than the check
-and the DFA without the search. Every other search runs on every window the
-check would cover: only a literal set behind a class run has a
+scan plan, class counter, literal set or alternation, span, byte-run, or
+word-run matcher, or whole-input capture plan, and no inner literal search but
+one that only the [class-run proof](#inner-literal-class-run-prefix) admits.
+Such a pattern decides as it would without that search, so the proof neither
+adds the check nor takes it away. Nor does the [literal-neighbor find
+plan](#boolean-partial-match-specializations) take the check away: it answers
+full-Slice boolean find alone, and the pattern's other operations keep the
+ordinary engine. Nor does the [window literal search](#window-literal-search):
+BitState's capture of groups and a find that skips the DFA never run it, and
+without the check `((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz`
+that the check rejects with one scan. On the window search's own route the
+check scans the stretch before the next occurrence once more, which costs no
+more than the check and the DFA without the search. Every other search runs on
+every window the check would cover: only a literal set behind a class run has a
 [minimum window](#minimum-inner-literal-search-window) over 256 bytes. Taking
 the check away let a 16 KiB chunk without the literal enter the engine and run
 the search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
@@ -3412,13 +3410,13 @@ adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
 long. Where an inner literal search stands in for the check, the routes that
 skip it, BitState's capture of groups and a search that skips the DFA, scan the
 window for its literal when that is one exact literal. Neither its forward nor
-its lowered program has a prefix scan, a transparent start literal, or a
-[start literal filter](#start-literal-filter) that its first-match DFA can run
-and that groups of one bit also give. As with the [fixed-width yield
+its lowered program has a prefix scan, a transparent start literal, or a [start
+literal filter](#start-literal-filter) that its first-match DFA can run and
+that groups of one bit also give. As with the [fixed-width yield
 rule](#fixed-width-rare-class-candidates), the check was measured against
 filters of one-bit groups, so a filter that only wider groups give, such as
-that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check
-in place: it runs first, and the DFA keeps the wider filter inside the windows
+that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check in
+place: it runs first, and the DFA keeps the wider filter inside the windows
 that pass. A program whose assertions the DFA cannot run, or whose first-match
 DFA does not fit its budget, never scans for its filter, so the filter does not
 count there. A search that skips the DFA in a pattern whose filter counts, such

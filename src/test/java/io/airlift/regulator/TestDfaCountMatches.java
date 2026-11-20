@@ -43,9 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDfaCountMatches
 {
-    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-    // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
-    // and the pinned native RE2 counts still hold.
+    // Case folding keeps the pattern off the fixed-width matcher, which would answer it without
+    // the DFA. The input has no uppercase letters, so (?i) changes no match and the pinned native
+    // RE2 counts still hold.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
     // One match of STATE_GROWTH after 2 KiB that begin none, which a DFA count counts without a
     // reset.
@@ -393,8 +393,8 @@ public class TestDfaCountMatches
             throws Exception
     {
         for (Re2.Options options : new Re2.Options[] {Re2.Options.defaults(), Re2.Options.latin1()}) {
-            // An outer capture keeps this on the general route rather than the optional
-            // capture-free suffix scanner. Counting still requests only group zero.
+            // An outer capture keeps it off the fixed-width matcher. Counting still requests only
+            // group zero.
             Re2 pattern = Re2.compile(
                     utf8Slice("([a-q][^u-z]{23}x)"),
                     options.setMaxMemory(16L << 20));
