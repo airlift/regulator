@@ -67,7 +67,6 @@ final class Dfa
     private static final int COUNT_START_SAMPLE_SIZE = 256;
     private static final int COUNT_START_SAMPLE_WINDOWS = 16;
     private static final int COUNT_START_SAMPLE_CANDIDATE_LIMIT = SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT * COUNT_START_SAMPLE_SIZE / BYTE_SCAN_SAMPLE_SIZE;
-    private static final boolean BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED = true;
     private static final int MIN_SELF_LOOP_SAMPLE_SEARCH_BYTES = 64 * 1024;
     private static final int SELF_LOOP_SAMPLE_SIZE = 64;
     private static final int SELF_LOOP_SAMPLE_PERCENTAGE = 90;
@@ -832,8 +831,7 @@ final class Dfa
                     }
                 }
                 if (canUseStartByteAcceleration(dfa, anchoredEffective, true, startData.flag())) {
-                    if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                            !dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
+                    if (!dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
                         countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
                     }
                     else {
@@ -2081,10 +2079,7 @@ final class Dfa
 
         boolean byteScanRejected = false;
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
-            if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !(sampling == null
-                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
-                            : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
+            if (!(sampling == null ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd) : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
                 byteScanRejected = true;
                 countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
@@ -2513,10 +2508,7 @@ final class Dfa
         }
 
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
-            if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !(cursor == null
-                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
-                            : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
+            if (!(cursor == null ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd) : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
                 countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
             else {
