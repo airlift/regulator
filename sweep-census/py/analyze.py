@@ -12,11 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from anchors import A
 report = json.load(open(TAG / 'benchmark-report/data/manifest.json'))
 rows = json.load(gzip.open(TAG / 'benchmark-report/data' / report['current']))['rows']
+# Dfa's countRoute indexes, in order; a route added since is named by its index.
 DFA_ROUTES = ['byte-scan-fallback', 'small-byte-set-scan', 'contiguous-range-scan', 'mixed-byte-set-scan', 'start-literal-filter-scan',
               'start-class-filter-scan', 'self-loop-exit-byte-scan', 'count-self-loop-scan', 'count-self-loop-match-hand-off',
               'count-self-loop-no-match-pointer-hand-off', 'count-self-loop-rearm', 'self-loop-stay-range-scan', 'matching-self-loop-scan',
               'matching-self-loop-exit-byte-scan', 'reverse-self-loop-exit-byte-scan', 'fixed-distance-short-skip-fallback', 'prefix-run-scan',
-              'absolute-pointer-backward-search']
+              'absolute-pointer-backward-search', 'match-start-set-pass']
 # The engine-level route, in the order a search reaches them; the census string lists those that ran.
 ORDER = ['G1', 'G2', 'P1', 'P2', 'P4', 'R4', 'L10', 'L1', 'R2', 'L2', 'L3', 'L6', 'L6M', 'L6O', 'L7', 'L8', 'L9', 'A1', 'A2', 'A2S', 'F1', 'F2', 'F2B', 'F3', 'F4', 'F5', 'F6', 'F7',
          'K1', 'K1R', 'K1V', 'K2', 'K3', 'K4', 'K8', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4B', 'L4', 'L4G', 'L4F', 'L4S', 'L5', 'L5X', 'S6', 'S1', 'S2', 'S3', 'S4', 'S5', 'E6', 'E6G', 'S7', 'S8', 'S9', 'S10', 'S11',
@@ -86,7 +87,8 @@ def load(key):
             if f[0] == 'M':
                 d[f[1]][f[2].split('(')[0]] += int(f[3])
             elif f[0] == 'R':
-                d['routes_' + f[1]][DFA_ROUTES[int(f[2])]] += int(f[3])
+                i = int(f[2])
+                d['routes_' + f[1]][DFA_ROUTES[i] if i < len(DFA_ROUTES) else f'route-{i}'] += int(f[3])
             elif f[0] == 'S':
                 d['static'].append((f[1], f[2]))
             elif f[0] == 'P':
