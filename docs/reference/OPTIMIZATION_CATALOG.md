@@ -2416,7 +2416,7 @@ engines.
   with no capture groups. `regexp_extract_all` and `regexp_split` return views
   of the input, and `regexp_position` converts byte offsets to code points
   once at the end. `regexp_count` tries a one-byte pattern's table, the
-  one-byte repeat, the compiled pattern's count (see
+  compiled pattern's count (see
   [Counting][counting-section]), and then a group-zero matcher, with no
   capture work; a pattern that is only multiline `^` counts one plus the LF
   bytes before the final byte, without matching. Dense `regexp_count` of a

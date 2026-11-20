@@ -132,12 +132,10 @@ public sealed class TrinoRegexp
     private final CompileInputs compileInputs;
     // The hash of compileInputs, computed when the pattern compiles.
     private final int hash;
-    private final boolean mayHaveSingleByteRepeatMatcher;
     // Whether a capture matcher's find over a whole input starts with the general route's checks
     // and the pattern keeps required bytes for them, so a capture search runs those checks before
     // it builds a matcher. See RegexpMatcher.captureFindRunsGeneralSearch.
     private final boolean checksBeforeCaptureMatcher;
-    private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
     private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
 
     private TrinoRegexp(CompileInputs compileInputs)
@@ -145,7 +143,6 @@ public sealed class TrinoRegexp
         this.re2 = null;
         this.compileInputs = compileInputs;
         this.hash = compileInputs.hashCode();
-        this.mayHaveSingleByteRepeatMatcher = false;
         this.checksBeforeCaptureMatcher = false;
     }
 
@@ -155,7 +152,6 @@ public sealed class TrinoRegexp
         this.re2 = requireNonNull(compiledPattern, "compiledPattern is null");
         this.compileInputs = compileInputs;
         this.hash = compileInputs.hashCode();
-        this.mayHaveSingleByteRepeatMatcher = compiledPattern.canMatchEmpty();
         this.checksBeforeCaptureMatcher = compiledPattern.hasRequiredBytes() && RegexpMatcher.captureFindRunsGeneralSearch(compiledPattern);
     }
 
@@ -397,11 +393,6 @@ public sealed class TrinoRegexp
         return 0;
     }
 
-    boolean isSingleByteRepeatMatcherComputed()
-    {
-        return singleByteRepeatMatcher != null;
-    }
-
     boolean isSingleByteMatcherComputed()
     {
         return re2 != null && re2.isSingleByteMatcherComputed();
@@ -431,10 +422,6 @@ public sealed class TrinoRegexp
                 shapeRetainedSize();
         // The compiled engine counts the pattern bytes it shares with the inputs.
         size += re2 == null ? compileInputs.pattern().getRetainedSize() : re2.estimatedRetainedSize();
-        SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher;
-        if (repeatMatcher != null) {
-            size += repeatMatcher.estimatedRetainedSize();
-        }
         TrinoReplacementPlan.CachedTemplate template = replacementTemplate;
         if (template != null) {
             size += template.estimatedRetainedSize();
@@ -570,11 +557,6 @@ public sealed class TrinoRegexp
             return byteMatcher.count(source);
         }
 
-        SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher();
-        if (repeatMatcher != SingleByteRepeatMatcher.unsupported()) {
-            return repeatMatcher.count(source);
-        }
-
         long optimizedCount = re2.countMatches(source);
         if (optimizedCount >= 0) {
             return optimizedCount;
@@ -658,17 +640,6 @@ public sealed class TrinoRegexp
         int byteStart = SliceUtf8.offsetOfCodePoint(source, toIntExact(codePointStart));
         if (byteStart < 0) {
             return -1;
-        }
-
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, false);
-        if (repeatCursor != null) {
-            repeatCursor.find(byteStart);
-            for (long match = 1; match < occurrence; match++) {
-                if (!repeatCursor.find()) {
-                    return -1;
-                }
-            }
-            return SliceUtf8.countCodePoints(source, 0, repeatCursor.start()) + 1L;
         }
 
         RegexpMatcher matcher = newGroupZeroMatcher(source);
@@ -774,15 +745,6 @@ public sealed class TrinoRegexp
     {
         validateGroup(group);
         requireNonNull(source, "source is null");
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, group != 0);
-        if (repeatCursor != null) {
-            List<Slice> matches = new ArrayList<>();
-            while (repeatCursor.find()) {
-                matches.add(repeatCursor.group());
-            }
-            return Collections.unmodifiableList(matches);
-        }
-
         if (group != 0 && captureSearchFailsBeforeMatcher(source)) {
             return NO_MATCHES;
         }
@@ -814,18 +776,6 @@ public sealed class TrinoRegexp
     public List<Slice> split(Slice source)
     {
         requireNonNull(source, "source is null");
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, false);
-        if (repeatCursor != null) {
-            List<Slice> parts = new ArrayList<>();
-            int previousEnd = 0;
-            while (repeatCursor.find()) {
-                parts.add(source.slice(previousEnd, repeatCursor.start() - previousEnd));
-                previousEnd = repeatCursor.end();
-            }
-            parts.add(source.slice(previousEnd, source.length() - previousEnd));
-            return Collections.unmodifiableList(parts);
-        }
-
         RegexpMatcher matcher = newGroupZeroMatcher(source);
         List<Slice> parts = new ArrayList<>();
         int previousEnd = 0;
@@ -854,14 +804,6 @@ public sealed class TrinoRegexp
 
         TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
         int maximumCapturingGroup = replacementPlan.maximumCapturingGroup();
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, maximumCapturingGroup != 0);
-        if (repeatCursor != null) {
-            while (repeatCursor.find()) {
-                replacementPlan.addMatch(repeatCursor.start(), repeatCursor.end());
-            }
-            return replacementPlan.build();
-        }
-
         // The steps are written out rather than calling replaceWithMatcher, so C2 compiles them into
         // this method instead of reaching them through a call it declines to inline.
         RegexpMatcher matcher = maximumCapturingGroup == 0
@@ -940,24 +882,6 @@ public sealed class TrinoRegexp
     {
         requireNonNull(source, "source is null");
         requireNonNull(replacement, "replacement is null");
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, true);
-        if (repeatCursor != null) {
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length());
-            int previousEnd = 0;
-            List<Slice> groups = List.of();
-            while (repeatCursor.find()) {
-                output.writeBytes(source, previousEnd, repeatCursor.start() - previousEnd);
-                Slice replacementValue = replacement.apply(groups);
-                if (replacementValue == null) {
-                    return null;
-                }
-                output.appendBytes(replacementValue);
-                previousEnd = repeatCursor.end();
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
-        }
-
         RegexpMatcher matcher = newMatcher(source);
         DynamicSliceOutput output = new DynamicSliceOutput(source.length());
         int previousEnd = 0;
@@ -2409,35 +2333,10 @@ public sealed class TrinoRegexp
         return re2.groupZeroMatcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
     }
 
-    private SingleByteRepeatMatcher.Cursor newSingleByteRepeatCursor(Slice source, boolean capturingGroupsRequired)
-    {
-        if (!mayHaveSingleByteRepeatMatcher || (capturingGroupsRequired && re2.capturingGroupCount() != 0)) {
-            return null;
-        }
-        SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher();
-        return repeatMatcher == SingleByteRepeatMatcher.unsupported() ? null : repeatMatcher.matcher(source);
-    }
-
     private SingleByteMatcher singleByteMatcher()
     {
         SingleByteMatcher byteMatcher = re2.sharedSingleByteMatcher();
         return byteMatcher == null ? SingleByteMatcher.unsupported() : byteMatcher;
-    }
-
-    private SingleByteRepeatMatcher singleByteRepeatMatcher()
-    {
-        if (!mayHaveSingleByteRepeatMatcher) {
-            return SingleByteRepeatMatcher.unsupported();
-        }
-        SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher;
-        if (repeatMatcher == null) {
-            repeatMatcher = re2.createSingleByteRepeatMatcher();
-            if (repeatMatcher == null) {
-                repeatMatcher = SingleByteRepeatMatcher.unsupported();
-            }
-            singleByteRepeatMatcher = repeatMatcher;
-        }
-        return repeatMatcher;
     }
 
     // Loaded only when a size is estimated: parsing loads this class and never sizes objects, and

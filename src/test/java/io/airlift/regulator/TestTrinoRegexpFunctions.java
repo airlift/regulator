@@ -920,20 +920,6 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testSingleByteRepeatAnalysisEligibility()
-    {
-        TrinoRegexp nonNullable = TrinoRegexp.compile(utf8("[a-z]+"));
-        assertThat(nonNullable.isSingleByteRepeatMatcherComputed()).isFalse();
-        assertThat(nonNullable.count(utf8("abc"))).isEqualTo(1);
-        assertThat(nonNullable.isSingleByteRepeatMatcherComputed()).isFalse();
-
-        TrinoRegexp nullableRepeat = TrinoRegexp.compile(utf8("x*"));
-        assertThat(nullableRepeat.isSingleByteRepeatMatcherComputed()).isFalse();
-        assertThat(nullableRepeat.count(utf8("ax"))).isEqualTo(3);
-        assertThat(nullableRepeat.isSingleByteRepeatMatcherComputed()).isTrue();
-    }
-
-    @Test
     public void testCompileBuildsOnlyEligibleSingleByteMatcher()
     {
         TrinoRegexp delimiter = TrinoRegexp.compile(utf8("[,;]"));
@@ -957,38 +943,30 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testCapturedSingleByteRepeatUsesBoundaryMatcherWhenCapturesAreNotNeeded()
+    public void testCapturedSingleByteRepeatOperations()
     {
         Slice source = utf8("axx");
 
         TrinoRegexp position = TrinoRegexp.compile(utf8("(x*)"));
-        assertThat(position.isSingleByteRepeatMatcherComputed()).isFalse();
         assertThat(position.position(source, 1, 2)).isEqualTo(2);
-        assertThat(position.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp groupZero = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(groupZero.extractAll(source, 0))).containsExactly("", "xx", "");
-        assertThat(groupZero.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp capturedGroup = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(capturedGroup.extractAll(source, 1))).containsExactly("", "xx", "");
-        assertThat(capturedGroup.isSingleByteRepeatMatcherComputed()).isFalse();
 
         TrinoRegexp split = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(split.split(source))).containsExactly("", "a", "", "");
-        assertThat(split.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp groupZeroReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(groupZeroReplacement.replace(source, utf8("$0"))).isEqualTo(source);
-        assertThat(groupZeroReplacement.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp capturedReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(capturedReplacement.replace(source, utf8("$1"))).isEqualTo(source);
-        assertThat(capturedReplacement.isSingleByteRepeatMatcherComputed()).isFalse();
 
         TrinoRegexp lambdaReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(lambdaReplacement.replace(source, _ -> utf8("_"))).isEqualTo(utf8("_a__"));
-        assertThat(lambdaReplacement.isSingleByteRepeatMatcherComputed()).isFalse();
     }
 
     @Test
@@ -1550,7 +1528,6 @@ public class TestTrinoRegexpFunctions
         assertThat(regexp.split(source)).containsExactlyElementsOf(expectedParts);
         assertThat(regexp.replace(source, utf8("_"))).isEqualTo(expectedReplacement.slice());
         assertThat(regexp.replace(source, _ -> utf8("_"))).isEqualTo(expectedReplacement.slice());
-        assertThat(regexp.isSingleByteRepeatMatcherComputed()).isTrue();
     }
 
     @Test
