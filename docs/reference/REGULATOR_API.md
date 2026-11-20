@@ -257,7 +257,9 @@ Within the budget, compilation and matching keep these limits:
   whose dense finds switch to a
   [match start set](../../REGULATOR_DECISIONS.md#match-start-set-for-dense-all-match-searches)
   holds a bitset of at most 1 MiB, one bit a byte of the rest of its region,
-  and only while the operation runs; a caller's own `find()` loop never
+  and only while the operation runs. Only loops that use the engine's matcher
+  switch: a count that the pattern's own count route answers, and a Trino
+  operation a span matcher answers, never do. A caller's own `find()` loop never
   switches, so a caller that wants the switch calls `forEachMatch`. The set is
   charged to the reverse longest-match DFA's free memory, and only when it fits
   half of it. The many-match DFA that collects the starts then borrows half of
@@ -652,8 +654,8 @@ The APIs are familiar, but their representations and capabilities differ:
 for different pattern languages. They use the same matching engine after
 compilation. Their patterns of a few common extraction shapes also select a
 [scan plan](../benchmarks/SCAN_PLAN.md), which runs those shapes over the
-input bytes. A plan agrees with the ordinary engine on valid UTF-8, and RE2,
-Java, and Rust plans also agree on malformed input.
+input bytes. A plan agrees with the ordinary engine on valid UTF-8 and
+malformed input alike.
 
 Java `(?U)` and character-class intersection are examples of syntax whose
 meaning depends on the language. Consult the

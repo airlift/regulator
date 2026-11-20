@@ -132,7 +132,7 @@ more to compile or to keep its DFAs cached takes a larger budget from
 `setMaxMemory`. Compilation over the budget throws
 `RegexpCompileMemoryLimitException`; ordinary matching never throws a
 memory-limit exception, because a full DFA cache resets, or gives its pointer
-table back, and repeated resets fall back to the NFA.
+table back, and repeated resets fall back to engines that need no DFA cache.
 [Memory usage](reference/MEMORY_USAGE.md) covers what the budget includes,
 how it compares with other engines' defaults, and how to measure a pattern.
 

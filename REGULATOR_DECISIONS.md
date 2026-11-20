@@ -101,7 +101,8 @@ semantics.
   `firstMatchResult(input)` rather than report no match; its methods taking
   found atom IDs still work.
 - Lazy reverse-program compilation still treats an insufficient reverse budget as
-  an execution fallback and uses the NFA, matching upstream behavior.
+  an execution fallback and runs the submatch engines without a reverse DFA,
+  matching upstream behavior.
 - Invalid rewrites throw `RegexpRewriteException`. No-match is no longer
   conflated with invalid rewrite syntax through a C++-style boolean result.
 
@@ -894,16 +895,17 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - A forward program divides its DFA allowance between first-match and
   longest-match caches. A reverse longest-match DFA and a set's many-match DFA use
   their program's complete allowance. As upstream, a DFA whose allowance is
-  below its minimum is never built, and its searches use the NFA. The minimum
-  leaves out a forward DFA's start-byte tables, so a DFA can still fail to
-  initialize; its program remembers that allowance and does not build it again.
+  below its minimum is never built; a pattern's searches use the other engines,
+  and a set's searches report exhaustion. The minimum leaves out a forward
+  DFA's start-byte tables, so a DFA can still fail to initialize; its program
+  remembers that allowance and does not build it again.
 - As upstream, a DFA initializes only when its allowance, less the DFA, its
   two work queues and its stack, and, for a forward DFA, its start-byte
   tables, holds 20 of its largest possible states. Twenty is a floor for
   speed, not correctness: upstream notes that two states let a search limp
   along, restarting frequently, and a reset needs at most three, the start and
   current states it restores and the next transition, and a search the DFA
-  cannot finish falls back to the NFA, or for a set reports exhaustion.
+  cannot finish falls back to submatch engines, or for a set reports exhaustion.
   Upstream sizes a longest-match DFA's queues and largest state with one mark
   per instruction, which for a large program counts about twice the real
   worst case. A longest-match queue marks only between priority groups, and
@@ -937,9 +939,12 @@ text, so the pair scan rejects little that a first-byte scan would not.
   capacity and its charge. A full cache resets, unless the budget rule in
   [Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
   gives the DFA's pointer table back instead, and repeated reset thrashing
-  falls back to the NFA, or, for a group-zero search of a program with bounded,
-  assertion-free matches, to the position automaton (see
-  [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)).
+  falls back to the submatch engines: OnePass for an anchored one-pass search,
+  BitState on a short window, the position automaton for a group-zero or
+  boolean search of a program it admits, one with bounded, assertion-free
+  matches and at most 512 positions among other gates (see
+  [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)),
+  and otherwise the Pike NFA.
 - A DFA's state and transition tables start with room for one state per
   instruction, at least 16 and at most what its budget's transitions hold, but
   never more than 256 states. A DFA whose one-row-per-instruction capacity is
@@ -1886,7 +1891,7 @@ object rows with paired transitions disabled, including searches the table
 would have made faster, and the table stays given back even when the search
 that gave it back falls back anyway, or when the input of a DFA whose budget
 gave it back shifts back to states that would have fit beside it. That later
-slowdown is accepted in place of an NFA fallback now.
+slowdown is accepted in place of abandoning the DFA search now.
 
 For a table the budget rule keeps, where those object-row resets begin still
 follows the history before the release. A heap table is never capped, so unless
@@ -5737,9 +5742,11 @@ first-match end. The approach is resharp 0.8.0's `find_all_dfa`, without its
 longest-end rule, which would break leftmost-first priority (`a|aa` on `aa`
 gives `a`).
 
-Only the library's own all-match loops switch: count and `forEachMatch` in
-every language, and Trino's count, extract-all, split, replacement, and
-callback replacement. Each marks its loop as one operation and ends it in a
+Only the library's own all-match loops switch, and only where they loop on the
+engine's matcher: count and `forEachMatch` in every language, and Trino's
+count, extract-all, split, replacement, and callback replacement. A count the
+pattern's own count route answers, and a Trino operation a span matcher
+answers, never switch. Each marks its loop as one operation and ends it in a
 `finally`, so the set is released on every exit, a callback that returns
 `null`, a consumer that returns `false`, or either one throwing included. A
 caller's `find()` loop never switches: the caller may change the input between
