@@ -2522,30 +2522,14 @@ The fixed-width matcher checks every occurrence of its candidate's first bytes,
 such as the `s` of `[a-z]shing`, which English text holds far more often than
 `shing`. Every language, Trino included, therefore keeps the DFA's inner literal
 search when its literal, or every literal of its set or class pair, has two or
-more bytes. Where the pattern keeps the second, short-search matcher described
-below, after its yield to the engine's own scans and its DFA budget check, the
-search runs in windows of at least 64 bytes, whatever its literal kind's
-[minimum](#minimum-inner-literal-search-window); otherwise that minimum applies.
-There a find whose input lacks the literal reports no match without running the
-DFA, and one whose literal first appears within the input's first 64 bytes runs
-the plain DFA. Shorter counts, and matcher finds with fewer than 64 bytes left,
-run a second fixed-width matcher that answers only those short searches, since
-on rows shorter than 64 bytes the plain DFA measured Trino count 1.72-1.79x
-slower than the matcher on r9g and 1.36-1.40x on r8i, and iteration 1.12-1.16x
-on r9g. From 64 bytes the matcher measured slower than the search on counts of
-`[a-z]shing`, a single literal, as [Minimum Inner Literal Search
-Window](#minimum-inner-literal-search-window) records; for a fixed-width class
-pair that is unmeasured. The pattern keeps that matcher when it fits the forward
-DFA budget beside the search. Full-Slice find stays on the DFA, whose quick
-reject of a row without the literal beat the matcher on short rows too; in a
-window shorter than 64 bytes that reject is now the [required bytes
-check](#short-window-required-bytes-reject), where the pattern keeps one. A
-Trino pattern on its fixed-width subtype otherwise keeps no program, and the
-search needs one, so a pattern whose `maxMemory` leaves no room for its program
-keeps the matcher and compiles wherever the matcher fits. Where the program fits
-but neither the search nor the matcher fits beside it, as for `[a-z]shing` from
-2567 to 2821 bytes, the pattern also keeps the matcher on the route without a
-program.
+more bytes, and keeps no fixed-width matcher beside it. A second fixed-width
+matcher once answered that pattern's counts and matcher finds shorter than 64
+bytes; without it every row read 0.94 to 1.05 of its time, so it was removed.
+The literal kind's [minimum](#minimum-inner-literal-search-window) applies,
+and shorter searches run the ordinary engine. A Trino pattern on its
+fixed-width subtype keeps no program, and the search needs one, so a pattern
+whose `maxMemory` leaves no room for the program and its search keeps the
+matcher on the route without a program and compiles wherever the matcher fits.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -2715,17 +2699,17 @@ earlier time on r8i and 0.27-0.39 on r9g, and rebar's
 `hyperscan/fixed-length-words-nosom` and `hyperscan/fixed-length-words-som`
 rows go from 0.66-0.69 of the Rust regex crate's time to 0.17-0.22.
 
-A pattern the matcher takes, its short-search matcher included, yields to the
-engine where the engine has its own scan: when the program skips to a literal
-prefix, when a forward DFA would search a start literal filter that groups of
-one bit also give, or, for a candidate with bytes above ASCII, when the
-class-run counter takes the pattern. Without the first two, `(?i)Шерлок Холмс`
-on Russian text took 89-234x the engine's time, since its filter's three bytes
-stop far less often than every Cyrillic lead byte; without the third, `[а-я]{5}`
-on Russian took 2.9-3.1x and `[一-龥]{3}` on Chinese 1.32-1.34x the counter's
-time. Trino compiles its program to decide the order, as every language does,
-and keeps none only on its fixed-width subtype, for a pattern whose search never
-bails; every operation of a pattern that keeps none runs the matcher.
+A pattern the matcher takes yields to the engine where the engine has its own
+scan: when the program skips to a literal prefix, when a forward DFA would
+search a start literal filter that groups of one bit also give, or, for a
+candidate with bytes above ASCII, when the class-run counter takes the pattern.
+Without the first two, `(?i)Шерлок Холмс` on Russian text took 89-234x the
+engine's time, since its filter's three bytes stop far less often than every
+Cyrillic lead byte; without the third, `[а-я]{5}` on Russian took 2.9-3.1x and
+`[一-龥]{3}` on Chinese 1.32-1.34x the counter's time. Trino compiles its program
+to decide the order, as every language does, and keeps none only on its
+fixed-width subtype, for a pattern whose search never bails; every operation of
+a pattern that keeps none runs the matcher.
 
 A candidate with bytes above ASCII can be dense in text of another script, so a
 search, one find or one whole count, that has failed on at least 64 candidates
@@ -2752,11 +2736,10 @@ and run once.
 
 A line-by-line search calls the matcher once per line, and most lines are short.
 A matcher's or full-Slice find whose search window is shorter than the inner
-literal search's minimum runs the ordinary engine or a fixed-width pattern's
-short-search matcher, except that a gated one-byte search first rejects windows
-without a gate-passing hit. A whole-text count of a shorter text does not run
-the search either, except for a literal set as below. A matcher's find or a
-full-Slice boolean find first takes the
+literal search's minimum runs the ordinary engine, except that a gated one-byte
+search first rejects windows without a gate-passing hit. A whole-text count of
+a shorter text does not run the search either, except for a literal set as
+below. A matcher's find or a full-Slice boolean find first takes the
 [short-window required bytes reject](#short-window-required-bytes-reject) where
 the pattern keeps required bytes, which a ranged find and `findInto` do not;
 `.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks them.
@@ -2797,9 +2780,7 @@ required-bytes check; ranged find, `findInto`, and count never checked. Where
 the required bytes differ from the inner literal, as `\w+:[a-z]+@` searches for
 `:` but requires `@`, the pattern keeps them and never runs the search first,
 and a window too long for the check runs the search when it holds the literal
-but none of the bytes, as it did before such a pattern kept one-of bytes. The
-short-search matcher is described in
-[Boolean Partial-Match Specializations](#boolean-partial-match-specializations).
+but none of the bytes, as it did before such a pattern kept one-of bytes.
 A literal kind's minimum is where its scan measured faster than the DFA. The
 minimums were measured in A/B rounds on r9g and r8i Spot hosts, rebar on one
 host of each and JMH average time on one or two, in chunks of English text cut
@@ -2837,12 +2818,6 @@ to each window length.
   single literal or class pair behind such a run keeps its kind's minimum:
   `[a-zA-Z]+ing` and `\w+[?!.]["']` ran in 0.19 to 0.32x the DFA's time from 300
   bytes.
-- A pattern with a short-search fixed-width matcher runs the search from 64
-  bytes, whatever its literal kind, because a shorter window runs that matcher,
-  not the DFA. The matcher took 2.7 to 5.8x the search's time on 64- to 127-byte
-  counts of `[a-z]shing` on r9g and r8i, so such a pattern keeps the 64-byte
-  handoff it had before these minimums. That was measured on a single literal;
-  for a fixed-width class pair the handoff is unmeasured.
 
 Short windows were once checked for the literal, a window without it having no
 match. On short lines that cost more than it saved: a matcher's find loop
@@ -3033,21 +3008,21 @@ they reject allocates no engine matcher or group storage. Other patterns, such
 as `(.)` and `^(a)$`, build it at once, and so does a match-result accessor
 called before a find.
 
-An earlier check of short windows, recorded under
-[Minimum Inner Literal Search Window](#minimum-inner-literal-search-window),
-found that a separate short-window literal scan cost more on short lines than
-sharing the inner literal search's own. Windows shorter than the search's
-minimum no longer run that search, except that a gated one-byte search still
-checks them for a gate-passing hit, so any other find window shorter than both
-256 bytes and that minimum gets no literal check but this one, where the pattern
-keeps it. A literal set behind a class run, whose minimum is 1 KiB, gets none in
-windows of 256 to 1023 bytes, unless the pattern keeps a short-search
-fixed-width matcher. It rejects a window before the engine starts, and a window
+An earlier check of short windows, recorded under [Minimum Inner Literal Search
+Window](#minimum-inner-literal-search-window), found that a separate
+short-window literal scan cost more on short lines than sharing the inner
+literal search's own. Windows shorter than the search's minimum no longer run
+that search, except that a gated one-byte search still checks them for a
+gate-passing hit, so any other find window shorter than both 256 bytes and that
+minimum gets no literal check but this one, where the pattern keeps it. A
+literal set behind a class run, whose minimum is 1 KiB, gets no inner literal
+search in windows of 256 to 1023 bytes, only the long-window check where it
+keeps one. It rejects a window before the engine starts, and a window
 that holds the literal still runs the engine, which scans for it again. That
 second scan is the cost to watch, on the rows that decision names: Holmes
 `around-holmes-english` on r9g, Rust `reallyreallyhard0-32`, and Everyday email
-reused contains on r8i. lh3lh3 date, which it also names, keeps no fact now that
-its gated one-byte search runs first.
+reused contains on r8i. lh3lh3 date, which it also names, keeps no fact now
+that its gated one-byte search runs first.
 
 The fact only saves work, so its memory gives way. It is reserved after
 compilation's routes, after the OnePass tables of a program with a final-line

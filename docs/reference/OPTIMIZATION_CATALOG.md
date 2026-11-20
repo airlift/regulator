@@ -546,9 +546,7 @@ so the automata run only where a match can be.
   for a longer single literal, 256 for a literal set, and 1 KiB for a set
   behind a class run that only the class-run proof admits, since below them
   the literal's scan costs more than the DFA; from 64 bytes for a count of a
-  set not behind a class run, whose one search continues across many matches,
-  and for a pattern with a fixed-width short-search matcher, which answers its
-  shorter counts and matcher finds and loses to the search from 64 bytes.
+  set not behind a class run, whose one search continues across many matches.
   Guards against quadratic rescans, and a first hit that passes the byte gates
   within 64 bytes of the start, hand the search back to the ordinary engine. A
   count skips the forward confirmation only for exact literal bytes whose
@@ -2005,24 +2003,22 @@ ordinary engine would.
   .NET's literal-after-loop search
   ([RegexFindOptimizations.cs][dotnet-find], [.NET 7][dotnet7-blog]);
   Inspired by a gap against the Rust regex crate on everyday span rows
-  ([#87]). Regulator: the shared fixed-width matcher and its short-row form
-  ([#87], [#125], [design][d-boolean]), and the `AB{n}x` matcher with an exact
+  ([#87]). Regulator: the shared fixed-width matcher
+  ([#87], [design][d-boolean]), and the `AB{n}x` matcher with an exact
   count and an ASCII prefix.
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
   `FixedWidthByteSpanMatcher.containsByte`,
   `FixedWidthByteSpanMatcher.searchCandidateByte`,
   `FixedWidthByteSpanMatcher.countCandidateBytes`,
-  `CompiledPattern.shortFixedWidthByteMatcher`,
   `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
 - **Applies when:** Capture-free patterns, other than exact literals, of a
   fixed count of 2 to 256 characters, in every language, whose scanned
   position is an ASCII singleton (below) or passes the
   [rare class scan](#fixed-width-rare-class-scan), or that qualify for the
   [block search](#fixed-width-block-search). When find also has an inner
-  literal search of two or more bytes, every language keeps that search, and a
-  second matcher answers only counts under 64 bytes and matcher finds with
-  under 64 bytes left. A pattern that yields to the engine keeps neither. The
+  literal search of two or more bytes, every language keeps that search and no
+  fixed-width matcher. A pattern that yields to the engine keeps none. The
   `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
 - **What it does:** In its candidate form the matcher scans for one position,
   then checks the others around each hit: a byte mask for ASCII, Latin-1, and
@@ -2515,8 +2511,8 @@ avoid copying input bytes, as
   without captures in RE2, Java, and Rust, runs the literal's prefix scan, or
   `Slice.indexOf` when fewer than 64 bytes remain in the Slice after the
   search start and the probe is the literal's first byte.
-  A literal alternation and the short-row form of the fixed-width byte span
-  hand regions of 64 bytes or more to the program's search. Matcher iteration
+  A literal alternation hands regions of 64 bytes or more to the program's
+  search. Matcher iteration
   of one-byte patterns on short rows runs in 0.33 to 0.37 of its earlier time
   ([#122]), and of fixed-width patterns in 0.31 to 0.69 ([#123]).
 
@@ -2689,7 +2685,6 @@ change is described.
 [#120]: https://github.com/airlift/regulator/pull/120
 [#122]: https://github.com/airlift/regulator/pull/122
 [#123]: https://github.com/airlift/regulator/pull/123
-[#125]: https://github.com/airlift/regulator/pull/125
 [#126]: https://github.com/airlift/regulator/pull/126
 [#127]: https://github.com/airlift/regulator/pull/127
 [#128]: https://github.com/airlift/regulator/pull/128
