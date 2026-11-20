@@ -33,7 +33,6 @@ import org.openjdk.jmh.runner.options.Options;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
-import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2;
 
 /// Miscellaneous RE2 benchmarks (edge cases and special patterns).
@@ -53,13 +52,6 @@ public class BenchmarkRe2Misc
     private static final String HTTP_TEXT =
             "GET /asdfhjasdhfasdlfhasdflkjasdfkljasdhflaskdjhf" +
                     "alksdjfhasdlkfhasdlkjfhasdljkfhadsjklf HTTP/1.1";
-
-    // PossibleMatchRange patterns
-    private static final String PMR_TRIVIAL_PATTERN = ".*";
-    private static final String PMR_COMPLEX_PATTERN = "^abc[def]?[gh]{1,2}.*";
-    private static final String PMR_PREFIX_PATTERN = "^some_random_prefix.*";
-    private static final String PMR_NOPROG_PATTERN = "^some_random_string$";
-    private static final int POSSIBLE_MATCH_RANGE_MAXIMUM_LENGTH = 16;
 
     @State(Scope.Thread)
     public static class MiscState
@@ -81,24 +73,6 @@ public class BenchmarkRe2Misc
             re2Empty = compileRe2(EMPTY_PATTERN);
             re2DotMatch = compileRe2(DOT_MATCH_PATTERN);
             re2AsciiMatch = compileRe2(ASCII_MATCH_PATTERN);
-        }
-    }
-
-    @State(Scope.Thread)
-    public static class PossibleMatchRangeState
-    {
-        Prog progTrivial;
-        Prog progComplex;
-        Prog progPrefix;
-        Prog progNoProg;
-
-        @Setup(Level.Trial)
-        public void setup()
-        {
-            progTrivial = compileProg(PMR_TRIVIAL_PATTERN);
-            progComplex = compileProg(PMR_COMPLEX_PATTERN);
-            progPrefix = compileProg(PMR_PREFIX_PATTERN);
-            progNoProg = compileProg(PMR_NOPROG_PATTERN);
         }
     }
 
@@ -130,32 +104,6 @@ public class BenchmarkRe2Misc
             throw new IllegalStateException("Expected ASCII capture match");
         }
         return state.oneCaptureGroup;
-    }
-
-    // PossibleMatchRange benchmarks
-
-    @Benchmark
-    public Prog.PossibleMatchRangeResult programPossibleMatchRangeTrivial(PossibleMatchRangeState state)
-    {
-        return state.progTrivial.possibleMatchRange(POSSIBLE_MATCH_RANGE_MAXIMUM_LENGTH);
-    }
-
-    @Benchmark
-    public Prog.PossibleMatchRangeResult programPossibleMatchRangeComplex(PossibleMatchRangeState state)
-    {
-        return state.progComplex.possibleMatchRange(POSSIBLE_MATCH_RANGE_MAXIMUM_LENGTH);
-    }
-
-    @Benchmark
-    public Prog.PossibleMatchRangeResult programPossibleMatchRangePrefix(PossibleMatchRangeState state)
-    {
-        return state.progPrefix.possibleMatchRange(POSSIBLE_MATCH_RANGE_MAXIMUM_LENGTH);
-    }
-
-    @Benchmark
-    public Prog.PossibleMatchRangeResult programPossibleMatchRangeNoProg(PossibleMatchRangeState state)
-    {
-        return state.progNoProg.possibleMatchRange(POSSIBLE_MATCH_RANGE_MAXIMUM_LENGTH);
     }
 
     public static void main(String[] args)

@@ -322,15 +322,4 @@ public class TestTraditionalBenchmarkInputs
         assertThat(invocation.getAsBoolean()).isTrue();
         assertThat(actual).containsExactly(expected);
     }
-
-    @Test
-    public void testPossibleMatchRangeMatchesUpstreamMaximumLength()
-    {
-        BenchmarkRe2Misc.PossibleMatchRangeState state = new BenchmarkRe2Misc.PossibleMatchRangeState();
-        state.setup();
-
-        BenchmarkRe2Misc benchmark = new BenchmarkRe2Misc();
-        assertThat(benchmark.programPossibleMatchRangePrefix(state))
-                .isEqualTo(state.progPrefix.possibleMatchRange(16));
-    }
 }
