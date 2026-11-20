@@ -6100,14 +6100,14 @@ and keep each search linear in its input:
   plan. Its attempts start from the same candidates and reach the same run
   ends, so resume positions after failures and the work budget are unchanged.
   When an unanchored plan starts with a run of exactly one character that
-  writes no group and is not a boolean tail, the interpreter's case-sensitive
-  executor starts an attempt at an ASCII candidate after that character,
-  because the candidate scan finds exactly the run's member bytes; a lead-byte
-  candidate still runs the run, and the ASCII-folded executor and generated
-  kernels run every operation. In `BenchmarkLanguageComparison`, `keyValue`
-  `reusedContains` takes 0.715 times its earlier time on R9g and 0.634 times on
-  R8i. The one control that moved, `quotedField` `reusedCount` on R8i, took
-  1.025 times, an accepted marginal cost of about 0.75 ns per call.
+  writes no group and is not a boolean tail, the interpreter's executor starts
+  an attempt at an ASCII candidate after that character, because the candidate
+  scan finds exactly the run's member bytes; a lead-byte candidate still runs
+  the run, and generated kernels run every operation. In
+  `BenchmarkLanguageComparison`, `keyValue` `reusedContains` takes 0.715 times
+  its earlier time on R9g and 0.634 times on R8i. The one control that moved,
+  `quotedField` `reusedCount` on R8i, took 1.025 times, an accepted marginal
+  cost of about 0.75 ns per call.
 
 A handoff preserves the match sequence on every input, including malformed
 UTF-8. Every operation applies the same budget from the
@@ -6116,19 +6116,30 @@ ranged boolean `find` use the ordinary engine only where both engines agree, so
 `find`, `count`, `extract`, `position`, `extractAll`, replacement, and split
 report one match sequence.
 
-Retain restricted ASCII case folding when every Unicode fold cycle remains in
-ASCII and requires no full multi-character fold. An ASCII letter pair, such as
-`[Kk]` or a Java letter folded without `UNICODE_CASE`, matches only its two
-letters, as [Pinned Unicode Case Folding](#pinned-unicode-case-folding) states,
-so a plan folds it as that pair even for `k` and `s`, whose cycles leave ASCII.
-The pair is the same tree in every language, so this holds for each of them.
-Folded plans use separate executors. On R9g, folded anchored, optional,
-unanchored, run, and mixed workloads take 0.20 to 1.10 times the ordinary
-engine's time for `contains`, extraction, and replacement, with a geometric mean
-of 0.38. The accepted costs are folded optional boolean matching, at about 1.10
-times the ordinary engine's time, and unanchored folded compilation, at about
-1.19 times. Ordinary URL and mixed operations remain faster than the ordinary
-engine on R8i and R9g.
+Retain restricted ASCII case folding in runs when every Unicode fold cycle
+remains in ASCII and requires no full multi-character fold. An ASCII letter
+pair, such as `[Kk]` or a Java letter folded without `UNICODE_CASE`, matches
+only its two letters, as
+[Pinned Unicode Case Folding](#pinned-unicode-case-folding) states, so a run
+folds it as that pair even for `k` and `s`, whose cycles leave ASCII. The pair
+is the same tree in every language, so this holds for each of them.
+
+A pattern with an ASCII-folded literal, such as `(?i)abc` or an ASCII letter
+pair like `[Kk]`, declines its plan and runs the ordinary engine. Such plans
+needed separate folded executors, about 800 lines, and no benchmark report row
+ran on them. The ordinary engine gives the same answers, on malformed Trino
+input too, since Trino plans read characters as the engine does.
+
+That gives up what earlier R9g measurements in `BenchmarkTrinoScanPlan` showed
+for the folded plans. Matching on the folded anchored, optional, unanchored,
+run, and mixed workloads took 0.20 to 1.10 times the ordinary engine's time for
+`contains`, extraction, and replacement, with a geometric mean of 0.38; the
+accepted matching cost was folded optional boolean matching, at about 1.10
+times. Compiling an unanchored folded pattern took about 1.19 times the ordinary
+engine's time, an accepted compilation cost. `FOLDED_RUN` folds only a character
+class, which becomes an ordinary set, so it keeps its plan. The removal's effect
+on the other folded workloads was not measured, since no benchmark report row
+runs them.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
@@ -6194,14 +6205,14 @@ development campaign evidence is in the private archive; see the
 ## RE2 Scan Plans
 
 RE2 patterns select the same scan plans as Trino patterns: the same eligible
-shapes, ASCII-folded ones included, reached by the same operations with the
-same memory charge, and on by default. They admit runs of sets of some
-non-ASCII characters in every language. Trino captures and extraction
-run about eight times faster on a plan than on the ordinary engine, and nothing
-in those shapes is specific to Trino. The frontend chooses explicitly whether to
-build a plan, so `Re2.compileParsed` builds none. Java and Rust patterns select
-the same plans under these decisions; the last bullets record the rules and
-measurements specific to each language.
+shapes, reached by the same operations with the same memory charge, and on by
+default. They admit runs of sets of some non-ASCII characters in every
+language. Trino captures and extraction run about eight times faster on a plan
+than on the ordinary engine, and nothing in those shapes is specific to Trino.
+The frontend chooses explicitly whether to build a plan, so `Re2.compileParsed`
+builds none. Java and Rust patterns select the same plans under these
+decisions; the last bullets record the rules and measurements specific to each
+language.
 
 - A plan reports exactly what the ordinary engine reports on every input,
   including malformed UTF-8. Only operations that can consume a byte at or
@@ -6232,8 +6243,8 @@ measurements specific to each language.
   do.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
-- An option compiles a case-sensitive RE2 plan into its own class, as described
-  in [Generated RE2 Scan Kernels](#generated-re2-scan-kernels).
+- An option compiles an RE2 plan into its own class, as described in [Generated
+  RE2 Scan Kernels](#generated-re2-scan-kernels).
 - A plan must not be slower than the same pattern without it. On R9g, R8g, and
   R8i, RE2 `BenchmarkClickBenchRegexp` `contains` takes 0.09 to 0.84 times the
   time of a build without RE2 plans on every `HTTP`, `WWW`, `LONG_HOST`, and
@@ -6326,7 +6337,8 @@ measurements specific to each language.
   member, such as `(?iu)k`, each as a set of some non-ASCII characters.
   Multiline anchors, Java word boundaries, and reluctant runs keep the ordinary
   engine, as they do in Trino. Java's `(?i)` without `UNICODE_CASE` folds each
-  letter as its ASCII pair, so `(?i)s` and `(?i)k` reach a plan.
+  letter as its ASCII pair, so a literal under it, such as `(?i)s` or `(?i)k`,
+  is ASCII-folded and declines the plan.
 - A Java plan must not be slower than the same pattern without it. On R9g and
   R8i, the 95 rows of `BenchmarkJavaScanPlan` without dotAll, five matching
   methods over the 19 workloads `URL`, `URL_SHORT`, `ANCHORED_HOST`,
@@ -6376,7 +6388,8 @@ measurements specific to each language.
   reads input by the RE2 rule and reports what the ordinary engine reports on
   every input, which on valid UTF-8 is the pinned crate's result, as it is on
   any input in byte mode. Without multi-line mode Rust's `$` is the strict end,
-  and Rust's dot and `(?i)` match as RE2's do, so those reach a plan unchanged.
+  and Rust's dot and `(?i)` match as RE2's do, so its dot reaches a plan
+  unchanged and an ASCII-folded literal declines one, as in RE2.
   Byte mode keeps its plans, unlike RE2's Latin-1 patterns: a plan never matches
   empty, so byte mode's one-byte advance past an empty match never applies, and
   the analysis rejects every byte construct that can match a byte above 0x7F,
@@ -6436,8 +6449,9 @@ measurements specific to each language.
   with the trie walk, took slightly longer than the ordinary engine, and both
   are accepted: Java `OPTIONALS` `count` with `javaLineTerminators=true` took
   1.046 times the ordinary engine's time, 68.3 ns against 65.3 ns, and RE2
-  `DEEP_REJECTIONS` `extractAll` 1.08 times, 300 ns against 278 ns, within the
-  error of either measurement.
+  `DEEP_REJECTIONS` `extractAll`, whose first pattern was then wholly
+  case-insensitive, 1.08 times, 300 ns against 278 ns, within the error of
+  either measurement.
 - Taking the width from the lead byte rather than the table slows two R8i
   workloads relative to full lead entries alone; these losses are accepted
   because both remain faster than the ordinary engine. Java
@@ -6470,34 +6484,33 @@ measurements specific to each language.
 
 ## Generated Trino Scan Kernels
 
-`TrinoRegexp.Options.setGenerateBytecode` is an opt-in, disabled
-by default, that compiles the case-sensitive scan plan of an eligible pattern
-into its own hidden class. The class holds the plan's attempt loop as
-straight-line code, with literals, their lengths, and branch targets as
-constants; a run step passes its run to a copied run scanner that reads the
-run's bounds and members. The class also holds the candidate search of an
-unanchored plan, with its limits as constants, and a public entry for each
-Trino operation that reaches the plan. A hot pattern therefore shares neither
-the interpreter's operation dispatch nor its profiles with other plans. Its
-results, retries, captures, and search handoffs are those of the interpreter,
-which differential tests check operation by operation.
+`TrinoRegexp.Options.setGenerateBytecode` is an opt-in, disabled by default,
+that compiles the scan plan of an eligible pattern into its own hidden class.
+The class holds the plan's attempt loop as straight-line code, with literals,
+their lengths, and branch targets as constants; a run step passes its run to a
+copied run scanner that reads the run's bounds and members. The class also
+holds the candidate search of an unanchored plan, with its limits as constants,
+and a public entry for each Trino operation that reaches the plan. A hot
+pattern therefore shares neither the interpreter's operation dispatch nor its
+profiles with other plans. Its results, retries, captures, and search handoffs
+are those of the interpreter, which differential tests check operation by
+operation.
 
 - An eligible pattern compiles to its generated class, which extends a
   package-private non-sealed `TrinoRegexp` subclass, as the RE2 class extends
-  `CompiledScanRe2`, a subclass of its
-  [scan-plan shape](#generated-re2-scan-kernels). Each operation keeps the
-  route it has without the option, fixed when the class is generated: an
-  operation that would run the case-sensitive plan runs the generated class,
-  and one that would run other Java, such as a retained literal kernel for
-  `contains`, still runs that Java. Short boolean calls that the interpreter
-  hands to the ordinary engine still run the generated class, which has no
-  operation dispatch for that route to avoid.
+  `CompiledScanRe2`, a subclass of its [scan-plan
+  shape](#generated-re2-scan-kernels). Each operation keeps the route it has
+  without the option, fixed when the class is generated: an operation that
+  would run the plan runs the generated class, and one that would run other
+  Java, such as a retained literal kernel for `contains`, still runs that Java.
+  Short boolean calls that the interpreter hands to the ordinary engine still
+  run the generated class, which has no operation dispatch for that route to
+  avoid.
 - A pattern is eligible when it would compile to the base `TrinoRegexp` class
-  with a case-sensitive plan that every operation but `contains` reaches, and
-  cannot match empty, which no pattern with a plan can: each generated match
-  loop resumes its search at the previous match end. Any other pattern,
-  including one with an ASCII-folded plan, compiles exactly as it does without
-  the option.
+  with a plan that every operation but `contains` reaches, and cannot match
+  empty, which no pattern with a plan can: each generated match loop resumes
+  its search at the previous match end. Any other pattern compiles exactly as
+  it does without the option.
 - Generation happens once, when the pattern is compiled, never on first match.
   A pattern whose class cannot be generated or defined is silently
   interpreted; generation never makes compilation fail and has no mandatory
@@ -6551,19 +6564,18 @@ which differential tests check operation by operation.
 
 ## Generated RE2 Scan Kernels
 
-`Re2.Options.setGenerateBytecode` is an opt-in, disabled by
-default, that compiles the case-sensitive scan plan of an RE2 pattern with the
-generator of [Generated Trino Scan Kernels](#generated-trino-scan-kernels),
-under its rules: generation happens once at compilation, a pattern whose class
-cannot be generated or defined is silently interpreted, nothing generated
-loads without the option, generated code calls its own copies of the
-interpreter's helpers, per-pattern state on an entry's hot path is class data,
-each public entry stays within HotSpot's inline size, and the class is defined
-in Regulator's package and is not charged to the memory budget. RE2 runs and delimited captures call copies
+`Re2.Options.setGenerateBytecode` is an opt-in, disabled by default, that
+compiles the scan plan of an RE2 pattern with the generator of [Generated Trino
+Scan Kernels](#generated-trino-scan-kernels), under its rules: generation
+happens once at compilation, a pattern whose class cannot be generated or
+defined is silently interpreted, nothing generated loads without the option,
+generated code calls its own copies of the interpreter's helpers, per-pattern
+state on an entry's hot path is class data, each public entry stays within
+HotSpot's inline size, and the class is defined in Regulator's package and is
+not charged to the memory budget. RE2 runs and delimited captures call copies
 of the RE2 run reader and its vector stop scan, and runs of some non-ASCII
-characters also call a copy of their member reader, so a generated plan
-reports what the ordinary engine reports on every input, malformed UTF-8
-included.
+characters also call a copy of their member reader, so a generated plan reports
+what the ordinary engine reports on every input, malformed UTF-8 included.
 `JavaRegexp.Options.setGenerateBytecode` and
 `RustRegexp.Options.setGenerateBytecode` apply these decisions to Java and Rust
 plans; the last bullets record the rules and measurements specific to each.
@@ -6592,9 +6604,8 @@ plans; the last bullets record the rules and measurements specific to each.
   its entries directly; callers still cannot extend the pattern classes. The
   generated class adds no fields, so it keeps the scan-plan shape's 120-byte
   layout.
-- Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino. Unlike Trino, a count that skips the plan
-  does not exclude a pattern, because only the calls that reach the plan
+- Any pattern with a plan is eligible. Unlike Trino, a count that skips the
+  plan does not exclude a pattern, because only the calls that reach the plan
   change. Route selection gives no pattern with a plan a single-byte table.
 - Short boolean calls that the interpreter hands to the DFA stay on the
   generated class, as in Trino. Boolean calls of a plan run its full plan

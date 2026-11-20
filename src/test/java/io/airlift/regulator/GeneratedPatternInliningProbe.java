@@ -201,7 +201,7 @@ public final class GeneratedPatternInliningProbe
             String expression = handoff ? HANDOFF_EXPRESSION : regexpExpression(index);
             T pattern = operations.compile().apply(expression);
             check(pattern.usesGeneratedBytecode(), language + " " + expression + ": no generated class");
-            List<Slice> inputs = handoff ? handoffInputs(language, pattern.caseSensitiveScanPlan()) : regexpInputs(index);
+            List<Slice> inputs = handoff ? handoffInputs(language, pattern.scanPlan()) : regexpInputs(index);
             find.add(new Site(language, "find", pattern, expression, input -> operations.find().apply(pattern, input), findHandle.bindTo(pattern), inputs));
             count.add(new Site(language, "count", pattern, expression, input -> operations.count().apply(pattern, input), countHandle.bindTo(pattern), inputs));
             // An anchored match makes one attempt and never hands off.
@@ -243,7 +243,7 @@ public final class GeneratedPatternInliningProbe
             String expression = handoff ? HANDOFF_EXPRESSION : regexpExpression(index);
             TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setGenerateBytecode(true));
             check(pattern.usesGeneratedBytecode(), "trino " + expression + ": no generated class");
-            List<Slice> inputs = handoff ? handoffInputs("trino", pattern.re2().caseSensitiveScanPlan()) : regexpInputs(index);
+            List<Slice> inputs = handoff ? handoffInputs("trino", pattern.re2().scanPlan()) : regexpInputs(index);
             contains.add(new Site("trino", "contains", pattern, expression, pattern::contains, containsHandle.bindTo(pattern), inputs));
             count.add(new Site("trino", "count", pattern, expression, pattern::count, countHandle.bindTo(pattern), inputs));
             position.add(new Site("trino", "position", pattern, expression, input -> pattern.position(input, 1, 1), MethodHandles.insertArguments(positionHandle.bindTo(pattern), 1, 1L, 1L), inputs));

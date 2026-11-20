@@ -73,7 +73,6 @@ final class ScanPlan
     private static final VarHandle SHORT = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.nativeOrder());
     private static final VarHandle INT = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.nativeOrder());
     private static final VarHandle LONG = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
-    private static final boolean LITTLE_ENDIAN = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
 
     static {
         // Saved positions occupy two longs; saved operation indices occupy one int.
@@ -87,9 +86,7 @@ final class ScanPlan
     enum Kind
     {
         LITERAL,
-        ASCII_FOLDED_LITERAL,
         OPTIONAL,
-        ASCII_FOLDED_OPTIONAL,
         END,
         // A run of ASCII characters alone.
         RUN,
@@ -155,15 +152,13 @@ final class ScanPlan
     // candidate starts after that character at the second operation. A candidate at a lead byte
     // still runs the leading operation, which reads the character by the run's encodings.
     private final boolean asciiCandidateCompletesLeadingRun;
-    // Set when an unanchored search starts with a case-sensitive literal of two or more bytes.
-    // Such a search checks the whole literal at each probe-byte candidate in its own loop, so
-    // the candidate loop of every other plan has no whole-literal check.
+    // Set when an unanchored search starts with a literal of two or more bytes. Such a search
+    // checks the whole literal at each probe-byte candidate in its own loop, so the candidate loop
+    // of every other plan has no whole-literal check.
     private final boolean wholeLiteralCandidates;
     // The offset of the leading literal byte that the whole-literal candidate scan probes, or 0
     // without one. See findLeadingLiteral.
     private final int leadingProbeOffset;
-    // Set when the plan has an ASCII-folded operation, which only the ASCII-folded executors run.
-    private final boolean usesAsciiFoldedExecutor;
     // Set when an unanchored boolean search may run on the ordinary engine instead. A plan led
     // by a run attempts every candidate of that run, which costs more than the ordinary engine's
     // scan when failed candidates are dense. That density handoff, and ranged boolean find on
@@ -206,7 +201,6 @@ final class ScanPlan
         Step leading = this.steps[leadingOperation];
         this.wholeLiteralCandidates = !anchoredStart && leading.kind == Kind.LITERAL && leading.literal.length > 1;
         this.leadingProbeOffset = wholeLiteralCandidates ? byteFrequencies.probeOffset(leading.literal) : 0;
-        this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.allowsOrdinaryBooleanSearch = !anchoredStart && !isLiteralLeading() && consumesOnlyAscii(this.steps);
         boolean anchoredFork = anchoredStart && hasFork(this.steps);
         this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails);
@@ -247,8 +241,8 @@ final class ScanPlan
         for (int index = steps.length - 1; index >= 0; index--) {
             Step step = steps[index];
             nullable[index] = switch (step.kind) {
-                case LITERAL, ASCII_FOLDED_LITERAL, RE2_DELIMITED_CAPTURE -> false;
-                case SAVE, OPTIONAL, ASCII_FOLDED_OPTIONAL -> nullable[index + 1];
+                case LITERAL, RE2_DELIMITED_CAPTURE -> false;
+                case SAVE, OPTIONAL -> nullable[index + 1];
                 case RUN, RE2_RUN, RE2_SET_RUN -> step.run.minimum() == 0 && nullable[index + 1];
                 case FORK -> nullable[index + 1] || nullable[step.branch.target()];
                 case END -> throw new IllegalStateException("partial scan contains " + step.kind);
@@ -265,7 +259,7 @@ final class ScanPlan
     private static int findRequiredLiteralOperation(Step[] steps, int leadingOperation)
     {
         Kind leading = steps[leadingOperation].kind;
-        if (leading == Kind.LITERAL || leading == Kind.ASCII_FOLDED_LITERAL) {
+        if (leading == Kind.LITERAL) {
             return -1;
         }
         int required = -1;
@@ -371,16 +365,6 @@ final class ScanPlan
         return false;
     }
 
-    private static boolean hasAsciiFoldedOperation(Step[] steps)
-    {
-        for (Step step : steps) {
-            if (step.kind == Kind.ASCII_FOLDED_LITERAL || step.kind == Kind.ASCII_FOLDED_OPTIONAL) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /// Returns whether every consuming operation accepts only ASCII bytes and every other
     /// operation is zero-width. Each match then consists of ASCII bytes alone, and the plan and
     /// the ordinary engine agree on malformed UTF-8 as they do on valid input.
@@ -388,7 +372,7 @@ final class ScanPlan
     {
         for (Step step : steps) {
             switch (step.kind) {
-                case LITERAL, ASCII_FOLDED_LITERAL, OPTIONAL, ASCII_FOLDED_OPTIONAL -> {
+                case LITERAL, OPTIONAL -> {
                     for (byte value : step.literal) {
                         if (value < 0) {
                             return false;
@@ -409,13 +393,12 @@ final class ScanPlan
         return true;
     }
 
-    /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a case-sensitive
-    /// leading literal. Every language shares one builder and admits the same shapes, except that
-    /// a Java end admits fewer runs before it. Only Java's default `$` and `\Z` build a Java
-    /// end. Every frontend compiles characters to the same byte ranges, so every plan reads input
-    /// by RE2's rules. A plan built with `forceHandoff` hands every unanchored search to the
-    /// ordinary engine before its first attempt, so tests can run the continuation on every
-    /// input.
+    /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a leading literal.
+    /// Every language shares one builder and admits the same shapes, except that a Java end admits
+    /// fewer runs before it. Only Java's default `$` and `\Z` build a Java end. Every frontend
+    /// compiles characters to the same byte ranges, so every plan reads input by RE2's rules. A
+    /// plan built with `forceHandoff` hands every unanchored search to the ordinary engine before
+    /// its first attempt, so tests can run the continuation on every input.
     static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         StartKind startKind = startKind(expression, 0);
@@ -499,12 +482,7 @@ final class ScanPlan
 
     boolean isLiteralLeading()
     {
-        return steps[leadingOperation].kind == Kind.LITERAL || steps[leadingOperation].kind == Kind.ASCII_FOLDED_LITERAL;
-    }
-
-    boolean usesAsciiFoldedExecutor()
-    {
-        return usesAsciiFoldedExecutor;
+        return steps[leadingOperation].kind == Kind.LITERAL;
     }
 
     boolean allowsOrdinaryBooleanSearch()
@@ -579,9 +557,6 @@ final class ScanPlan
         Set<Utf8MemberTable> countedTables = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Step step : steps) {
             size += Step.INSTANCE_SIZE + SizeOf.sizeOf(step.literal);
-            if (step.asciiFolded != null) {
-                size += AsciiFoldedLiteral.INSTANCE_SIZE;
-            }
             if (step.run != null) {
                 size += step.run.estimatedRetainedSize();
                 Utf8MemberTable memberTable = step.run.nonAsciiMembers();
@@ -631,7 +606,7 @@ final class ScanPlan
     }
 
     /// Returns the offset of the leading literal byte that an unanchored candidate scan probes,
-    /// or `-1` when the plan does not start with a case-sensitive literal.
+    /// or `-1` when the plan does not start with a literal.
     int leadingLiteralProbeOffsetForDiagnostics()
     {
         return steps[leadingOperation].kind == Kind.LITERAL ? leadingProbeOffset : -1;
@@ -662,17 +637,13 @@ final class ScanPlan
                 candidate = findLeadingLiteral(bytes, candidate, end, leading.literal, leadingProbeOffset);
             }
             else {
-                candidate = usesAsciiFoldedExecutor
-                        ? nextAsciiFoldedCandidate(bytes, candidate, end, leading)
-                        : nextCandidate(bytes, candidate, end, leading);
+                candidate = nextCandidate(bytes, candidate, end, leading);
             }
             if (candidate < 0) {
                 break;
             }
             attempts++;
-            long result = usesAsciiFoldedExecutor
-                    ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
-                    : matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
+            long result = matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
             if (result >= 0) {
                 break;
             }
@@ -687,23 +658,19 @@ final class ScanPlan
     {
         int offset = input.byteArrayOffset();
         int end = offset + input.length();
-        long result = usesAsciiFoldedExecutor
-                ? matchAsciiFoldedUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null)
-                : matchUnanchoredAt(input.byteArray(), offset, end, offset + start, true, false, null);
+        long result = matchUnanchoredAt(input.byteArray(), offset, end, offset + start, true, false, null);
         return result < 0 ? -1 : (int) result - offset;
     }
 
-    /// Returns the raw result of one case-sensitive unanchored attempt at `start`: the match
-    /// end within the backing array, or the encoded failure. Without `fullAttempt`, the attempt
-    /// assumes the candidate scan found `start`, as a search's attempts do.
+    /// Returns the raw result of one unanchored attempt at `start`: the match end within the
+    /// backing array, or the encoded failure. Without `fullAttempt`, the attempt assumes the
+    /// candidate scan found `start`, as a search's attempts do.
     long unanchoredAttemptForDiagnostics(Slice input, int start, boolean fullAttempt, boolean fullMatch, int[] groups)
     {
         int offset = input.byteArrayOffset();
         return matchUnanchoredAt(input.byteArray(), offset, offset + input.length(), offset + start, fullAttempt, fullMatch, groups);
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds use separate executors; kept identical to the measured ordinary switch")
-    @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchEndAnchored(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
         byte[] bytes = input.byteArray();
@@ -840,160 +807,7 @@ final class ScanPlan
         }
     }
 
-    boolean matchAsciiFoldedEndAnchored(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
-    {
-        byte[] bytes = input.byteArray();
-        int base = input.byteArrayOffset() + contextStart;
-        int end = input.byteArrayOffset() + contextEnd;
-        int cursor = base;
-        int operation = 0;
-        int retries = 0;
-        // Four optional groups need at most four saved positions and four six-bit operation
-        // indices. Keep them in locals so boolean matching needs no allocated workspace.
-        long retryPositionsLow = 0;
-        long retryPositionsHigh = 0;
-        int retryOperations = 0;
-        while (true) {
-            Step step = steps[operation++];
-            boolean failed = false;
-            switch (step.kind) {
-                case LITERAL -> {
-                    if (step.matches(bytes, cursor, end)) {
-                        cursor += step.literal.length;
-                    }
-                    else {
-                        failed = true;
-                    }
-                }
-                case ASCII_FOLDED_LITERAL -> {
-                    if (step.matchesAsciiFolded(bytes, cursor, end)) {
-                        cursor += step.literal.length;
-                    }
-                    else {
-                        failed = true;
-                    }
-                }
-                case OPTIONAL -> {
-                    if (step.matches(bytes, cursor, end)) {
-                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                        retries++;
-                        cursor += step.literal.length;
-                    }
-                }
-                case ASCII_FOLDED_OPTIONAL -> {
-                    if (step.matchesAsciiFolded(bytes, cursor, end)) {
-                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                        retries++;
-                        cursor += step.literal.length;
-                    }
-                }
-                case RE2_DELIMITED_CAPTURE -> {
-                    int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
-                    if (stop < 0) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop + 1;
-                }
-                case END -> {
-                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
-                            (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
-                        return success(groups, cursor - base);
-                    }
-                    failed = true;
-                }
-                case RUN -> {
-                    int stop = step.run.match(bytes, cursor, end);
-                    if (stop < 0) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop;
-                }
-                case RE2_RUN -> {
-                    int stop = step.run.re2Match(bytes, cursor, end);
-                    if (stop < 0) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop;
-                }
-                case RE2_SET_RUN -> {
-                    int stop = step.run.re2SetMatch(bytes, cursor, end);
-                    if (stop < 0) {
-                        failed = true;
-                        break;
-                    }
-                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                        groups[step.slot] = cursor - base;
-                        groups[step.slot + 1] = stop - base;
-                    }
-                    cursor = stop;
-                }
-                case SAVE -> {
-                    if (groups != null && step.slot < groups.length) {
-                        groups[step.slot] = cursor - base;
-                    }
-                }
-                case FORK -> {
-                    retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                    retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                    retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                    retries++;
-                }
-            }
-            if (failed) {
-                if (retries == 0) {
-                    if (groups != null) {
-                        Arrays.fill(groups, -1);
-                    }
-                    return false;
-                }
-                // Captures inside a skipped optional are cleared. Every later capture on a
-                // successful path is visited again; enclosing captures retain their start.
-                // No group is revisited by repetition, so capture snapshots are unnecessary.
-                retries--;
-                cursor = (int) retryPositionsLow;
-                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
-                retryPositionsHigh >>>= 32;
-                operation = retryOperations & RETRY_OPERATION_MASK;
-                retryOperations >>>= RETRY_OPERATION_BITS;
-                Branch branch = steps[operation - 1].branch;
-                if (branch != null) {
-                    operation = branch.target();
-                    if (groups != null) {
-                        int mask = branch.captureMask();
-                        while (mask != 0) {
-                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
-                            if (slot + 1 < groups.length) {
-                                groups[slot] = -1;
-                                groups[slot + 1] = -1;
-                            }
-                            mask &= mask - 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; partial plans have no END, which the constructor checks")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END, which the constructor checks")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
@@ -1156,186 +970,6 @@ final class ScanPlan
         }
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END, which the constructor checks")
-    @SuppressWarnings("MissingCasesInEnumSwitch")
-    boolean matchAsciiFoldedPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
-    {
-        byte[] bytes = input.byteArray();
-        int base = input.byteArrayOffset() + contextStart;
-        int end = input.byteArrayOffset() + contextEnd;
-        int cursor = base;
-        int operation = 0;
-        int retries = 0;
-        // Four optional groups need at most four saved positions and four six-bit operation
-        // indices. Keep them in locals so boolean matching needs no allocated workspace.
-        long retryPositionsLow = 0;
-        long retryPositionsHigh = 0;
-        int retryOperations = 0;
-        while (true) {
-            boolean failed = false;
-            if (operation == steps.length) {
-                if (!fullMatch || cursor == end) {
-                    return success(groups, cursor - base);
-                }
-                failed = true;
-            }
-            else {
-                Step step = steps[operation++];
-                switch (step.kind) {
-                    case LITERAL -> {
-                        if (step.matches(bytes, cursor, end)) {
-                            cursor += step.literal.length;
-                        }
-                        else {
-                            failed = true;
-                        }
-                    }
-                    case ASCII_FOLDED_LITERAL -> {
-                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
-                            cursor += step.literal.length;
-                        }
-                        else {
-                            failed = true;
-                        }
-                    }
-                    case OPTIONAL -> {
-                        if (step.matches(bytes, cursor, end)) {
-                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                            retries++;
-                            cursor += step.literal.length;
-                        }
-                    }
-                    case ASCII_FOLDED_OPTIONAL -> {
-                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
-                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                            retries++;
-                            cursor += step.literal.length;
-                        }
-                    }
-                    case RE2_DELIMITED_CAPTURE -> {
-                        int stop = step.run.re2MatchBefore(bytes, cursor, end, step.delimiter);
-                        if (stop < 0) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop + 1;
-                    }
-                    case RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            if (step.run.matchMinimum(bytes, cursor, end) >= 0) {
-                                return true;
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.match(bytes, cursor, end);
-                        if (stop < 0) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case RE2_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            if (step.run.re2MatchMinimum(bytes, cursor, end) >= 0) {
-                                return true;
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.re2Match(bytes, cursor, end);
-                        if (stop < 0) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case RE2_SET_RUN -> {
-                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            if (step.run.re2SetMatchMinimum(bytes, cursor, end) >= 0) {
-                                return true;
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.re2SetMatch(bytes, cursor, end);
-                        if (stop < 0) {
-                            failed = true;
-                            break;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case SAVE -> {
-                        if (groups != null && step.slot < groups.length) {
-                            groups[step.slot] = cursor - base;
-                        }
-                    }
-                    case FORK -> {
-                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                        retries++;
-                    }
-                }
-            }
-            if (failed) {
-                if (retries == 0) {
-                    if (groups != null) {
-                        Arrays.fill(groups, -1);
-                    }
-                    return false;
-                }
-                // Captures inside a skipped optional are cleared. Every later capture on a
-                // successful path is visited again; enclosing captures retain their start.
-                // No group is revisited by repetition, so capture snapshots are unnecessary.
-                retries--;
-                cursor = (int) retryPositionsLow;
-                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
-                retryPositionsHigh >>>= 32;
-                operation = retryOperations & RETRY_OPERATION_MASK;
-                retryOperations >>>= RETRY_OPERATION_BITS;
-                Branch branch = steps[operation - 1].branch;
-                if (branch != null) {
-                    operation = branch.target();
-                    if (groups != null) {
-                        int mask = branch.captureMask();
-                        while (mask != 0) {
-                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
-                            if (slot + 1 < groups.length) {
-                                groups[slot] = -1;
-                                groups[slot + 1] = -1;
-                            }
-                            mask &= mask - 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Searches for a match that starts in `[start, contextEnd)`, or only at `start`
     /// when `anchored`. Returns the Slice-relative end of the match, [#NO_MATCH], or the
     /// complement of the Slice-relative offset where the search must continue on the ordinary
@@ -1347,7 +981,7 @@ final class ScanPlan
     int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
         if (wholeLiteralCandidates && !anchored) {
-            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, false, fullMatch, groups);
+            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, fullMatch, groups);
         }
         byte[] bytes = input.byteArray();
         int offset = input.byteArrayOffset();
@@ -1397,67 +1031,12 @@ final class ScanPlan
         return NO_MATCH;
     }
 
-    /// The [#search] of a plan that uses the ASCII-folded executor, with the same results.
-    /// It is a separate copy rather than a flag on search: separate hot loops keep each
-    /// C2-compiled shape simple.
-    int searchAsciiFolded(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
-    {
-        if (wholeLiteralCandidates && !anchored) {
-            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, true, fullMatch, groups);
-        }
-        byte[] bytes = input.byteArray();
-        int offset = input.byteArrayOffset();
-        int base = offset + contextStart;
-        int end = offset + contextEnd;
-        int searchStart = offset + start;
-        int candidate = searchStart;
-        Step leading = steps[leadingOperation];
-        boolean checkRequiredLiteral = !anchored && requiredLiteralOperation >= 0;
-        // An anchored search makes one attempt and never hands off.
-        long workLimit = anchored ? Long.MAX_VALUE : workBudgetBytes;
-        long failedWork = 0;
-        while (candidate < end) {
-            if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workLimit) {
-                return handOff(groups, candidate - offset);
-            }
-            if (!anchored) {
-                candidate = nextAsciiFoldedCandidate(bytes, candidate, end, leading);
-                if (candidate < 0) {
-                    break;
-                }
-            }
-            long result = matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
-            if (result >= 0) {
-                return (int) result - offset;
-            }
-            if (anchored) {
-                break;
-            }
-            long failure = ~result;
-            failedWork += (int) (failure >>> 32) - candidate;
-            candidate = resumeAfterFailedAttempt(bytes, candidate, end, (int) failure, leading);
-            // Every later match lies in [candidate, end) and consumes the required literal.
-            // Checking after the first failure keeps the scan off calls whose first
-            // candidate matches, such as each step of a dense match loop.
-            if (checkRequiredLiteral) {
-                if (!containsRequiredLiteral(bytes, candidate, end)) {
-                    break;
-                }
-                checkRequiredLiteral = false;
-            }
-        }
-        if (groups != null) {
-            Arrays.fill(groups, -1);
-        }
-        return NO_MATCH;
-    }
-
-    /// The unanchored search of [#search] and [#searchAsciiFolded] for a plan led by a
-    /// case-sensitive literal of two or more bytes. Each probe-byte candidate is checked for the
-    /// rest of the literal before an attempt, so an attempt starts only where the whole literal
-    /// occurs. The loop is separate so that the candidate loop of every other plan has no
-    /// whole-literal check. A literal-led plan has no separate required literal.
-    private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded, boolean fullMatch, int[] groups)
+    /// The unanchored search of [#search] for a plan led by a literal of two or more bytes. Each
+    /// probe-byte candidate is checked for the rest of the literal before an attempt, so an attempt
+    /// starts only where the whole literal occurs. The loop is separate so that the candidate loop
+    /// of every other plan has no whole-literal check. A literal-led plan has no separate required
+    /// literal.
+    private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean fullMatch, int[] groups)
     {
         byte[] bytes = input.byteArray();
         int offset = input.byteArrayOffset();
@@ -1475,9 +1054,7 @@ final class ScanPlan
             if (candidate < 0) {
                 break;
             }
-            long result = asciiFolded
-                    ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups)
-                    : matchUnanchoredAt(bytes, base, end, candidate, false, fullMatch, groups);
+            long result = matchUnanchoredAt(bytes, base, end, candidate, false, fullMatch, groups);
             if (result >= 0) {
                 return (int) result - offset;
             }
@@ -1506,7 +1083,7 @@ final class ScanPlan
     /// without groups returns: a nonnegative value for a match, [#NO_MATCH], or the complement of
     /// the Slice-relative offset where the search must continue. No match starts between `start`
     /// and that offset.
-    int searchBeforeHandoff(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded)
+    int searchBeforeHandoff(Slice input, int contextStart, int contextEnd, int start)
     {
         byte[] bytes = input.byteArray();
         int offset = input.byteArrayOffset();
@@ -1524,15 +1101,11 @@ final class ScanPlan
                             end - candidate >= HANDOFF_REMAINING_BYTES)) {
                 return ~(candidate - offset);
             }
-            candidate = asciiFolded
-                    ? nextAsciiFoldedCandidate(bytes, candidate, end, leading)
-                    : nextCandidate(bytes, candidate, end, leading);
+            candidate = nextCandidate(bytes, candidate, end, leading);
             if (candidate < 0) {
                 break;
             }
-            long result = asciiFolded
-                    ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
-                    : matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
+            long result = matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
             if (result >= 0) {
                 return (int) result - offset;
             }
@@ -1589,24 +1162,10 @@ final class ScanPlan
         return candidate;
     }
 
-    private static int nextAsciiFoldedCandidate(byte[] bytes, int candidate, int end, Step leading)
-    {
-        if (leading.kind == Kind.ASCII_FOLDED_LITERAL && isLowercaseAsciiLetter(leading.literal[0])) {
-            return findAsciiFoldedByte(bytes, candidate, end, leading.literal[0]);
-        }
-        if (leading.kind == Kind.LITERAL || leading.kind == Kind.ASCII_FOLDED_LITERAL) {
-            return findByte(bytes, candidate, end, leading.literal[0]);
-        }
-        if (isRun(leading) && leading.run.minimum() > 0) {
-            return leading.run.findCandidate(bytes, candidate, end);
-        }
-        return candidate;
-    }
-
-    /// Returns the first position at or after `candidate` where the whole case-sensitive
-    /// leading `literal` occurs, or `-1` when none remains, scanning for the byte at
-    /// `probeOffset`. The result is the first whole occurrence for any probe, so the
-    /// attempts of a search, and with them its work budget, do not depend on it.
+    /// Returns the first position at or after `candidate` where the whole leading `literal` occurs,
+    /// or `-1` when none remains, scanning for the byte at `probeOffset`. The result is the first
+    /// whole occurrence for any probe, so the attempts of a search, and with them its work budget,
+    /// do not depend on it.
     private static int findLeadingLiteral(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
     {
         // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
@@ -1702,7 +1261,7 @@ final class ScanPlan
     /// `end`, and an attempt at an ASCII candidate skips a leading one-character run (see
     /// `asciiCandidateCompletesLeadingRun`). The unanchored executors run only plans without a
     /// start anchor, which compaction never rewrites into delimited captures.
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; delimited captures occur only in start-anchored plans")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures occur only in start-anchored plans")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullAttempt, boolean fullMatch, int[] groups)
     {
@@ -1751,219 +1310,6 @@ final class ScanPlan
                     }
                     case OPTIONAL -> {
                         if (step.matches(bytes, cursor, end)) {
-                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                            retries++;
-                            cursor += step.literal.length;
-                        }
-                    }
-                    case END -> {
-                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
-                                (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
-                            success(groups, matchStart - base, cursor - base);
-                            return cursor;
-                        }
-                        failed = true;
-                    }
-                    case RUN -> {
-                        if (booleanResult && booleanTails[stepIndex]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            // Boolean callers observe only a nonnegative result, not its end.
-                            int stop = step.run.matchMinimum(bytes, cursor, end);
-                            if (stop >= 0) {
-                                return stop;
-                            }
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.match(bytes, cursor, end);
-                        if (stop < 0) {
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        scanned = Math.max(scanned, stop);
-                        if (stepIndex == failureResumeOperation) {
-                            resumeRunEnd = stop;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case RE2_RUN -> {
-                        if (booleanResult && booleanTails[stepIndex]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            // Boolean callers observe only a nonnegative result, not its end.
-                            int stop = step.run.re2MatchMinimum(bytes, cursor, end);
-                            if (stop >= 0) {
-                                return stop;
-                            }
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.re2Match(bytes, cursor, end);
-                        if (stop < 0) {
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        scanned = Math.max(scanned, stop);
-                        if (stepIndex == failureResumeOperation) {
-                            resumeRunEnd = stop;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case RE2_SET_RUN -> {
-                        if (booleanResult && booleanTails[stepIndex]) {
-                            // The continuation cannot fail, so the run's minimum decides this path.
-                            // Boolean callers observe only a nonnegative result, not its end.
-                            int stop = step.run.re2SetMatchMinimum(bytes, cursor, end);
-                            if (stop >= 0) {
-                                return stop;
-                            }
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        int stop = step.run.re2SetMatch(bytes, cursor, end);
-                        if (stop < 0) {
-                            if (stop != -1) {
-                                scanned = Math.max(scanned, ~stop);
-                            }
-                            failed = true;
-                            break;
-                        }
-                        scanned = Math.max(scanned, stop);
-                        if (stepIndex == failureResumeOperation) {
-                            resumeRunEnd = stop;
-                        }
-                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
-                            groups[step.slot] = cursor - base;
-                            groups[step.slot + 1] = stop - base;
-                        }
-                        cursor = stop;
-                    }
-                    case SAVE -> {
-                        if (groups != null && step.slot < groups.length) {
-                            groups[step.slot] = cursor - base;
-                        }
-                    }
-                    case FORK -> {
-                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                        retries++;
-                    }
-                }
-            }
-            if (failed) {
-                if (retries == 0) {
-                    return failedAttempt(resumeRunEnd, scanned);
-                }
-                retries--;
-                cursor = (int) retryPositionsLow;
-                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
-                retryPositionsHigh >>>= 32;
-                operation = retryOperations & RETRY_OPERATION_MASK;
-                retryOperations >>>= RETRY_OPERATION_BITS;
-                Branch branch = steps[operation - 1].branch;
-                if (branch != null) {
-                    operation = branch.target();
-                    if (groups != null) {
-                        int mask = branch.captureMask();
-                        while (mask != 0) {
-                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
-                            if (slot + 1 < groups.length) {
-                                groups[slot] = -1;
-                                groups[slot + 1] = -1;
-                            }
-                            mask &= mask - 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures occur only in start-anchored plans")
-    @SuppressWarnings("MissingCasesInEnumSwitch")
-    private long matchAsciiFoldedUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
-    {
-        if (groups != null) {
-            Arrays.fill(groups, -1);
-        }
-        int cursor = matchStart;
-        int operation = 0;
-        int retries = 0;
-        int resumeRunEnd = matchStart;
-        // The furthest byte any unbounded scan of this attempt reached, across retries. A run
-        // that fails on its first byte made a bounded check and does not count.
-        int scanned = matchStart;
-        // Whether the caller observes only whether the attempt matches, decided before the step
-        // loop so that the loop tests neither flag.
-        boolean booleanResult = groups == null && !fullMatch;
-        long retryPositionsLow = 0;
-        long retryPositionsHigh = 0;
-        int retryOperations = 0;
-        while (true) {
-            boolean failed = false;
-            if (operation == steps.length) {
-                if (partialMatch && (!fullMatch || cursor == end)) {
-                    success(groups, matchStart - base, cursor - base);
-                    return cursor;
-                }
-                failed = true;
-            }
-            else {
-                int stepIndex = operation;
-                Step step = steps[operation++];
-                switch (step.kind) {
-                    case LITERAL -> {
-                        if (step.matches(bytes, cursor, end)) {
-                            cursor += step.literal.length;
-                        }
-                        else {
-                            failed = true;
-                        }
-                    }
-                    case ASCII_FOLDED_LITERAL -> {
-                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
-                            cursor += step.literal.length;
-                        }
-                        else {
-                            failed = true;
-                        }
-                    }
-                    case OPTIONAL -> {
-                        if (step.matches(bytes, cursor, end)) {
-                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
-                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
-                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
-                            retries++;
-                            cursor += step.literal.length;
-                        }
-                    }
-                    case ASCII_FOLDED_OPTIONAL -> {
-                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
                             retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
                             retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
                             retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
@@ -2178,19 +1524,6 @@ final class ScanPlan
         return -1;
     }
 
-    private static int findAsciiFoldedByte(byte[] bytes, int cursor, int end, byte folded)
-    {
-        if (VectorSupport.isAvailable()) {
-            return VectorScanner.findAsciiFoldedByte(bytes, cursor, end, folded);
-        }
-        for (; cursor < end; cursor++) {
-            if ((bytes[cursor] | 0x20) == folded) {
-                return cursor;
-            }
-        }
-        return -1;
-    }
-
     private static boolean isLowercaseAsciiLetter(byte value)
     {
         return 'a' <= value && value <= 'z';
@@ -2320,18 +1653,17 @@ final class ScanPlan
         /// single character.
         ///
         /// After any other leading run, the number of attempts that fail depends on the input,
-        /// since each candidate inside one run rescans the rest of it, so the ordinary engine
-        /// keeps those patterns. The exception is an unbounded run of every byte except the
-        /// one-byte case-sensitive literal that follows it: the run stops only at that byte,
-        /// which the literal then matches, or at a sequence RE2 rejects, where the attempt fails
-        /// and the search resumes at the run end. A run that holds every ASCII byte except the
-        /// literal, and some non-ASCII characters but not all, also stops at a non-ASCII
-        /// character outside it, which the literal fails on
-        /// in the same way. That character's lead byte can also start members, so the search
-        /// attempts once more there, and with a minimum of at most one, each stop costs at most two
-        /// failed attempts and none rescans the run. A larger minimum adds failed attempts only
-        /// inside a run shorter than it, each reading fewer member characters than the minimum, so
-        /// for a given pattern the cost stays linear in the input.
+        /// since each candidate inside one run rescans the rest of it, so the ordinary engine keeps
+        /// those patterns. The exception is an unbounded run of every byte except the one-byte
+        /// literal that follows it: the run stops only at that byte, which the literal then
+        /// matches, or at a sequence RE2 rejects, where the attempt fails and the search resumes at
+        /// the run end. A run that holds every ASCII byte except the literal, and some non-ASCII
+        /// characters but not all, also stops at a non-ASCII character outside it, which the
+        /// literal fails on in the same way. That character's lead byte can also start members, so
+        /// the search attempts once more there, and with a minimum of at most one, each stop costs
+        /// at most two failed attempts and none rescans the run. A larger minimum adds failed
+        /// attempts only inside a run shorter than it, each reading fewer member characters than
+        /// the minimum, so for a given pattern the cost stays linear in the input.
         private boolean canSearchUnanchored()
         {
             for (int index = 0; index < steps.size(); index++) {
@@ -2339,7 +1671,7 @@ final class ScanPlan
                 if (step.kind == Kind.SAVE) {
                     continue;
                 }
-                if (step.kind == Kind.LITERAL || step.kind == Kind.ASCII_FOLDED_LITERAL) {
+                if (step.kind == Kind.LITERAL) {
                     return true;
                 }
                 if (step.kind != Kind.RUN) {
@@ -2382,7 +1714,12 @@ final class ScanPlan
                     if (literal == null) {
                         return false;
                     }
-                    steps.add(isAsciiFoldedLiteral(expression) ? Step.asciiFoldedLiteral(literal) : Step.literal(literal));
+                    // A literal that folds ASCII letters declines the plan, so the ordinary engine
+                    // runs the pattern.
+                    if (isAsciiFoldedLiteral(expression)) {
+                        return false;
+                    }
+                    steps.add(Step.literal(literal));
                 }
                 case CAPTURE -> {
                     int group = expression.captureIndex();
@@ -2454,13 +1791,8 @@ final class ScanPlan
             byte[] bytes = new byte[length];
             int offset = 0;
             for (int rune : runes) {
-                if (foldAscii && (('A' <= rune && rune <= 'Z') || ('a' <= rune && rune <= 'z'))) {
-                    bytes[offset++] = (byte) (rune | 0x20);
-                }
-                else {
-                    Utf8.encode(bytes, offset, rune);
-                    offset += Utf8.encodedLength(rune);
-                }
+                Utf8.encode(bytes, offset, rune);
+                offset += Utf8.encodedLength(rune);
             }
             return bytes;
         }
@@ -2526,16 +1858,18 @@ final class ScanPlan
             if (optionalCount > MAX_OPTIONALS - optionals) {
                 return false;
             }
-            boolean asciiFolded = isAsciiFoldedLiteral(body);
+            if (isAsciiFoldedLiteral(body)) {
+                return false;
+            }
             if (expression.min() > 0) {
                 byte[] required = repeatLiteral(literal, expression.min());
                 if (required == null) {
                     return false;
                 }
-                steps.add(asciiFolded ? Step.asciiFoldedLiteral(required) : Step.literal(required));
+                steps.add(Step.literal(required));
             }
             for (int optional = 0; optional < optionalCount; optional++) {
-                steps.add(asciiFolded ? Step.asciiFoldedOptional(literal) : Step.optionalLiteral(literal));
+                steps.add(Step.optionalLiteral(literal));
             }
             optionals += optionalCount;
             hasVariableLiteralRepeat |= optionalCount != 0;
@@ -2559,10 +1893,10 @@ final class ScanPlan
             Regexp body = expression.child(0);
             byte[] literal = literalBytes(body);
             if (literal != null) {
-                if (++optionals > MAX_OPTIONALS) {
+                if (++optionals > MAX_OPTIONALS || isAsciiFoldedLiteral(body)) {
                     return false;
                 }
-                steps.add(isAsciiFoldedLiteral(body) ? Step.asciiFoldedOptional(literal) : Step.optionalLiteral(literal));
+                steps.add(Step.optionalLiteral(literal));
                 return true;
             }
             // A top-level optional character atom is lowered to one bounded run
@@ -2607,15 +1941,9 @@ final class ScanPlan
                         nullable[index] = nullable[index + 1];
                     }
                     case LITERAL -> add(first, index, step.literal[0] & 0xFF);
-                    case ASCII_FOLDED_LITERAL -> addAsciiFolded(first, index, step.literal[0]);
                     case OPTIONAL -> {
                         merge(first, index, index + 1);
                         add(first, index, step.literal[0] & 0xFF);
-                        nullable[index] = nullable[index + 1];
-                    }
-                    case ASCII_FOLDED_OPTIONAL -> {
-                        merge(first, index, index + 1);
-                        addAsciiFolded(first, index, step.literal[0]);
                         nullable[index] = nullable[index + 1];
                     }
                     case FORK -> {
@@ -2668,14 +1996,6 @@ final class ScanPlan
         private static void add(long[] sets, int set, int value)
         {
             sets[set * FIRST_BYTE_WORDS + (value >>> 6)] |= 1L << (value & 63);
-        }
-
-        private static void addAsciiFolded(long[] sets, int set, byte value)
-        {
-            add(sets, set, value);
-            if (isLowercaseAsciiLetter(value)) {
-                add(sets, set, value - ('a' - 'A'));
-            }
         }
 
         /// Compacts captured runs. A captured run that ends at its delimiter becomes an RE2
@@ -2760,7 +2080,6 @@ final class ScanPlan
         private final int lastOffset;
         private final long first;
         private final long last;
-        private final AsciiFoldedLiteral asciiFolded;
         private final ScanPlanRun run;
         private final Branch branch;
 
@@ -2769,19 +2088,9 @@ final class ScanPlan
             return new Step(Kind.LITERAL, bytes, 0, 0, null, null);
         }
 
-        private static Step asciiFoldedLiteral(byte[] bytes)
-        {
-            return new Step(Kind.ASCII_FOLDED_LITERAL, bytes, 0, 0, null, null);
-        }
-
         private static Step optionalLiteral(byte[] bytes)
         {
             return new Step(Kind.OPTIONAL, bytes, 0, 0, null, null);
-        }
-
-        private static Step asciiFoldedOptional(byte[] bytes)
-        {
-            return new Step(Kind.ASCII_FOLDED_OPTIONAL, bytes, 0, 0, null, null);
         }
 
         private static Step re2DelimitedCapture(int delimiter, int slot, ScanPlanRun run)
@@ -2831,9 +2140,6 @@ final class ScanPlan
             this.lastOffset = literal == null ? 0 : literal.length - width;
             this.first = literal == null ? 0 : read(literal, 0, width);
             this.last = literal == null ? 0 : read(literal, lastOffset, width);
-            this.asciiFolded = kind == Kind.ASCII_FOLDED_LITERAL || kind == Kind.ASCII_FOLDED_OPTIONAL
-                    ? new AsciiFoldedLiteral(foldMask(literal, 0, width), foldMask(literal, lastOffset, width))
-                    : null;
         }
 
         Kind kind()
@@ -2899,48 +2205,6 @@ final class ScanPlan
             };
         }
 
-        private boolean matchesAsciiFolded(byte[] input, int cursor, int end)
-        {
-            if (literal.length > end - cursor) {
-                return false;
-            }
-            if (literal.length > 2 * Long.BYTES) {
-                for (int index = 0; index < literal.length; index++) {
-                    int actual = input[cursor + index] & 0xFF;
-                    int expected = literal[index] & 0xFF;
-                    if (isLowercaseAsciiLetter(literal[index])) {
-                        actual |= 0x20;
-                    }
-                    if (actual != expected) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-            return switch (width) {
-                case 1 -> ((input[cursor] | asciiFolded.firstMask) ^ first) == 0;
-                case 2 -> ((((short) SHORT.get(input, cursor) | asciiFolded.firstMask) ^ first) |
-                        (((short) SHORT.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
-                case 4 -> ((((int) INT.get(input, cursor) | asciiFolded.firstMask) ^ first) |
-                        (((int) INT.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
-                case 8 -> ((((long) LONG.get(input, cursor) | asciiFolded.firstMask) ^ first) |
-                        (((long) LONG.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
-                default -> throw new IllegalStateException("unexpected literal width: " + width);
-            };
-        }
-
-        private static long foldMask(byte[] bytes, int offset, int width)
-        {
-            long mask = 0;
-            for (int index = 0; index < width; index++) {
-                if (isLowercaseAsciiLetter(bytes[offset + index])) {
-                    int shift = Byte.SIZE * (LITTLE_ENDIAN ? index : width - index - 1);
-                    mask |= 0x20L << shift;
-                }
-            }
-            return mask;
-        }
-
         private static long read(byte[] bytes, int offset, int width)
         {
             return switch (width) {
@@ -2951,10 +2215,5 @@ final class ScanPlan
                 default -> throw new IllegalStateException("unexpected literal width: " + width);
             };
         }
-    }
-
-    private record AsciiFoldedLiteral(long firstMask, long lastMask)
-    {
-        private static final int INSTANCE_SIZE = SizeOf.instanceSize(AsciiFoldedLiteral.class);
     }
 }

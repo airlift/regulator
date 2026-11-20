@@ -386,11 +386,11 @@ Re2 pattern = Re2.compile(
 `Re2.Options.setGenerateBytecode(true)`,
 `JavaRegexp.Options.setGenerateBytecode(true)`, and
 `RustRegexp.Options.setGenerateBytecode(true)` are options, off by default,
-that compile an eligible pattern's case-sensitive scan plan into its
-own hidden class. Results are unchanged; `usesGeneratedBytecode()` reports
-whether the pattern has such a class. A pattern's class is generated inside
-`compile`, never on first use. A pattern that is not eligible, or whose class
-cannot be generated, compiles as it does without the option.
+that compile an eligible pattern's scan plan into its own hidden class. Results
+are unchanged; `usesGeneratedBytecode()` reports whether the pattern has such a
+class. A pattern's class is generated inside `compile`, never on first use. A
+pattern that is not eligible, or whose class cannot be generated, compiles as
+it does without the option.
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, `RustRegexp`, and `TrinoLikePattern` are
 sealed classes that callers cannot extend, and `compile` may return a subclass

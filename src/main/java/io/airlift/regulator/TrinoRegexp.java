@@ -2223,14 +2223,13 @@ public sealed class TrinoRegexp
         }
     }
 
-    /// A Trino pattern whose case-sensitive scan plan was compiled to its own hidden class,
-    /// which extends this class, so the pattern a caller holds is an instance of that class. Each
-    /// operation keeps the route it has without the class, decided once when the pattern compiles:
-    /// the generated class declares each operation that would run the plan, and any other runs the
-    /// inherited Java route. Short boolean calls that the interpreter hands to the ordinary engine
-    /// to avoid its operation dispatch also stay on the generated class. The generated class adds
-    /// no state. Callers that never enable [Options#setGenerateBytecode(boolean)] never load this
-    /// class.
+    /// A Trino pattern whose scan plan was compiled to its own hidden class, which extends this
+    /// class, so the pattern a caller holds is an instance of that class. Each operation keeps the
+    /// route it has without the class, decided once when the pattern compiles: the generated class
+    /// declares each operation that would run the plan, and any other runs the inherited Java
+    /// route. Short boolean calls that the interpreter hands to the ordinary engine to avoid its
+    /// operation dispatch also stay on the generated class. The generated class adds no state.
+    /// Callers that never enable [Options#setGenerateBytecode(boolean)] never load this class.
     abstract static non-sealed class CompiledScanTrinoRegexp
             extends TrinoRegexp
     {
@@ -2287,7 +2286,7 @@ public sealed class TrinoRegexp
         @Override
         MethodHandle attemptHandleForDiagnostics()
         {
-            return ScanKernelGenerator.attemptHandleForDiagnostics(getClass(), re2().caseSensitiveScanPlan());
+            return ScanKernelGenerator.attemptHandleForDiagnostics(getClass(), re2().scanPlan());
         }
     }
 

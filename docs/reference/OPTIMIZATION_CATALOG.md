@@ -961,31 +961,26 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
 - **Origin:** First described by glibc's memcmp, which compares short lengths
   with two overlapping loads ([memcmp.S][glibc-memcmp]), .NET 5 (literals
   compared as words against constants,
-  [RegexCompiler.cs][dotnet5-regex-compiler]), .NET 7 (`[Aa]` tested as
-  `(ch | 0x20) == 'a'`, [.NET 7][dotnet7-blog]), ClickHouse (folded bytes
-  compared with OR `0x20`, [CompileRegexp.cpp][ch-compile-regexp]), and memchr
-  (an overlapping last load, [memchr.rs][memchr-generic]). Regulator:
-  per-position fold masks, the words held in LIKE pattern fields, the
-  rare-plan split under C2's inline limit, and the unchecked reads ([#10],
-  [#24], [#81], [#153], [design][d-short-like]).
+  [RegexCompiler.cs][dotnet5-regex-compiler]), and memchr (an overlapping last
+  load, [memchr.rs][memchr-generic]). Regulator: the words held in LIKE pattern
+  fields, the rare-plan split under C2's inline limit, and the unchecked reads
+  ([#10], [#24], [#81], [#153], [design][d-short-like]).
 - **Where:** `LiteralMatchKernel.shortLiteralWidth`,
   `LiteralMatchKernel.matchesShortLiteralAt`, `ScanPlan.Step.matches`,
-  `ScanPlan.Step.matchesAsciiFolded`, `ScanPlan.Builder.emit`,
+  `ScanPlan.Builder.emit`,
   `TrinoLikePattern.matches`, `TrinoLikePattern.matchesComplex`
 - **Applies when:** LIKE equality, prefix, and suffix tests, interpreted and
-  generated; scan-plan literal operations, folded for ASCII case pairs whose
-  fold stays ASCII
+  generated; scan-plan literal operations
 - **What it does:** A literal of 1 to 16 bytes is compared as its first and
   last word, of the width that `shortLiteralWidth` picks, which overlap when
-  needed. The reads skip `Slice` bounds checks. Folded literals OR a `0x20`
-  mask into both sides, so an ASCII pair such as `[Kk]` becomes a folded
-  literal byte instead of a two-member run. A LIKE pattern holds its literal
-  as one or two `long` words in its fields, and rare plans live in a separate
-  method, so `matches` stays under C2's 325-byte hot-method inline limit. The
-  changes in [#81], which include putting the words in the pattern's fields,
-  take Trino LIKE `EXACT_MATCH` and `PREFIX_LARGE` to 0.91 and 0.75 of their
-  earlier time on Graviton, and the unchecked reads take the TPC-H `PROMO%`,
-  `%BRASS`, and `MEDIUM POLISHED%` predicates to 0.57 to 0.79 ([#153]).
+  needed. The reads skip `Slice` bounds checks. A LIKE pattern holds its
+  literal as one or two `long` words in its fields, and rare plans live in a
+  separate method, so `matches` stays under C2's 325-byte hot-method inline
+  limit. The changes in [#81], which include putting the words in the pattern's
+  fields, take Trino LIKE `EXACT_MATCH` and `PREFIX_LARGE` to 0.91 and 0.75 of
+  their earlier time on Graviton, and the unchecked reads take the TPC-H
+  `PROMO%`, `%BRASS`, and `MEDIUM POLISHED%` predicates to 0.57 to 0.79
+  ([#153]).
 
 ### SWAR constants held in registers
 
@@ -1742,39 +1737,39 @@ byte operations instead of an automaton.
   `ScanPlan.Builder.stopsWhereJavaFinalEndAllows`, `TrinoRegexp.extract`
 - **Applies when:** Nonempty leftmost-first patterns in every regex language
   that fit the operation set and limits; an unanchored plan also needs a
-  capture group. A variable-length run is accepted only when its members are
-  disjoint from the bytes that can follow it, so a greedy run never gives
-  bytes back, and a Java plan keeps a final `$` only when a run that can reach
-  it admits none of Java's line terminators, or all of them and is unbounded.
-  An unanchored search hands the rest of the input to the ordinary engine
-  once its failed attempts have examined more than 2048 bytes plus 4 times the
-  distance it has advanced, or, on boolean finds of ASCII plans not led by a
-  literal with at least 256 bytes left, once the failures average fewer than
-  32 bytes apart, so plan searches stay linear
-- **What it does:** A pattern is lowered to literal, folded literal, optional,
-  fork, run, save, and delimited capture operations, run by a dedicated
-  interpreter or a generated class. Plans are capped at 32 operations plus an
-  end operation, 4 optionals or forks, 256-byte literals, 16 groups, nesting
-  depth 16, and repeat counts of 1000, so attempts stay bounded; retry
-  positions are packed as 32-bit values into two `long` locals and 6-bit
-  operation indexes into an `int`, with no heap stack. On start-anchored,
-  fork-free plans with at most three captures, run, delimiter, and capture
-  fold into one delimited-capture operation; and a small bounded repeat of a
-  literal of two or more bytes, `lit{n,m}`, expands
-  into one literal of `n` copies and `m-n` optional literals instead of a
-  counted loop. An unanchored plan scans for the next candidate start, and a
-  plan led by a case-sensitive literal checks the whole literal at each
-  probe-byte hit before attempting. When a plan starts with a one-character
-  run followed by an unbounded run with no minimum whose class contains the
-  first, as in `[a-z][a-z0-9]*`, a failed attempt resumes at that run's end.
-  In the case-sensitive interpreter, a plan led by an uncaptured one-character
-  run starts each attempt at an ASCII candidate after that character, since
-  the candidate scan already matched it; the case-insensitive executor and
-  generated classes start at the first operation. A start-anchored plan
-  answers `regexp_extract` of a capturing group without allocating a matcher,
-  and generated classes do so for every plan. Trino's targeted scan workloads
-  take about 0.3 of their earlier time ([#10]), and Java and Rust URL captures
-  and extraction about 0.22 of the ordinary engine's time ([#41]).
+  capture group, and a pattern with an ASCII-folded literal keeps the ordinary
+  engine. A variable-length run is accepted only when its members are disjoint
+  from the bytes that can follow it, so a greedy run never gives bytes back,
+  and a Java plan keeps a final `$` only when a run that can reach it admits
+  none of Java's line terminators, or all of them and is unbounded. An
+  unanchored search hands the rest of the input to the ordinary engine once its
+  failed attempts have examined more than 2048 bytes plus 4 times the distance
+  it has advanced, or, on boolean finds of ASCII plans not led by a literal
+  with at least 256 bytes left, once the failures average fewer than 32 bytes
+  apart, so plan searches stay linear
+- **What it does:** A pattern is lowered to literal, optional, fork, run, save,
+  and delimited capture operations, run by a dedicated interpreter or a
+  generated class. Plans are capped at 32 operations plus an end operation, 4
+  optionals or forks, 256-byte literals, 16 groups, nesting depth 16, and
+  repeat counts of 1000, so attempts stay bounded; retry positions are packed
+  as 32-bit values into two `long` locals and 6-bit operation indexes into an
+  `int`, with no heap stack. On start-anchored, fork-free plans with at most
+  three captures, run, delimiter, and capture fold into one delimited-capture
+  operation; and a small bounded repeat of a literal of two or more bytes,
+  `lit{n,m}`, expands into one literal of `n` copies and `m-n` optional
+  literals instead of a counted loop. An unanchored plan scans for the next
+  candidate start, and a plan led by a literal checks the whole literal at each
+  probe-byte hit before attempting. When a plan starts with a one-character run
+  followed by an unbounded run with no minimum whose class contains the first,
+  as in `[a-z][a-z0-9]*`, a failed attempt resumes at that run's end. In the
+  interpreter, a plan led by an uncaptured one-character run starts each
+  attempt at an ASCII candidate after that character, since the candidate scan
+  already matched it; generated classes start at the first operation. A
+  start-anchored plan answers `regexp_extract` of a capturing group without
+  allocating a matcher, and generated classes do so for every plan. Trino's
+  targeted scan workloads take about 0.3 of their earlier time ([#10]), and
+  Java and Rust URL captures and extraction about 0.22 of the ordinary engine's
+  time ([#41]).
 
 ### Boolean-call shortcuts
 
@@ -2303,11 +2298,11 @@ and shapes, applies to every pattern, interpreted or generated.
   `TrinoLikeKernelGenerator.generate`,
   `ScanKernelGenerator.ScanEmitter.definePattern`,
   `ScanKernelGenerator.ScanEmitter.defineTrino`, `CompiledPattern.find`
-- **Applies when:** Case-sensitive regular-expression scan plans and every LIKE
-  strategy; for `TrinoRegexp`, only a pattern no specialized class claims; each
-  routed public operation is declared on the generated class with its route
-  fixed, within C2's 325-byte hot-method inline limit; binding works on any
-  pattern, generated or not
+- **Applies when:** Regular-expression scan plans and every LIKE strategy; for
+  `TrinoRegexp`, only a pattern no specialized class claims; each routed public
+  operation is declared on the generated class with its route fixed, within C2's
+  325-byte hot-method inline limit; binding works on any pattern, generated or
+  not
 - **What it does:** The plan compiles into one hidden class through the
   `io.airlift:classfile` library. The class extends the language's pattern
   class, so a call site sees the generated class directly. A caller can also

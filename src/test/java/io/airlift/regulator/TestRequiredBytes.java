@@ -224,7 +224,7 @@ public class TestRequiredBytes
         for (ScanPlanFind find : forcedScanPlanHandoffFinds(URI)) {
             CompiledPattern pattern = find.pattern();
             assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(find.description()).isTrue();
-            assertThat(pattern.caseSensitiveScanPlan().isAnchoredStart()).as(find.description()).isFalse();
+            assertThat(pattern.scanPlan().isAnchoredStart()).as(find.description()).isFalse();
             assertThat(find.find().test(line)).as(find.description()).isFalse();
             assertNoForwardDfa(pattern, find.description());
             assertThat(find.find().test(uri)).as(find.description()).isTrue();

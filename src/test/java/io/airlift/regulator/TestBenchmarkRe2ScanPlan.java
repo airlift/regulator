@@ -30,8 +30,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkRe2ScanPlan
 {
-    // Workloads whose patterns select no plan, so both scanPlan values time the ordinary engine,
-    // except that RE2 plans the first pattern in DEEP_REJECTIONS.
+    // Workloads whose patterns select no plan, so both scanPlan values time the ordinary engine.
+    // Every pattern of the folded workloads has an ASCII-folded literal, which declines the plan, as
+    // does the first of DEEP_REJECTIONS after its supported prefix.
     private static final Set<String> WITHOUT_PLAN = Set.of(
             "UNANCHORED_RUN",
             "UNANCHORED_RUN_LEADING",
@@ -39,14 +40,13 @@ public class TestBenchmarkRe2ScanPlan
             "LITERAL_CONTROLS",
             "DEEP_REJECTIONS",
             "FALLBACK",
-            "LOWERED_FALLBACK");
-    // Workloads whose plans are case-insensitive, so they keep the interpreter when generated
-    // bytecode is requested. FOLDED_KEY is an unanchored search led by the k that folds to the
-    // Kelvin sign.
-    private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED", "FOLDED_HOST", "FOLDED_KEY");
-    // The first pattern in DEEP_REJECTIONS selects an interpreted RE2 plan because RE2 supports
-    // its Unicode K fold, which Trino rejects.
-    private static final String PARTLY_PLANNED = "DEEP_REJECTIONS";
+            "LOWERED_FALLBACK",
+            "FOLDED_ANCHORED",
+            "FOLDED_OPTIONAL",
+            "FOLDED_UNANCHORED",
+            "FOLDED_MIXED",
+            "FOLDED_HOST",
+            "FOLDED_KEY");
 
     @Test
     public void testBenchmarkResults()
@@ -73,8 +73,8 @@ public class TestBenchmarkRe2ScanPlan
                     boolean[] planned = new boolean[contains.patterns.length];
                     boolean[] generated = new boolean[contains.patterns.length];
                     for (int index = 0; index < contains.patterns.length; index++) {
-                        planned[index] = scanPlan && (!WITHOUT_PLAN.contains(trinoWorkload) || (trinoWorkload.equals(PARTLY_PLANNED) && index == 0));
-                        generated[index] = generateBytecode && planned[index] && !FOLDED.contains(trinoWorkload) && !trinoWorkload.equals(PARTLY_PLANNED);
+                        planned[index] = scanPlan && !WITHOUT_PLAN.contains(trinoWorkload);
+                        generated[index] = generateBytecode && planned[index];
                         assertThat(contains.patterns[index].usesScanPlanForDiagnostics()).as("%s pattern %s", state, index).isEqualTo(planned[index]);
                         assertThat(contains.patterns[index].usesGeneratedBytecode()).as("%s pattern %s", state, index).isEqualTo(generated[index]);
                     }
