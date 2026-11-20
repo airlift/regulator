@@ -50,13 +50,6 @@ or protected matching loops require the benchmark evidence defined in
 
 `TestDfaCopyOnResetStress` runs for `-Dregulator.stress.seconds=N` seconds (default 5).
 
-`-Dregulator.vectorJvmArgument=-Dio.airlift.regulator.dfa.flat-paired-rows=false`
-(or `true`) runs the suite with DFA paired rows in that form instead of the
-host's. It takes the place of any vector-width argument CI passes in the same
-property, so to set both, put them in one quoted value.
-`TestDfaAbsolutePointerTransitions` already runs `TestDfaPairedTransitions`'
-cases in both forms.
-
 `TestJavaRegexpFuzz`, `TestTrinoRegexpFuzz`, `TestRe2Fuzz`,
 `TestRustRegexpFuzz`, and `TestTrinoLikeFuzz` compare random patterns and inputs
 across each language's compile variants and against its oracle, and by default
@@ -111,8 +104,7 @@ hosts. To reproduce one:
 ```
 
 A third build runs the current feature release with native access enabled on an
-arm64 runner, which pairs DFA rows on the flat table and whose SVE with 16-byte
-vectors selects the XOR candidate masks described in "Candidate Masks on SVE" in
+arm64 runner, whose SVE with 16-byte vectors selects the XOR candidate masks described in "Candidate Masks on SVE" in
 `REGULATOR_DECISIONS.md`. It sets `-Dregulator.expectSve128=true`, so a test
 fails if `VectorSupport` stops selecting them on that runner.
 

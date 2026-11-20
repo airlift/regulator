@@ -630,10 +630,6 @@ public class TestHotMethodSize
                 Map.entry("searchForwardPairsAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
                 Map.entry("searchForwardPairsAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
-                Map.entry("searchForwardPairsFlat", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsFlatAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
-                Map.entry("searchForwardPairsFlatFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardCountSelfLoopScan", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int contextEnd, int startOffset"),
                 Map.entry("searchBackward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxBegin, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, int maximumBytes"),
                 Map.entry("searchAnchoredCandidate", "CandidateStartCursor cursor, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int candidate"),
@@ -656,7 +652,7 @@ public class TestHotMethodSize
     @Test
     public void testPairLoopsDecodeTheirOwnMisses()
     {
-        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+        for (String loop : List.of("searchForwardPairs")) {
             assertThat(calledMethods(Dfa.class, loop, Dfa.class))
                     .as("Dfa methods Dfa.%s calls", loop)
                     .contains("decodePairedTransition");
@@ -672,7 +668,7 @@ public class TestHotMethodSize
     @Test
     public void testPairLoopExitsUseContinuation()
     {
-        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
+        for (String loop : List.of("searchForwardPairs")) {
             for (String method : List.of(loop, loop + "AfterMiss")) {
                 assertThat(calledMethods(Dfa.class, method, Dfa.class))
                         .as("Dfa methods Dfa.%s calls", method)
