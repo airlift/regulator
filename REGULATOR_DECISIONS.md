@@ -2052,9 +2052,7 @@ boolean searches' own. Only unanchored boolean searches of a forward program
 with the [position
 automaton](#bit-parallel-position-automaton-after-dfa-failure) that bounded,
 assertion-free matches compile to take part, including a full-Slice `find` that
-runs its [inner literal search first](#minimum-inner-literal-search-window), or
-[hands it a long window's required literal
-hit](#required-literal-absence-on-long-windows),
+runs its [inner literal search first](#minimum-inner-literal-search-window),
 once that search falls back. A pattern without the automaton keeps upstream's
 rule, because its searches would fall back on BitState or the Pike NFA, which
 were not measured against a DFA that thrashes. Such a search reads the reset
@@ -2464,17 +2462,6 @@ leave no room for them where they fit without it: `[a-z]+ing[a-z]+` under RE2's
 POSIX options keeps no long-window check at 3,184 bytes. And the plan makes the
 pattern's shape a literal kernel's, so a capturing matcher search clears its
 group array once more before matching.
-
-The plan steps aside where the required literal's
-[long-window handoff](#required-literal-absence-on-long-windows) applies: a
-`find` of at least the required bytes' 256-byte window limit whose required
-literal hands its first hit to the inner literal search takes that handoff, as
-without the plan, and the matcher does not run. So `[a-z]+aa[a-z]+` keeps the
-handoff on long windows and the matcher on shorter ones. The handoff was there
-first, and no benchmark row measures a pattern that has both: the email and
-`[a-z]+e[a-z]+` rows keep no handoff, and nearly every line of a line-by-line
-search over leipzig or lh3lh3 is shorter than 256 bytes. Which of the two is
-faster on long records is unmeasured.
 
 The plan's analysis reads the normalized expression the pattern compiles, which
 must be exactly three elements, with captures looked through: a class repeated
@@ -3049,11 +3036,9 @@ A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
 setup. An exact literal, or one-of bytes, of a pattern with no other literal
 route checks long windows too. A route that starts where a match starts, or a
-scan plan, keeps a pattern from that check, and such a pattern checks long
-windows instead for its rarest exact literal that the route does not already
-search for; the literal-neighbor find plan is no such route, since the
-pattern's other operations keep the ordinary engine. Both checks are
-described in
+scan plan, keeps a pattern from that check; the literal-neighbor find plan is no
+such route, since the pattern's other operations keep the ordinary engine. The
+check is described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
@@ -3500,8 +3485,7 @@ no match when it is absent. So does a pattern whose required bytes are one of up
 to three bytes, such as the `/` or `@` of `[a-z]+://\S+|[^ @]+@[^ @]+`: a window
 without any of them holds no match. Its search is the vector byte-set scan from
 1 KiB, and a word search for the first matching byte below that or without
-vectors. A check beside another route, below, searches only for an exact
-literal.
+vectors.
 
 The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
@@ -3548,101 +3532,10 @@ cannot continue, and an end-anchored one runs the reverse DFA from the end, so
 either can stop long before a scan of the whole window would. A pattern with a
 single-byte table keeps no required bytes at all.
 
-A pattern left out of the check only for a route that starts where a match
-starts (a prefix scan, a transparent start literal, an inner literal search for
-a literal that begins every match, or a start literal filter) or for a scan
-plan, and that meets every other condition, checks long windows beside that
-route instead, for the rarest exact literal every match consumes that the route
-does not already search for. The route already
-searches for a literal inside the exact bytes every match starts with, which a
-prefix scan, a transparent start literal, or an inner literal search for a
-leading literal finds, or inside the scan plan's literal or the inner literal
-search's single literal. A route literal rules out a literal only where its
-exact bytes hold it byte for byte: a search for `foobar` does not rule out `FOO`
-in `\Bfoobar.*?FOO`, and a case-insensitive inner literal matches its folded
-letters in either case, so a search for `foo[Bb][Aa][Rr]` does not rule out
-`bar`. A start literal filter, or an inner literal search for a leading literal
-set, searches for alternatives, none of which every match holds, so it rules out
-no literal. So `the.*?,z`, whose prefix scan stops at every `the`, checks long
-windows for `,z`, and so does `\bthe\b.*?,z`, whose inner literal search finds
-the `the` every match begins with. The pattern keeps its required bytes for
-short windows either way.
-
-Compilation looks for the literal only where such a check is possible, and
-compares only the first 64 of the exact start bytes, all that a joined literal
-keeps: a later literal that repeats start bytes past them may be checked
-although the route makes the check redundant, which costs a scan but never
-rejects a window with a match. A pattern whose literals compare more than
-1,048,576 bytes in all with the start bytes and the route's literals checks for
-none, since the check is optional.
-
-The check beside a route costs a scan where every window holds its literal.
-On 4 KiB lines that each end in `,z`, `\bthe\b.*?,z` took about 3% longer on
-Graviton (1.00 to 1.04 times main's time by language), and `the.*?,z` took 1.10
-to 1.12 times main's time on x86. The x86 cause is inferred, not measured: the
-beside scan of each whole line runs before the DFA, so it leaves Vector API
-boxing garbage just ahead of the DFA's lazily built states, and the warm-up
-garbage collections then repack them. The cost is accepted because lines
-without `,z` are rejected in about 0.02 of main's time.
-
-An inner literal search for a literal inside the match, as for the `,` of
-`\w+,\bz`, still keeps a pattern from the check. The search already scans every
-window for its literal, so where nearly every line holds the other literal near
-its end, a check beside it doubles the scan and never rejects: on 1 KiB lines
-that each end in `,z`, unlike the 16 KiB chunks above, `\w+,\bz` took 1.33 to
-1.48 times as long on Graviton with the check. That gives up the same pattern on
-lines without `,z`, which the check took to 0.59x on Graviton and 0.35x on x86.
-A search for a literal that begins every match lands where a match would start,
-as a prefix scan does, and keeps the check.
-
-Full-Slice `find` of a long window hands the check's first hit to the inner
-literal search, which starts there rather than at the window start, so the
-search does not scan again the text before the handed hit. Two forms of search
-qualify, each for one exact literal. The first searches for the checked literal
-itself, as for `(\w+)foobar(\d)`, so the check's scan has found the search's
-first hit. The second searches for the required literal less its last byte,
-where the search's gate after its literal admits that byte alone, as the `,` of
-`\w+,\bz` is followed only by `z`. A hit of that search then passes the gate
-exactly where `,z` starts, and none before the first `,z` does.
-
-That form finds the first `,z` with the search's own one-byte scan for `,`
-first, then the scan for `,z` from that `,`. Every occurrence of `,z` starts
-with an occurrence of `,`, so the first `,z` at or after the first `,` is the
-first `,z` in the window, and a window without `,` has no `,z`, where the gated
-search for `,` answers no match too. The one-byte scan goes first because, on
-text without `,`, the scan for `,z` costs more for each vector than the one-byte
-scan does. The window's length, not the length left after the `,`, chooses the
-scan for `,z`, so a window of at least 1 KiB keeps the vector pair scan however
-early its first `,` lies. On 1 KiB lines, scanning the rest after an early `,`
-with the call-free word scan, as the length left chose, made the handoff take
-2.1 times as long on Graviton and 2.5 times as long on x86 as a vector scan for
-`,z` from the line start. The vector scan takes a rest of any length, whole
-vectors of candidates and then the remainder one at a time, and its comparison
-budget counts from where it starts, as a scan of the rest alone would.
-
-The handoff is sound because the ordinary engine's `find` reaches the inner
-literal search after its length reject and before any other deciding step: the
-pattern has no lowered program, pre-engine matcher, required prefix, anchor at
-either end, assertion the DFA cannot run, or empty match, and the search's
-minimum window is at most 256 bytes. A hit before the handed one either does not
-exist or fails a gate, and a hit that fails a gate changes none of the search's
-state, so the search reaches the handed hit as it would have from the window
-start, falling back where it would. A window without the literal has no hit that
-passes, so the search would have answered no match there too.
-
-The second form gives `\w+,\bz` back the reject of lines without `,z` in `find`,
-with a scan of its own that serves the handoff alone. The required bytes' charge
-takes in that scan, as it would a long-window search. Each smaller step gives up
-the handoff, in either form, and the last, the short-window check alone, also
-gives up the second form's own scan. Matcher finds, count, the one-shot range
-searches, and `replaceAll` keep that pattern out of the check, as above, so
-lines that each end in `,z` cost them no second scan. In RE2 and Java, the
-handoff took `\w+,\bz` on 1 to 16 KiB chunks of text with commas to 0.24 to
-0.32 of main's time on Graviton and 0.08 to 0.15 on x86 without `,z`, and to
-0.31 to 0.46 and 0.09 to 0.26 with it; comma-dense CSV without `,z` to 0.035 and
-0.022; text without a comma to 0.97 and 0.93; and 256-byte windows to 0.70 to
-0.86 and 0.43 to 0.67. It took `(\w+)foobar(\d)` grep on 16 KiB chunks to 0.53
-and 0.58 to 0.61.
+The long-window scan for a second literal beside another literal route, and its
+handoff to the inner literal search, were removed: the scan rejected no
+published row and slowed name-whitespace by 11–18% and both-slashes by 27–30%,
+and the handoff's wins were on unpublished rows only.
 
 Compilation decides this once, and the literal's search takes its memory in
 the required bytes' charge; the one-of bytes' search keeps nothing beyond the

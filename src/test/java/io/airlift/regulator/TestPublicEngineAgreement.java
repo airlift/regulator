@@ -529,14 +529,12 @@ public class TestPublicEngineAgreement
     }
 
     @Test
-    public void testLiteralNeighborsStepAsideForRequiredLiteralHandoff()
+    public void testLiteralNeighborsDecideFindsAroundWindowLimit()
     {
-        // A find of at least the required bytes' window limit whose required literal hands its
-        // first hit to the inner literal search takes that handoff, as without the plan, in every
-        // language, where the matcher would have decided from the bytes beside the hit: the
-        // handoff's search builds its reverse prefix DFA, where the matcher builds none. A line
-        // one byte shorter keeps the matcher. Each find agrees with the ordinary engine, with a
-        // match and without.
+        // A find one byte shorter than the required bytes' window limit, and one of the limit, is
+        // decided by the matcher from the bytes beside the hit, in every language, and builds no
+        // program search or prefix DFA. Each find agrees with the ordinary engine, with a match
+        // and without.
         String aa = "[a-z]+aa[a-z]+";
         List<Function<String, CompiledPattern>> compilers = List.of(
                 pattern -> Re2.compile(utf8Slice(pattern)),
@@ -553,9 +551,7 @@ public class TestPublicEngineAgreement
             CompiledPattern ordinary = compiler.apply(aa);
             String label = label(pattern);
             assertThat(pattern.findPlanForDiagnostics()).as(label).isEqualTo(LITERAL_NEIGHBORS);
-            RequiredBytes bytes = pattern.requiredBytesForDiagnostics();
-            assertThat(bytes.handsOffToInnerLiteralSearch()).as(label).isTrue();
-            int windowLimit = bytes.windowLimit();
+            int windowLimit = pattern.requiredBytesForDiagnostics().windowLimit();
             LiteralNeighborMatcher matcher = pattern.literalNeighborMatcherForDiagnostics();
             for (int length : List.of(windowLimit - 1, windowLimit)) {
                 Slice match = utf8Slice(" ".repeat(length - 4) + "baab");
@@ -564,13 +560,8 @@ public class TestPublicEngineAgreement
                 assertThat(matcher.find(noMatch)).as("%s at %s", label, length).isEqualTo(LiteralNeighborMatcher.NO_MATCH);
                 assertThat(pattern.find(noMatch)).as("%s at %s", label, length).isFalse().isEqualTo(ordinary.find(noMatch, 0, length));
                 assertThat(pattern.find(match)).as("%s at %s", label, length).isTrue().isEqualTo(ordinary.find(match, 0, length));
-                if (length < windowLimit) {
-                    assertNoProgramSearchOrPrefixDfa(pattern, label);
-                }
+                assertNoProgramSearchOrPrefixDfa(pattern, label);
             }
-            assertThat(pattern.innerLiteralSearchForDiagnostics().reversePrefixProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH))
-                    .as("%s reverse prefix DFA", label)
-                    .isNotNull();
         }
     }
 
