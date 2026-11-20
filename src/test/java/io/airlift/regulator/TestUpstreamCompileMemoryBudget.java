@@ -386,15 +386,15 @@ public class TestUpstreamCompileMemoryBudget
                 // any program holds, but Trino's fixed-width matcher compiles them.
                 new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 796_705, 796_705, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
-                new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_646, 1),
-                new RejectedPattern(Language.SET, List.of("foo"), 6_646, 6_646, 4_000),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 3_768, 7_828, 1),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 7_828, 7_828, 5_000),
+                new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_638, 1),
+                new RejectedPattern(Language.SET, List.of("foo"), 6_638, 6_638, 4_000),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 3_768, 7_820, 1),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 7_820, 7_820, 5_000),
                 // The many-match initialization gate omits match IDs; allocated states still charge
                 // them.
-                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 123_299, 123_299, 110_000),
-                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 74_616, 122_630, 2_000, 50_000),
-                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 30_422, 51_046, 20_000));
+                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 123_291, 123_291, 110_000),
+                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 74_616, 122_622, 2_000, 50_000),
+                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 30_422, 51_038, 20_000));
         for (RejectedPattern rejection : rejections) {
             for (long maxMemory : rejection.maxMemories()) {
                 assertThatThrownBy(() -> rejection.compile(maxMemory))

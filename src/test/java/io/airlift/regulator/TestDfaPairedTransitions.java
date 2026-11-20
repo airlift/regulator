@@ -26,7 +26,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
-import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -72,9 +71,7 @@ public class TestDfaPairedTransitions
         Dfa.CacheTables tables = dfa.cacheTablesForTesting();
         Dfa.StateData start = dfa.analyzeStart(tables, matchingInput, textBegin, textEnd, false, true);
         byte[] bytes = matchingInput.byteArray();
-        assertThat(Dfa.FLAT_PAIRED_ROWS
-                ? Dfa.searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false, textBegin)
-                : Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false, textBegin))
+        assertThat(Dfa.searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, textEnd, start.offset(), true, false, false, textBegin))
                 .isEqualTo(matchingInput.length());
 
         assertThat(Dfa.search(program, matchingInput, false, Prog.MatchKind.FIRST_MATCH, true))
@@ -489,32 +486,14 @@ public class TestDfaPairedTransitions
         assertThat(dfa.pairedTransitionMemory()).isPositive();
         assertThat(memoryBeforePairing - dfa.availableStateMemory()).isEqualTo(dfa.pairedTransitionMemory());
 
-        // Unless a run forces the form, aarch64 hosts pair rows on the flat table and every other
-        // host on object rows.
-        if (System.getProperty("io.airlift.regulator.dfa.flat-paired-rows") == null) {
-            assertThat(Dfa.FLAT_PAIRED_ROWS).isEqualTo("aarch64".equals(System.getProperty("os.arch")));
-        }
-
         // The complete table pairs all six states, a seven-state limit with the unused state 0, in
-        // rows of 37 slots for six byte classes. The charge is the table the form holds, stated
-        // exactly so a change to the sizing goes red: the flat table's two int arrays, or the object
-        // rows counted with eight-byte references, 72 bytes for the outer array and 312 for each row.
-        Dfa.CacheTables tables = dfa.cacheTablesForTesting();
+        // rows of 37 slots for six byte classes. The charge is stated exactly so a change to the
+        // sizing goes red: the object rows counted with eight-byte references, 72 bytes for the
+        // outer array and 312 for each row.
         assertThat(dfa.stateCount).isEqualTo(6);
         assertThat(dfa.nextSize).isEqualTo(6);
         assertThat(dfa.pairedTransitionRowCount()).isEqualTo(dfa.stateCount);
-        if (Dfa.FLAT_PAIRED_ROWS) {
-            assertThat(tables.pairedStateRefArrays).isNull();
-            assertThat(tables.pairedRowOffsets).hasSize(7);
-            assertThat(tables.flatPairedRows.byteSize()).isEqualTo(6L * 37 * Integer.BYTES);
-            // 952 bytes with 16-byte array headers.
-            assertThat(dfa.pairedTransitionMemory()).isEqualTo(sizeOfIntArray(7) + sizeOfIntArray(6 * 37));
-        }
-        else {
-            assertThat(tables.flatPairedRows).isNull();
-            assertThat(tables.pairedRowOffsets).isNull();
-            assertThat(dfa.pairedTransitionMemory()).isEqualTo(72 + (6 * 312));
-        }
+        assertThat(dfa.pairedTransitionMemory()).isEqualTo(72 + (6 * 312));
     }
 
     @Test

@@ -211,19 +211,18 @@ public final class DfaAbsolutePointerProbe
 
         runPairedTransitionTests();
 
-        // The parent compares this line across forms.
+        // The parent compares this line with and without native access.
         System.out.println("budget-release word-list resets=" + exerciseBudgetBoundRelease(expectedNativeAccess) +
                 " input-shift states=" + exerciseInputShiftReleasesPointerTable());
         // The split budgets check their decisions here, since the word at which each runs out can
-        // differ by form; the line is a diagnostic.
+        // differ; the line is a diagnostic.
         System.out.println("split-budget " + exerciseSplitBudgetDecisions());
 
-        // The parent forces the paired form each way and checks the one this JVM ran.
-        System.out.println((expectedNativeAccess ? "OK enabled" : "OK disabled") + " flat-paired-rows=" + Dfa.FLAT_PAIRED_ROWS);
+        System.out.println(expectedNativeAccess ? "OK enabled" : "OK disabled");
     }
 
-    // Runs every test of TestDfaPairedTransitions in this JVM's paired form, so their charge, cap,
-    // release, and loop checks run in both forms on every host. The class has no fields or
+    // Runs every test of TestDfaPairedTransitions in this JVM, so their charge, cap, release, and
+    // loop checks run with native access enabled and disabled. The class has no fields or
     // lifecycle methods, so each test runs, in name order, on a fresh instance.
     private static void runPairedTransitionTests()
             throws ReflectiveOperationException
@@ -238,7 +237,7 @@ public final class DfaAbsolutePointerProbe
                 test.invoke(new TestDfaPairedTransitions());
             }
             catch (InvocationTargetException e) {
-                throw new AssertionError("TestDfaPairedTransitions." + test.getName() + " failed with flat-paired-rows=" + Dfa.FLAT_PAIRED_ROWS, e.getCause());
+                throw new AssertionError("TestDfaPairedTransitions." + test.getName() + " failed", e.getCause());
             }
         }
     }
@@ -820,18 +819,11 @@ public final class DfaAbsolutePointerProbe
     // paired rows the search is reading, and the search must go on without them. The budgets at
     // which this happens move with unrelated changes, so each pattern sweeps a range around them.
     // The second pattern loops on a letter class instead of any byte, and its 20 byte classes make
-    // its paired rows about eight times larger, so it releases them at over twice the budget, in
-    // either form. The first pattern releases only its object rows: its flat table always leaves
-    // room for the states the search adds.
+    // its paired rows about eight times larger, so it releases them at over twice the budget.
     private static void exercisePairedRowReleaseDuringSearch()
     {
         Slice anyByteInput = utf8Slice("x".repeat(64) + "a".repeat(256));
-        if (Dfa.FLAT_PAIRED_ROWS) {
-            exerciseFlatPairedTableKeptThroughSearch("(?s).*x", 16 * 1024, 40 * 1024, anyByteInput);
-        }
-        else {
-            exercisePairedRowReleaseSweep("(?s).*x", 19 * 1024, 24 * 1024, anyByteInput);
-        }
+        exercisePairedRowReleaseSweep("(?s).*x", 19 * 1024, 24 * 1024, anyByteInput);
         exercisePairedRowReleaseSweep(
                 "^(x*a[b-z]*(\\x01c|\\x02d|\\x03e|\\x04f|\\x05g|\\x06h|\\x07i|\\x08j)?|x*a)",
                 30 * 1024,
@@ -867,41 +859,6 @@ public final class DfaAbsolutePointerProbe
             check(findResult(re2, input).equals(expected), description + " changed the result");
         }
         check(released || !VectorSupport.isAvailable(), pattern + " sweep did not release paired rows during a search");
-    }
-
-    // On the flat table, the release case above never arises for (?s).*x: at every budget from the
-    // first sampled one at which its first DFA search works, that search pairs all of its states,
-    // and the repeat search keeps the table to its end. The complete flat table always leaves room
-    // for the states the repeat search adds, while the same states' object rows don't. The sweep
-    // starts below the first sampled working budget, so it checks that budget too.
-    private static void exerciseFlatPairedTableKeptThroughSearch(String pattern, long minimumMemory, long maximumMemory, Slice input)
-    {
-        Re2 reference = Re2.compile(utf8Slice(pattern));
-        String expected = findResult(reference, input);
-        long expectedEnd = Dfa.search(reference.forwardProgramForDiagnostics(), input, false, Prog.MatchKind.FIRST_MATCH, true);
-        long firstWorkingMemory = -1;
-        for (long maxMemory = minimumMemory; maxMemory <= maximumMemory; maxMemory += 64) {
-            String description = pattern + " with max memory " + maxMemory;
-            Re2 re2 = Re2.compile(utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory));
-            Prog program = re2.forwardProgramForDiagnostics();
-            long matchEnd = Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true);
-            if (firstWorkingMemory < 0) {
-                if (matchEnd == Dfa.SEARCH_FAILED) {
-                    continue;
-                }
-                firstWorkingMemory = maxMemory;
-            }
-            check(matchEnd != Dfa.SEARCH_FAILED, description + " gave up the first DFA search above the first sampled working budget");
-            check(matchEnd == expectedEnd, description + " changed the first DFA result");
-            Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
-            check(dfa.pairedTransitionRowCount() > 0 && dfa.pairedTransitionRowCount() == dfa.stateCount, description + " did not pair every state on the flat table");
-            check(dfa.absolutePointerTransitionMemory() == 0, description + " held a pointer table beside the flat paired table");
-            int releaseCount = dfa.pairedRowReleaseCount();
-            check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == matchEnd, description + " changed the repeat DFA result");
-            check(dfa.pairedRowReleaseCount() == releaseCount, description + " released the flat paired table during the repeat search");
-            check(findResult(re2, input).equals(expected), description + " changed the result");
-        }
-        check(firstWorkingMemory > minimumMemory, pattern + " sweep did not start below the first sampled budget at which the first DFA search works");
     }
 
     // Fails a cache insertion with the pointer table, or with paired transitions, in place.
