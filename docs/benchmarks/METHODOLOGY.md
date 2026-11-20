@@ -90,7 +90,6 @@ results stay unchanged.
 
 | Benchmark | Requested work on both sides |
 |---|---|
-| `programPossibleMatchRange*` / `PossibleMatchRange_Prog_*` | Internal program range analysis, complete UTF-8 pattern, cached 2 GiB program budget, 16-byte bounds |
 | `dotMatchCaptures` / `asciiMatchCaptures` | Unanchored search with one capture, in addition to the whole match |
 | `searchPhoneRe2Captures` | Unanchored search with two captures, in addition to the whole match |
 | `search*DfaBoolean` | Internal boolean DFA search, no match boundary, explicit resource-failure check |

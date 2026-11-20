@@ -58,6 +58,7 @@ public class TestRe2ErrorCode
         cases.add(new ErrorCase(utf8Bytes("bb[abc"), RegexpParseErrorCode.MISSING_BRACKET, utf8Bytes("[abc")));
         cases.add(new ErrorCase(utf8Bytes("abc(def"), RegexpParseErrorCode.MISSING_PAREN, utf8Bytes("abc(def")));
         cases.add(new ErrorCase(utf8Bytes("abc)def"), RegexpParseErrorCode.UNEXPECTED_PAREN, utf8Bytes("abc)def")));
+        cases.add(new ErrorCase(utf8Bytes("*hello"), RegexpParseErrorCode.REPEAT_ARGUMENT, utf8Bytes("*")));
 
         cases.add(new ErrorCase(new byte[] {'m', 'n', '\\', 'x', '1', (byte) 0xFF}, RegexpParseErrorCode.BAD_UTF8, new byte[0]));
         cases.add(new ErrorCase(new byte[] {'o', 'p', (byte) 0xFF, 'q', 'r'}, RegexpParseErrorCode.BAD_UTF8, new byte[0]));
