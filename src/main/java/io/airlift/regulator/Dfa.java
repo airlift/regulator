@@ -955,15 +955,7 @@ final class Dfa
 
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
     {
-        return countMatches(prog, context, context.length(), matchKind);
-    }
-
-    /// Counts the matches in the first `end` bytes of `context` as
-    /// [#countMatches(Prog,Slice,Prog.MatchKind)] counts all of it, with assertions seeing those
-    /// bytes as the whole context.
-    static long countMatches(Prog prog, Slice context, int end, Prog.MatchKind matchKind)
-    {
-        long result = countMatches(prog, context, 0, end, matchKind, COUNT_EVERY_MATCH, null);
+        long result = countMatches(prog, context, 0, context.length(), matchKind, COUNT_EVERY_MATCH, null);
         return result < 0 ? result : countStopCount(result);
     }
 
@@ -8917,11 +8909,6 @@ final class Dfa
         private static long acceptedSelfLoopExitByteSet(long exitByteSet)
         {
             return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
-        }
-
-        int cacheEntryCount()
-        {
-            return cache.size();
         }
 
         CacheSnapshot cacheSnapshot()

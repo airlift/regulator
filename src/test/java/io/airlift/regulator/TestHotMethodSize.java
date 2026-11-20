@@ -231,14 +231,13 @@ public class TestHotMethodSize
 
     /// Keeps each literal search small enough for C2 to inline:
     /// `LiteralSearchKernel.findSingleByte` into matchers such as InnerLiteralSearch,
-    /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into
-    /// `findContains`, `skipToLastContainsCandidate` into `findLastContains`, the generated
-    /// searches of a LIKE pattern into its `matchesMiddle`, and the finish of each one-byte scan
-    /// into the scan. Candidate verification is outside this size check.
+    /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into `findContains`,
+    /// the generated searches of a LIKE pattern into its `matchesMiddle`, and the finish of each
+    /// one-byte scan into the scan. Candidate verification is outside this size check.
     @Test
     public void testLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate", "skipToLastContainsCandidate")) {
+        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate")) {
             assertThat(codeLength(LiteralSearchKernel.class, method))
                     .as("LiteralSearchKernel.%s bytecode bytes", method)
                     .isPositive()
@@ -492,7 +491,7 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps the literal kernel's helpers that the unmasked and reverse pair scans call within
+    /// Keeps the literal kernel's helpers that the unmasked pair scan calls within
     /// MaxTrivialSize, so C2 inlines them however rarely a failed candidate reaches them. Where
     /// failed candidates are rare, as on Russian text, C2 left the 11-byte budget test out of line
     /// in findPair, and that one call in the scan made it rebuild the probe broadcasts at every
@@ -501,13 +500,11 @@ public class TestHotMethodSize
     @Test
     public void testPairScanKernelHelperSizes()
     {
-        for (String method : List.of("findPair", "findLast")) {
-            for (String callee : calledMethods(VectorPrefixScanner.class, method, LiteralSearchKernel.class)) {
-                assertThat(codeLength(LiteralSearchKernel.class, callee))
-                        .as("LiteralSearchKernel.%s bytecode bytes, called by VectorPrefixScanner.%s", callee, method)
-                        .isPositive()
-                        .isLessThanOrEqualTo(MAX_TRIVIAL_SIZE);
-            }
+        for (String callee : calledMethods(VectorPrefixScanner.class, "findPair", LiteralSearchKernel.class)) {
+            assertThat(codeLength(LiteralSearchKernel.class, callee))
+                    .as("LiteralSearchKernel.%s bytecode bytes, called by VectorPrefixScanner.findPair", callee)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_TRIVIAL_SIZE);
         }
         assertThat(calledMethods(VectorPrefixScanner.class, "findPairMasked", LiteralSearchKernel.class).stream()
                 .filter(callee -> codeLength(LiteralSearchKernel.class, callee) > MAX_TRIVIAL_SIZE))
@@ -548,10 +545,6 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(419);
-        assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
-                .as("VectorPrefixScanner.findLast bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(1001);
         // The literal set scan runs the same loop under the same rules, capped at the size it was
         // added at.
         assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
