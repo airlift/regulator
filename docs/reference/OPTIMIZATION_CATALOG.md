@@ -1984,29 +1984,22 @@ ordinary engine would.
 - **Origin:** First described by .NET 7's fixed-distance sets, which search
   for one set with `IndexOfAny` and check the others around each hit
   ([set choice][dotnet-fixed-distance-sets],
-  [search][dotnet-fixed-distance-search]), by Hyperscan's lookaround checks at
-  fixed offsets from a literal ([rose_build_lookaround.cpp][hs-lookaround]),
-  and, for a literal searched first with the repeat before it validated
-  backward, by nim-regex (2020) ([literals optimization][nim-litopt]) and
-  .NET's literal-after-loop search
-  ([RegexFindOptimizations.cs][dotnet-find], [.NET 7][dotnet7-blog]);
-  Inspired by a gap against the Rust regex crate on everyday span rows
-  ([#87]). Regulator: the shared fixed-width matcher
-  ([#87], [design][d-boolean]), and the `AB{n}x` matcher with an exact
-  count and an ASCII prefix.
+  [search][dotnet-fixed-distance-search]), and by Hyperscan's lookaround
+  checks at fixed offsets from a literal
+  ([rose_build_lookaround.cpp][hs-lookaround]); Inspired by a gap against the
+  Rust regex crate on everyday span rows ([#87]). Regulator: the shared
+  fixed-width matcher ([#87], [design][d-boolean]).
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
   `FixedWidthByteSpanMatcher.containsByte`,
   `FixedWidthByteSpanMatcher.searchCandidateByte`,
-  `FixedWidthByteSpanMatcher.countCandidateBytes`,
-  `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
+  `FixedWidthByteSpanMatcher.countCandidateBytes`
 - **Applies when:** Capture-free patterns, other than exact literals, of a
   fixed count of 2 to 256 characters, in every language, whose scanned
   position is an ASCII singleton (below) or passes the
   [rare class scan](#fixed-width-rare-class-scan). When find also has an inner
   literal search of two or more bytes, every language keeps that search and no
-  fixed-width matcher. A pattern that yields to the engine keeps none. The
-  `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
+  fixed-width matcher. A pattern that yields to the engine keeps none.
 - **What it does:** In its candidate form the matcher scans for one position,
   then checks the others around each hit: a byte mask for ASCII, Latin-1, and
   Rust byte classes, one decoded character for a UTF-8 class above ASCII.
@@ -2025,10 +2018,7 @@ ordinary engine would.
   an ASCII pattern of up to 64 bytes has a position accepting exactly one byte,
   the matcher scans for the byte accepted by the first such position, as the
   [rare class scan](#fixed-width-rare-class-scan) scans a position of one first
-  byte. In `AB{n}x`, where `A` is a class of ASCII characters, `B` a character
-  class without `x`, `x` one ASCII character, and `n` an exact count from 1 to
-  1000, the matcher finds `x` with `indexOf` and validates the repeat backward,
-  stopping at the previous `x`, so no run is validated twice. RE2 ISO date and
+  byte. RE2 ISO date and
   phone number contains run in 0.42 to 0.47 of the general engine's time
   ([#87]).
 
@@ -2814,7 +2804,6 @@ change is described.
 [dotnet-any-star]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs#L4328-L4340
 [dotnet-compile-to-assembly]: https://learn.microsoft.com/en-us/dotnet/api/system.text.regularexpressions.regex.compiletoassembly?view=netframework-4.8#remarks
 [dotnet-count]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/Regex.Count.cs
-[dotnet-find]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs
 [dotnet-fixed-distance-search]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L740-L791
 [dotnet-fixed-distance-sets]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L184-L262
 [dotnet-fixed-length]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/Symbolic/SymbolicRegexMatcher.cs#L376-L387
@@ -2891,7 +2880,6 @@ change is described.
 [mula-strfind]: http://0x80.pl/notesen/2016-11-28-simd-strfind.html
 [mula-universal]: https://github.com/WojciechMula/simd-byte-lookup/blob/870eccb54b6ad8888619cceecc3d5ea6a12d213b/lib/Universal.py#L13-L36
 [musl-memchr]: https://git.musl-libc.org/cgit/musl/tree/src/string/memchr.c?h=v1.2.5
-[nim-litopt]: https://nitely.github.io/2020/11/30/regex-literals-optimization.html
 [nr-glushkov]: https://users.dcc.uchile.cl/~gnavarro/ps/algor04.2.pdf
 [onig-dist-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5513-L5534
 [onig-dist-try]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5873-L5887

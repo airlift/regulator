@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestOutlierSemantics
 {
     @Test
-    public void testDisjointSuffixCountAvoidsDfaConstruction()
+    public void testRepeatedClassCountAvoidsDfaConstruction()
     {
         Slice expression = utf8Slice("[a-q][^u-z]{80}x");
         int flags = JavaRegexp.Options.defaults().parseFlags();
@@ -173,7 +173,7 @@ public class TestOutlierSemantics
     }
 
     @Test
-    public void testDisjointSuffixRepeatSearch()
+    public void testRepeatedClassSearch()
     {
         for (int repeats : List.of(1, 3, 23, 80)) {
             String pattern = "[a-q][^u-z]{" + repeats + "}x";

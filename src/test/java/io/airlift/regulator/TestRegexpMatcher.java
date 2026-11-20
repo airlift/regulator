@@ -246,9 +246,8 @@ public class TestRegexpMatcher
     @Test
     public void testGroupZeroMatchUsesNoCaptureNfaWorkspaceWhenDfaFails()
     {
-        // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-        // answer it without the DFA, and the unbounded x+ keeps it off the position automaton,
-        // whose window BitState would search.
+        // The unbounded x+ keeps the pattern off the position automaton, whose window BitState
+        // would search; case folding changes no match in this text.
         Re2 pattern = Re2.compile(Slices.utf8Slice("(?i)[a-q][^u-z]{80}x+"), Re2.Options.latin1().setMaxMemory(4L << 20));
         // The only match ends the text, so the forward DFA thrashes on the way to it and fails.
         byte[] bytes = stateExplosionInput(64 << 10);
