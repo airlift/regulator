@@ -37,9 +37,10 @@ final class LiteralSearchKernel
     // The prefix scans in Prog and VectorPrefixScanner apply the same rule through the static
     // methods below. VectorPrefixScanner.findPair writes comparisonBudgetSpent in line.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
-    // Boolean contains and dot-star spans use Slice.indexOf below this window length.
-    // The AWS sweep placed the crossover between 48 and 64 bytes, with an approximate
-    // tie on r8i at 64; see REGULATOR_DECISIONS.md.
+    // Boolean contains and dot-star spans use Slice.indexOf below this window length, and so does
+    // an exact literal's span search in place of its prefix scan. The AWS sweep placed the
+    // crossover between 48 and 64 bytes, with an approximate tie on r8i at 64; see
+    // REGULATOR_DECISIONS.md.
     static final int MINIMUM_SEARCH_WINDOW_BYTES = 64;
 
     // The prefix shifts of every literal shorter than this table's 64 entries whose first byte
