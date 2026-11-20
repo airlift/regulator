@@ -85,9 +85,6 @@ abstract sealed class LiteralAlternationSpanMatcher
     // A denser filter would stop the vector scan so often that restarting it would cost more
     // than the root table's one lookup per byte.
     private static final double MAXIMUM_START_LITERAL_FILTER_DENSITY = 1.0 / 64;
-    // Shorter inputs keep the root-table loop: a call's vector setup costs more than it saves,
-    // and short everyday values keep the route they had before the filter.
-    private static final int MINIMUM_START_LITERAL_FILTER_BYTES = 64;
     // A filter route whose stops stay below one per this many bytes, half the density the sample
     // calls dense, holds the filter for the next route without sampling.
     private static final int HELD_ROUTE_MINIMUM_BYTES_PER_STOP = 2 * Dfa.BYTE_SCAN_SAMPLE_SIZE / Dfa.BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT;
@@ -851,7 +848,7 @@ abstract sealed class LiteralAlternationSpanMatcher
         @Override
         boolean usesStartLiteralFilter(int length)
         {
-            return startLiteralFilter != null && length >= MINIMUM_START_LITERAL_FILTER_BYTES;
+            return startLiteralFilter != null && length >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
         }
 
         @Override
@@ -884,7 +881,7 @@ abstract sealed class LiteralAlternationSpanMatcher
             int inputEnd = inputOffset + input.length();
             long count = 0;
             int position = inputOffset;
-            if (input.length() < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            if (input.length() < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
                 // As in findSpan, a short input reads the root table to its end.
                 while (position < inputEnd) {
                     long span = findSpanInRootTable(bytes, position, inputEnd, inputOffset, inputEnd);
@@ -944,12 +941,13 @@ abstract sealed class LiteralAlternationSpanMatcher
             int inputOffset = input.byteArrayOffset();
             int inputEnd = inputOffset + end;
             int firstPosition = inputOffset + start;
-            // With fewer than MINIMUM_START_LITERAL_FILTER_BYTES left, every route reads the root table
-            // to the input end: the filter loop needs that many bytes left, the productivity sample and
-            // the decline need 64 KiB, and a route chosen with less than 64 KiB left holds to the end.
-            // Going straight to the root-table loop skips choosing the route. Such a search neither
-            // reads nor updates the cursor, whose route stays within the input.
-            if (inputEnd - firstPosition < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            // With fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES left, every route reads the
+            // root table to the input end: the filter loop needs that many bytes left, the
+            // productivity sample and the decline need 64 KiB, and a route chosen with less than
+            // 64 KiB left holds to the end. Going straight to the root-table loop skips choosing the
+            // route. Such a search neither reads nor updates the cursor, whose route stays within
+            // the input.
+            if (inputEnd - firstPosition < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
                 return findSpanInRootTable(bytes, firstPosition, inputEnd, inputOffset, inputEnd);
             }
             int position = firstPosition;
@@ -1179,7 +1177,7 @@ abstract sealed class LiteralAlternationSpanMatcher
         @Override
         boolean usesStartLiteralFilter(int length)
         {
-            return length >= MINIMUM_START_LITERAL_FILTER_BYTES;
+            return length >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
         }
 
         @Override
@@ -1215,7 +1213,7 @@ abstract sealed class LiteralAlternationSpanMatcher
             int inputEnd = inputOffset + input.length();
             long count = 0;
             int position = inputOffset;
-            if (input.length() < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            if (input.length() < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
                 while (position < inputEnd) {
                     long span = findSpanInRootTable(bytes, position, inputEnd, inputOffset, inputEnd);
                     if (span < 0) {
@@ -1267,7 +1265,7 @@ abstract sealed class LiteralAlternationSpanMatcher
             int inputOffset = input.byteArrayOffset();
             int inputEnd = inputOffset + end;
             int firstPosition = inputOffset + start;
-            if (inputEnd - firstPosition < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            if (inputEnd - firstPosition < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
                 return findSpanInRootTable(bytes, firstPosition, inputEnd, inputOffset, inputEnd);
             }
             int position = firstPosition;

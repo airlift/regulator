@@ -87,7 +87,9 @@ abstract sealed class CompiledPattern
     // least this many it takes the route whose vector scan skips the bytes no match can start at,
     // or must stop at. On BenchmarkPatternDispatch's 16- to 64-byte rows the table routes won,
     // and on its 1024-byte rows each lost to the vector scan it had replaced; each gate names its
-    // own measurement. A vector call's setup costs more than it saves on fewer bytes.
+    // own measurement. A vector call's setup costs more than it saves on fewer bytes. The literal
+    // alternation's start literal filter also leaves short everyday values on the alternation's
+    // root table, the route they had before the filter.
     static final int MINIMUM_LONG_SEARCH_BYTES = 64;
     // Boolean matches of a plan that allows it run on the ordinary engine up to this input
     // length. The forked OPTIONALS and OPTIONAL_RETRY plans lost to the ordinary engine on every
@@ -117,10 +119,6 @@ abstract sealed class CompiledPattern
     // input skip the DFA. Text that makes such a DFA quit in one search usually does so in the
     // next, and each quit costs a DFA start before the fallback engines run.
     static final int DFA_QUIT_STREAK_LIMIT = 4;
-
-    // The first-byte prefix scan restarts its word scan after each false candidate, which on rows
-    // shorter than this many bytes costs more than the substring search.
-    private static final int EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES = 64;
 
     // The results of matchOnPreEngineMatcher.
     private static final int PRE_ENGINE_NO_MATCH = 0;
@@ -2147,7 +2145,7 @@ abstract sealed class CompiledPattern
     /// later one, so one that ends past `end` leaves none in the range. The prefix scan reads only
     /// the range when [#exactLiteralSpanUsesPrefixScan(int)] selects it from the bytes remaining in
     /// `input` after `start`. Otherwise the substring search may read fewer than
-    /// {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes past `end`. Thus a caller's
+    /// {@value LiteralSearchKernel#MINIMUM_SEARCH_WINDOW_BYTES} bytes past `end`. Thus a caller's
     /// finds of short ranges across a long input read each byte a bounded number of times.
     /// A group-zero [RegexpMatcher#find()] runs this as the pattern's span search, and the
     /// one-shot unanchored searches of a pattern without captures, through
@@ -2186,11 +2184,13 @@ abstract sealed class CompiledPattern
 
     /// Returns whether [#findExactLiteralSpan(Slice,int)] searches `remainingBytes`
     /// with the prefix scan rather than the substring search: when at least
-    /// {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes remain, or when the byte
+    /// {@value LiteralSearchKernel#MINIMUM_SEARCH_WINDOW_BYTES} bytes remain, or when the byte
     /// frequencies chose a probe byte other than the literal's first byte.
     boolean exactLiteralSpanUsesPrefixScan(int remainingBytes)
     {
-        return remainingBytes >= EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES || partialProg.prefixAccelProbeOffset() != 0;
+        // The first-byte prefix scan restarts its word scan after each false candidate, which on
+        // shorter rows costs more than the substring search.
+        return remainingBytes >= LiteralSearchKernel.MINIMUM_SEARCH_WINDOW_BYTES || partialProg.prefixAccelProbeOffset() != 0;
     }
 
     /// Answers [#findExactLiteralSpan(Slice,int)] and [#findExactLiteralSpan(Slice,int,int)] with
