@@ -2340,8 +2340,10 @@ final class Prog
 
     /// Charges the literal set to the DFA allowance of `allowance`. The set only saves work, so it
     /// is decided after every other charge and a budgeted allowance keeps it only where the rest
-    /// still leaves the forward DFAs the memory they need to initialize: a budget that compiles
-    /// without the Vector API then gives the same OnePass decision, routes, and DFA minimum with it.
+    /// still leaves the forward DFAs the memory they need to initialize, which for them is their
+    /// minimum: the set exists only beside a prefix scan, which replaces their start-byte tables,
+    /// and a lowered program that holds the allowance begins with the same prefix. A budget then
+    /// gives the same OnePass decision, routes, and DFA minimum with the set as without it.
     private void chargePrefixLiteralSet(Prog allowance)
     {
         long setMemory = prefixLiteralSetMemory();
@@ -3268,8 +3270,12 @@ final class Prog
     }
 
     /// Whether taking `reservation` bytes from the DFA memory budget leaves the first-match and
-    /// longest-match DFAs, which this program's searches build, each the memory it needs to
-    /// initialize. A program whose assertions the DFA cannot run builds neither.
+    /// longest-match DFAs, which this program's searches build, each at least its minimum memory.
+    /// The minimum leaves out the start-byte tables of a forward program, so it is the memory a
+    /// DFA needs to initialize only in a program that builds none, such as one whose prefix scan
+    /// replaces them or that can reach an assertion before its first byte; for any other program,
+    /// see [#leavesDfaInitialization(long,Dfa.DfaInstance.Kind)]. A program whose assertions the
+    /// DFA cannot run builds neither DFA.
     boolean leavesDfaMinimum(long reservation)
     {
         if (reservation > dfaMemory) {
