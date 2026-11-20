@@ -26,7 +26,6 @@ import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
-import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -316,9 +315,7 @@ public class TestRequiredBytes
 
         // A gated one-byte search, for the email's `@` and the `=` before a case-insensitive
         // literal, runs at every length in place of the required bytes' check on the ordinary
-        // engine's route, which, for a pattern on the literal-neighbor plan, as the email is, runs
-        // only when that matcher leaves the find undecided, and the pattern keeps no required
-        // bytes.
+        // engine's route, and the pattern keeps no required bytes.
         for (String pattern : List.of(EMAIL, NOQA_ASSIGNMENT)) {
             for (Map.Entry<String, CompiledPattern> compiled : compile(pattern).entrySet()) {
                 String description = "%s %s".formatted(compiled.getKey(), pattern);
@@ -351,9 +348,8 @@ public class TestRequiredBytes
             }
         }
 
-        // A window without `@` is rejected at every short length, by the literal-neighbor matcher
-        // in full-Slice find and by the search in a matcher's find, so neither find starts the
-        // forward DFA.
+        // A window without `@` is rejected at every short length, by the search in full-Slice
+        // find and in a matcher's find, so neither find starts the forward DFA.
         for (int length : new int[] {0, 7, 8, 63, RequiredBytes.SHORT_WINDOW_LIMIT - 1}) {
             Slice input = utf8Slice("x".repeat(length));
             for (Map.Entry<String, CompiledPattern> compiled : compile(EMAIL).entrySet()) {
@@ -736,13 +732,11 @@ public class TestRequiredBytes
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
         }
 
-        // Nor is the literal-neighbor find plan, which answers full-Slice boolean find alone: the
-        // matcher and count reject a long window that lacks the literal before any engine runs, as
-        // without the plan.
+        // `[a-z]+aa[a-z]+` keeps the check too: the matcher and count reject a long window that
+        // lacks the literal before any engine runs.
         for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+aa[a-z]+").entrySet()) {
             String language = entry.getKey();
             CompiledPattern pattern = entry.getValue();
-            assertThat(pattern.findPlanForDiagnostics()).as(language).isEqualTo(LITERAL_NEIGHBORS);
             assertThat(pattern.longWindowRequiredLiteral()).as(language).isNotNull();
             assertThat(pattern.count(utf8Slice(LONG_FILLER))).as(language).isZero();
             assertNoForwardDfa(pattern, language + " [a-z]+aa[a-z]+ count");
@@ -755,7 +749,6 @@ public class TestRequiredBytes
         // RE2's longest-match `[a-z]+::[0-9]+` has no inner literal search, so without the check
         // its count would build the DFA.
         Re2 longest = Re2.compile(utf8Slice("[a-z]+::[0-9]+"), Re2.Options.defaults().setLongestMatch(true));
-        assertThat(longest.findPlanForDiagnostics()).isEqualTo(LITERAL_NEIGHBORS);
         assertThat(longest.innerLiteralSearchForDiagnostics()).isNull();
         assertThat(longest.longWindowRequiredLiteral()).isNotNull();
         assertThat(longest.count(utf8Slice("x".repeat(512)))).isZero();

@@ -703,15 +703,6 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps the literal-neighbor matcher's find, which a full-Slice find of its pattern runs on
-    /// every input, small enough for C2 to inline into its route, and caps it at its size with the
-    /// one-byte literal's density sample. Raise the limit only after measuring the find again.
-    @Test
-    public void testLiteralNeighborFindStaysAtMeasuredSize()
-    {
-        assertThat(codeLength(LiteralNeighborMatcher.class, "find")).as("LiteralNeighborMatcher.find bytecode bytes").isPositive().isLessThanOrEqualTo(205);
-    }
-
     /// Keeps the RE2 run reader's ASCII entry, which a short run such as a quoted field's takes on
     /// every row, within MaxInlineSize, and its stop scan at the size it was added at: the scan
     /// stops at the run's stop byte or a non-ASCII byte with one compare per byte, and neither

@@ -1276,7 +1276,7 @@ public class TestTrinoRegexpFunctions
         List<MalformedInputRoute> routes = List.of(
                 new MalformedInputRoute("fixed-width byte", TrinoRegexp.compile(utf8("\\d{3}-\\d{2}")), "123-45é", regexp -> regexp instanceof TrinoRegexp.FixedWidthByteTrinoRegexp),
                 new MalformedInputRoute("character class", TrinoRegexp.compile(utf8("\\p{L}+")), "aé 中", regexp -> regexp.re2().hasCharacterClassSpan()),
-                new MalformedInputRoute("literal neighbors", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().literalNeighborMatcherForDiagnostics() != null),
+                new MalformedInputRoute("inner literal first", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().findsInnerLiteralFirstForDiagnostics()),
                 new MalformedInputRoute("ordered literals", TrinoRegexp.compile(utf8("first(?s:.*)second")), "firsté\nsecond", TrinoRegexp::usesOrderedLiteralMatcherForDiagnostics),
                 new MalformedInputRoute("dot-star literal", TrinoRegexp.compile(utf8(".*ab.*")), "éab\nab", TrinoRegexp::usesDotStarLiteralSpanMatcherForDiagnostics),
                 new MalformedInputRoute("literal alternation", TrinoRegexp.compile(utf8("WARN|é中")), "WARN é中", regexp -> regexp.literalAlternationSpanMatcher() != null),

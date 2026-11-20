@@ -2422,92 +2422,12 @@ describes; no Trino pattern takes the plan, since Trino reads only UTF-8 and has
 no dot that matches any byte.
 
 Full-Slice boolean `find` of a class run, a literal, and a class run, such as
-lh3lh3's email `([^ @]+)@([^ @]+)`, decides from the byte on each side of each
-hit of the literal, in every language. A match exists exactly where some hit
-has a character of the first class just before it and one of the second just
-after it, since one character of each completes a match; spans, captures, and
-leftmost-first or leftmost-longest rules do not change whether one exists, so
-the plan serves this `find` alone. Every other operation runs the engine as
-without the plan, and a pattern on the plan keeps any long-window check for its
-required literal, with two effects on the other operations. The matcher's
-memory is reserved before the required bytes, so at a tight `maxMemory` it can
-leave no room for them where they fit without it: `[a-z]+ing[a-z]+` under RE2's
-POSIX options keeps no long-window check at 3,184 bytes. And the plan makes the
-pattern's shape a literal kernel's, so a capturing matcher search clears its
-group array once more before matching.
-
-The plan's analysis reads the normalized expression the pattern compiles, which
-must be exactly three elements, with captures looked through: a class repeated
-by `+`, a literal, and another such repeat. The simplifier leaves `{1,}` as `+`
-and expands a counted repeat such as `{1,3}` into nested optional copies, which
-keep the general engine, as do a side that can match empty, an assertion or any
-other element, and a required prefix. A class's ranges list every rune it
-matches, so a Java or Rust case-insensitive class, whose parser adds the case
-variants to its ranges and clears its fold flag, takes the plan, as
-`(?i)[a-z]+@[a-z]+` does in Java; a class or literal that keeps `FOLD_CASE` or
-`FULL_CASE_FOLD`, as an RE2 case-insensitive one does, keeps the engine. The
-literal must be ASCII, or any Latin-1 characters in a Latin-1 pattern, so each
-of its characters is one byte. The literal must also be at most 64 bytes long:
-the scan restarts one byte past each hit, so a longer literal that overlaps
-itself would be compared again in full at each of its positions, as the inner
-literal search's limit records.
-
-A neighbor byte decides alone when it is a whole character: any byte in Latin-1
-mode, under RE2's Latin-1 option or in Rust's bytes API with Unicode off, and an
-ASCII byte beside a UTF-8 class, in RE2, Java, Rust, and Trino. An ASCII byte is
-never part of another character, even in malformed input, since the compiled
-UTF-8 ranges take only continuation bytes after a lead byte, so a hit with an
-ASCII member on each side is a match, and one with an ASCII non-member on either
-side is not. A UTF-8 class with only ASCII members compiles to no range that
-matches a byte at or above 0x80, so such a byte rejects the hit too. Beside a
-UTF-8 class with non-ASCII members, that byte can end or begin one of its
-characters, or be malformed, so the first hit with such a byte beside it and no
-rejecting byte on either side ends the scan, and the general engine decides from
-the input's start, doing no more than without the plan beyond the scan up to
-that hit. A hit at either edge of the input has no byte on that side and is no
-match. The matcher holds the literal's search kernel, a 256-byte table of each
-byte's state on both sides, and for a one-byte literal a 256-entry candidate
-table marking the literal's byte for the density sample below, reserved from the
-forward DFA budget as the ordered-literal matcher's is, and
-[yields to the forward DFAs](#memory-budgets-and-dfa-caching). On lh3lh3's
-1,086,077 lines no email find reaches a DFA in any language, where 15,128 lines
-did. Under JMH, lh3lh3 email finds take 0.96 of their earlier time in
-RE2 and Rust on Graviton and tie on Intel, and finds of `[a-z]+e[a-z]+` over
-rebar's leipzig text take 0.49 of their earlier time on Graviton and 0.55 on
-Intel.
-
-The scan restarts one byte past each hit, so a frequent one-byte literal makes
-it stop often. Over digit-free prose joined into one line of 897,635 bytes,
-`[a-z]+ [0-9]+` stopped at all 169,755 spaces, one every 5.3 bytes, each
-rejected by the letter after it, where the general engine reads the line in one
-DFA pass; the find took 1.95 to 1.96 times its time without the plan on
-Graviton and 2.11 on Intel, in all four languages. So on an input of at least
-4 KiB a one-byte literal is first sampled as the DFA samples a small start-byte
-set, four 16-byte windows spread over the input that give up at four hits across
-the sample, and when the sample finds the byte dense the matcher leaves the find
-to the general engine before any scan, which decides from the input's start as
-without the plan. It is the rule by which the DFA's start-byte scan yields to
-stepping the DFA. The matcher samples whatever the vector width, where the DFA
-samples a set of up to three bytes only on vectors wider than 128 bits, since
-the matcher's scan is a word scan that stops at every hit on any hardware. A
-sparse literal, such as
-email's `@`, keeps the scan, and a longer literal is not sampled. Below 4 KiB
-the matcher scans without sampling, as the DFA does, so a shorter line of
-densely repeated literal bytes still restarts at each hit.
-
-That 4 KiB threshold is the DFA's own sampling threshold, kept after the one
-alternative measured against it, sampling from 256 bytes, did worse; the best
-cutoff is not located. The same prose was cut into lines at nominal 300, 1024
-and 4096-byte cuts; the 4096 cut spans the threshold, with 91 of its 220 lines
-at 4,096 bytes or more. On each cut the find without the plan itself runs about
-3.0 to 3.2 times slower than on the one line. On the 300-byte cut, in RE2 on
-Graviton, its IPC falls from 6.31 to 2.46, with about 105,000 branch misses per
-pass over the same 897,635 bytes, about 35 for each line, against about 300 on
-the one line, while restarting at each space takes about 61,000 misses per pass
-at an IPC of 3.96. On every cut the matcher beats the find without the plan by
-24 to 36%, in all four languages on both platforms. Sampling from 256 bytes
-instead hands those lines to the slower engine and takes 1.05 to 1.08 times the
-time without the plan on the 300-byte cut.
+lh3lh3's email `([^ @]+)@([^ @]+)`, once decided from the byte on each side of
+each hit of the literal, with a matcher of its own, a density sample for a
+frequent one-byte literal, and a share of the forward DFA budget. Without it,
+lh3lh3 email finds take 1.04 to 1.06 of their time on Graviton and 1.00 to 1.05
+on Intel, so it was removed. Such a pattern runs the ordinary engine, which
+runs the gated inner literal search first where the pattern qualifies.
 
 The literal-alternation matcher's root-table route restarts its trie at every
 input byte, and a filter stop compares the literals that begin with its byte,
@@ -2706,45 +2626,44 @@ and run once.
 
 ## Minimum Inner Literal Search Window
 
-A line-by-line search calls the matcher once per line, and most lines are short.
-A matcher's or full-Slice find whose search window is shorter than the inner
-literal search's minimum runs the ordinary engine, except that a gated one-byte
-search first rejects windows without a gate-passing hit. A whole-text count of
-a shorter text does not run the search either, except for a literal set as
-below. A matcher's find or a full-Slice boolean find first takes the
+A line-by-line search calls the matcher once per line, and most lines are
+short. A matcher's or full-Slice find whose search window is shorter than the
+inner literal search's minimum runs the ordinary engine, except that a gated
+one-byte search first rejects windows without a gate-passing hit. A whole-text
+count of a shorter text does not run the search either, except for a literal
+set as below. A matcher's find or a full-Slice boolean find first takes the
 [short-window required bytes reject](#short-window-required-bytes-reject) where
 the pattern keeps required bytes, which a ranged find and `findInto` do not;
-`.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks them.
-The search owns each window from its minimum. A one-of set of two or three
-distinct bytes checks only the windows below both that minimum and 256 bytes,
-except where only the class-run proof admits the search: an otherwise eligible
-pattern also checks windows of 256 bytes or more for the bytes, as
-[long windows](#required-literal-absence-on-long-windows) describes. A
-single required byte and a literal of two or more bytes keep their check of
-every window below 256 bytes, the byte with a scan as cheap as the search's
+`.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks
+them. The search owns each window from its minimum. A one-of set of two or
+three distinct bytes checks only the windows below both that minimum and 256
+bytes, except where only the class-run proof admits the search: an otherwise
+eligible pattern also checks windows of 256 bytes or more for the bytes, as
+[long windows](#required-literal-absence-on-long-windows) describes. A single
+required byte and a literal of two or more bytes keep their check of every
+window below 256 bytes, the byte with a scan as cheap as the search's
 single-byte scan: a check that changed with line length cost 4–6% on naturally
 mixed line lengths, 1.06x the time without required bytes on r9g and 1.04–1.06x
 on r8i for lh3lh3 lines under 128 bytes, although each length range alone tied.
-Where the pattern qualifies under `CompiledPattern.runsInnerLiteralSearchFirst`,
-a gated one-byte search, which checks every window, replaces the check of its
-own byte: it runs first in the ordinary engine's full-Slice boolean find, which,
-for a pattern on the [literal-neighbor
-plan](#boolean-partial-match-specializations), runs only when that matcher
-leaves the find undecided, and the pattern keeps no single required byte for it.
-A check that passes never decides the line and costs about 100 instructions per
-line, so with it lh3lh3's date lines of 64 to 127 bytes, which hold `/`, took
-1.08–1.12x their time without the check, while the search's scan decides the
-line itself. The search falls back where its first gate-passing hit lies within
-64 bytes of the line's start, too close to repay its reverse search and anchored
-confirmation; where a later hit lies in text a confirmation read; where its
-bounded reverse search would read back past the previous candidate; and where a
-DFA fails, as on a byte it cannot decode or past its memory. A fallback runs the
-ordinary engine's forward DFA and, where that DFA fails, its submatch engines,
-without searching again, or, while boolean searches skip a DFA that
+Where the pattern qualifies under
+`CompiledPattern.runsInnerLiteralSearchFirst`, a gated one-byte search, which
+checks every window, replaces the check of its own byte: it runs first in the
+ordinary engine's full-Slice boolean find, and the pattern keeps no single
+required byte for it. A check that passes never decides the line and costs
+about 100 instructions per line, so with it lh3lh3's date lines of 64 to 127
+bytes, which hold `/`, took 1.08–1.12x their time without the check, while the
+search's scan decides the line itself. The search falls back where its first
+gate-passing hit lies within 64 bytes of the line's start, too close to repay
+its reverse search and anchored confirmation; where a later hit lies in text a
+confirmation read; where its bounded reverse search would read back past the
+previous candidate; and where a DFA fails, as on a byte it cannot decode or
+past its memory. A fallback runs the ordinary engine's forward DFA and, where
+that DFA fails, its submatch engines, without searching again, or, while
+boolean searches skip a DFA that
 [thrashed](#count-fallback-after-repeated-bails), answers from the position
-automaton without the DFA. Entering the ordinary engine there instead, which ran
-the search a second time, took 1.08–1.11x the time without the search first on
-lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
+automaton without the DFA. Entering the ordinary engine there instead, which
+ran the search a second time, took 1.08–1.11x the time without the search first
+on lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
 lies near the start; running those steps directly takes 0.97–0.99x.
 
 A matcher's find of such a pattern enters the ordinary engine with no
@@ -2934,9 +2853,7 @@ A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
 setup. An exact literal, or one-of bytes, of a pattern with no other literal
 route checks long windows too. A route that starts where a match starts, or a
-scan plan, keeps a pattern from that check; the literal-neighbor find plan is no
-such route, since the pattern's other operations keep the ordinary engine. The
-check is described in
+scan plan, keeps a pattern from that check. The check is described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
@@ -3392,19 +3309,17 @@ scan plan, class counter, literal set or alternation, span, byte-run, or
 word-run matcher, or whole-input capture plan, and no inner literal search but
 one that only the [class-run proof](#inner-literal-class-run-prefix) admits.
 Such a pattern decides as it would without that search, so the proof neither
-adds the check nor takes it away. Nor does the [literal-neighbor find
-plan](#boolean-partial-match-specializations) take the check away: it answers
-full-Slice boolean find alone, and the pattern's other operations keep the
-ordinary engine. Nor does the [window literal search](#window-literal-search):
-BitState's capture of groups and a find that skips the DFA never run it, and
-without the check `((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz`
-that the check rejects with one scan. On the window search's own route the
-check scans the stretch before the next occurrence once more, which costs no
-more than the check and the DFA without the search. Every other search runs on
-every window the check would cover: only a literal set behind a class run has a
-[minimum window](#minimum-inner-literal-search-window) over 256 bytes. Taking
-the check away let a 16 KiB chunk without the literal enter the engine and run
-the search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
+adds the check nor takes it away. Nor does the [window literal
+search](#window-literal-search): BitState's capture of groups and a find that
+skips the DFA never run it, and without the check `((?:xy|z){0,2})xyz` ran
+BitState over 8 KiB without `xyz` that the check rejects with one scan. On the
+window search's own route the check scans the stretch before the next
+occurrence once more, which costs no more than the check and the DFA without
+the search. Every other search runs on every window the check would cover: only
+a literal set behind a class run has a [minimum
+window](#minimum-inner-literal-search-window) over 256 bytes. Taking the check
+away let a 16 KiB chunk without the literal enter the engine and run the
+search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
 adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
 `,z`, scanned a 16 KiB chunk that ends in `,z` twice, 1.19 to 1.29 times as
 long. Where an inner literal search stands in for the check, the routes that

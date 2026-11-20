@@ -1029,9 +1029,7 @@ public class TestInnerLiteralSearch
         // A gated one-byte search that checks short windows runs first in the ordinary engine's
         // full-Slice find, and the pattern keeps no required bytes of its byte, which the search's
         // scan checks: the date's `/`, the email's `@`, and the `=` before a case-insensitive
-        // literal, in every language. The email's full-Slice find reaches that route only where
-        // its literal-neighbor matcher leaves a hit undecided, or where the density sample finds
-        // its `@` dense.
+        // literal, in every language.
         for (String regex : List.of(DATE, EMAIL, NOQA_ASSIGNMENT)) {
             for (Language language : Language.values()) {
                 String description = "%s %s".formatted(language, regex);
@@ -1054,15 +1052,14 @@ public class TestInnerLiteralSearch
             assertThat(pattern.matcher(line).find()).as(description).isFalse();
             assertThat(forwardStateCount(pattern)).as(description).isZero();
         }
-        // The email's find reads the bytes beside each `@` instead; see
-        // TestPublicEngineAgreement.testLiteralNeighbors. For the date, the search alone answers a
-        // line without a hit that passes the byte gates, and one whose first candidate lies past
-        // the near-start bytes, which it confirms on the reverse prefix DFA and the forward
-        // first-match DFA; neither starts the earliest-match DFA of the ordinary engine's find. A
-        // first candidate near the start falls back to that DFA before any reverse search, and the
-        // DFA answers, with a match or, after the `1/2/` before an `x`, without one. Where a word
-        // boundary decodes the text, that DFA quits on the é before the dates, and the submatch
-        // engines find the date that language's word boundary admits.
+        // For the date, the search alone answers a line without a hit that passes the byte gates,
+        // and one whose first candidate lies past the near-start bytes, which it confirms on the
+        // reverse prefix DFA and the forward first-match DFA; neither starts the earliest-match DFA
+        // of the ordinary engine's find. A first candidate near the start falls back to that DFA
+        // before any reverse search, and the DFA answers, with a match or, after the `1/2/` before
+        // an `x`, without one. Where a word boundary decodes the text, that DFA quits on the é
+        // before the dates, and the submatch engines find the date that language's word boundary
+        // admits.
         for (Language language : Language.values()) {
             assertFindsFirst(language, DATE, "and/or a/b 1/x", false, false);
             assertFindsFirst(language, DATE, FILLER + "12/25/2024", true, false);
@@ -1111,9 +1108,7 @@ public class TestInnerLiteralSearch
         // search's minimum and the required bytes' limit, beside malformed UTF-8, and in a Slice
         // that starts and ends inside its array between bytes that would match. A case-insensitive
         // pattern searches for the `=` before its literal, whether `s` and `k` fold to ſ and the
-        // Kelvin sign or not. The email's full-Slice find runs its literal-neighbor matcher
-        // first, and the search-first route only where the matcher leaves a hit undecided, as
-        // beside malformed UTF-8, or where the density sample finds its `@` dense.
+        // Kelvin sign or not.
         Map<String, List<String>> pieces = Map.of(
                 DATE, List.of("1/2/33", "/", "a/b", "1/x", "12/25/2024", "3/4/"),
                 EMAIL, List.of("a@b", "@", " @ ", "a @b", "x@y.z"),
