@@ -159,10 +159,9 @@ exclude it.
 | 21 | [Literal neighbors](#literal-neighbors) | Find plan still general, no scan plan, no required prefix, `LiteralNeighborMatcher.analyze`; no lowered or tagged alternation program | yields |
 | 22 | [Literal alternation](#literal-alternation) | Find plan general, no scan plan, not longest-match, `LiteralAlternationSpanMatcher.analyze` | fits |
 | 23 | [Fixed-width byte span](#fixed-width-byte-span) | Find plan general, no scan plan, no literal-alternation candidate analyzed, no captures, bounded length up to 1,024 bytes, no inner literal of 2 or more bytes, `FixedWidthByteSpanMatcher.analyze`, and the matcher does not step aside for the engine's scans (`CP.yieldsToEngineRoute`) | fits |
-| 24 | [Short fixed-width matcher](#short-fixed-width-matcher) | As 23, but beside an inner literal of 2 or more bytes | fits |
-| 25 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
-| 26 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum (64 bytes beside a short fixed-width matcher) and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
-| 27 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
+| 24 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
+| 25 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
+| 26 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
 
 The tagged alternation program compiles in the program's DFA allowance; a
 third of what remains goes to its many-match DFA, which must initialize at
@@ -479,10 +478,8 @@ matcher to skip the forward DFA.
 literal, then counts on the inner or window literal search when the input
 reaches that search's count minimum (`CP.countInnerLiteralMatches`,
 `CP.countWindowLiteralMatches`, each handing off to the DFA count near dense
-candidates), else on the [short fixed-width
-matcher](#short-fixed-width-matcher), else with
-[`Dfa.countMatches`](#dfa-counting). A count whose matches all end at the
-inner literal's end stops at the reverse DFA
+candidates), else with [`Dfa.countMatches`](#dfa-counting). A count whose
+matches all end at the inner literal's end stops at the reverse DFA
 ([Inner Literal Counts To The Literal End](../../REGULATOR_DECISIONS.md#inner-literal-counts-to-the-literal-end)).
 
 ### forEachMatch and matchers
@@ -694,7 +691,7 @@ zero serve only a matcher that keeps no groups beyond it:
 | Route | Chosen when |
 |---|---|
 | [Single-byte table](#single-byte-table-and-byte-run) | Group zero; the pattern has one |
-| Span search | Group zero; `CP.groupZeroSpanSearch` (a `GroupZeroSpanSearch`): none with a single-byte table or class counter; else the first of the exact literal, literal alternation, literal set, dot-star literal, fixed width, and short fixed width |
+| Span search | Group zero; `CP.groupZeroSpanSearch` (a `GroupZeroSpanSearch`): none with a single-byte table or class counter; else the first of the exact literal, literal alternation, literal set, dot-star literal, and fixed width |
 | [Class counter](#class-run-counter) | `CP.classMatchCounter`, for group zero or a matcher that keeps the groups of a class-run alternation |
 | [Candidate start cursor](#candidate-start-cursor) | Group zero; none of the three above, and `CP.createCandidateStartCursor` builds one |
 | [Group-zero forward cursor](#group-zero-forward-cursor) | No class counter, and the matcher keeps only group zero or the pattern has a tagged alternation program; built on first use |
@@ -719,9 +716,7 @@ otherwise the ordinary engine, including for a one-pass search longer than
 A literal alternation with at least 64 bytes left hands off to the program:
 the candidate cursor, created on the first handoff, where its literals differ
 in length, and the group-zero forward cursor where they share one. A
-fixed-width matcher that bails hands off the same way. A short fixed-width
-matcher steps aside for the inner literal search when the window reaches that
-search's minimum.
+fixed-width matcher that bails hands off the same way.
 
 A matcher keeps adaptive state across its finds, and a matcher reset clears
 it: the quit streak, which counts failed unanchored searches in a row of a DFA
@@ -1262,9 +1257,7 @@ and confirm forward.
   program, whose DFA must initialize. A minimum window per kind
   (`InnerLiteralSearch.minimumSearchBytes`): 96 bytes for a single literal, 64
   for one byte or a class pair, and 256 for a literal set (1,024 behind a
-  class run). Beside a
-  short fixed-width matcher every minimum is 64 bytes, and a literal-set count
-  not behind a class run starts at 64 bytes.
+  class run). A literal-set count not behind a class run starts at 64 bytes.
 - **Falls back:** `FALLBACK` to the DFA when the first hit is within 64 bytes
   of the start, a candidate overlaps confirmed text (with byte gates, only
   hits that pass them count for these two), the reverse search would read back
@@ -1377,13 +1370,6 @@ program.
 [Fixed-width rare class scan](OPTIMIZATION_CATALOG.md#fixed-width-rare-class-scan),
 [Fixed-width block search](OPTIMIZATION_CATALOG.md#fixed-width-block-search),
 [Fixed-Width Rare Class Candidates](../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates).
-
-#### Short fixed-width matcher
-
-A fixed-width matcher kept beside an inner literal of 2 or more bytes, where
-the shape stays `ENGINE`. Counts and matcher finds run it on windows below the
-inner literal search's minimum.
-[Fixed-width byte span](OPTIMIZATION_CATALOG.md#fixed-width-byte-span).
 
 #### Disjoint suffix-repeat matcher
 

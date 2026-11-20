@@ -55,24 +55,21 @@ import static java.util.Objects.requireNonNull;
 ///
 /// A find never runs the search on a search window shorter than [#minimumSearchBytes], nor a count
 /// on a whole text shorter than [#minimumCountBytes], though a count's later searches cover
-/// whatever text remains; the exception is a pattern that keeps a short-search fixed-width matcher,
-/// which runs the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] whatever its literal
-/// kind. A shorter window, as for the many short lines of a line-by-line search, runs the ordinary
-/// engine, or that fixed-width matcher for a count or matcher find. A gated one-byte search, for a
-/// one-byte exact literal with byte gates, also runs on a shorter find window, as a
-/// [check][#checksShortWindows] that rejects a window without a gate-passing hit, and where the
-/// pattern qualifies the ordinary engine's full-Slice boolean find, which, for a pattern on the
-/// literal-neighbor plan, runs only when that matcher leaves the find undecided, runs it first, in
-/// place of a required-bytes check of its byte; see `CompiledPattern.runsInnerLiteralSearchFirst`.
-/// A matcher's find or a full-Slice boolean find first takes the short-window required bytes reject
-/// where the pattern keeps required bytes, though a ranged find and `findInto` do not: a literal of
-/// two or more bytes, and a single required byte, check windows shorter than 256 bytes, and a
-/// one-of set of two or three distinct bytes only those too short for the search, which itself
-/// scans a longer window for its literal before any engine runs unless the find skips the DFA. The
-/// minimums are where the literal's scan measured faster than the ordinary engine on r9g and r8i: a
-/// class pair's scan and a one-byte literal's from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], a
-/// longer single literal's word-at-a-time scan from
-/// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES], and a set's scalar filter from
+/// whatever text remains. A shorter window, as for the many short lines of a line-by-line search,
+/// runs the ordinary engine. A gated one-byte search, for a one-byte exact literal with byte
+/// gates, also runs on a shorter find window, as a [check][#checksShortWindows] that rejects a
+/// window without a gate-passing hit, and where the pattern qualifies the ordinary engine's
+/// full-Slice boolean find, which, for a pattern on the literal-neighbor plan, runs only when that
+/// matcher leaves the find undecided, runs it first, in place of a required-bytes check of its
+/// byte; see `CompiledPattern.runsInnerLiteralSearchFirst`. A matcher's find or a full-Slice
+/// boolean find first takes the short-window required bytes reject where the pattern keeps required
+/// bytes, though a ranged find and `findInto` do not: a literal of two or more bytes, and a single
+/// required byte, check windows shorter than 256 bytes, and a one-of set of two or three distinct
+/// bytes only those too short for the search, which itself scans a longer window for its literal
+/// before any engine runs unless the find skips the DFA. The minimums are where the literal's scan
+/// measured faster than the ordinary engine on r9g and r8i: a class pair's scan and a one-byte
+/// literal's from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], a longer single literal's
+/// word-at-a-time scan from [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES], and a set's scalar filter from
 /// [#MINIMUM_LITERAL_SET_SEARCH_BYTES], or behind a class run that only the class-run proof admits
 /// from [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES], where the vector scan takes over. A count of
 /// a set not behind a class run searches from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES]: one
@@ -518,11 +515,8 @@ final class InnerLiteralSearch
     /// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES] for a longer single literal, and
     /// [#MINIMUM_LITERAL_SET_SEARCH_BYTES] for a literal set, or
     /// [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] for one behind a class run that only the
-    /// class-run proof admits. A pattern with a short-search fixed-width matcher, whose shorter
-    /// counts and matcher finds run that matcher instead, runs the search from
-    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], and a search that
-    /// [checks short windows][#checksShortWindows] runs on them too; see
-    /// [CompiledPattern#searchesInnerLiteralWindow].
+    /// class-run proof admits. A search that [checks short windows][#checksShortWindows] runs on
+    /// shorter windows too; see [CompiledPattern#searchesInnerLiteralWindow].
     int minimumSearchBytes()
     {
         return minimumSearchBytes(literalSetFilter != null, classPairBytes != null, literalSearch == null ? 0 : literalSearch.literalLength(), behindClassRun);
@@ -569,8 +563,7 @@ final class InnerLiteralSearch
     /// The fewest bytes of a whole-text count's text that it runs the search on where the
     /// alternative is the ordinary engine: [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a literal
     /// set not behind a class run, whose one search continues across the count's matches, and
-    /// [#minimumSearchBytes] for every other kind. A pattern with a short-search fixed-width
-    /// matcher counts through the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES].
+    /// [#minimumSearchBytes] for every other kind.
     int minimumCountBytes()
     {
         // One count search continues across many matches, so a set's scan pays off sooner there

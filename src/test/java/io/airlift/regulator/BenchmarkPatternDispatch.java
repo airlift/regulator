@@ -71,8 +71,8 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// simplifies to a case-folded literal, so it takes no fixed-width route in any language, Trino
 /// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
 /// literal, `[a-z]shing`: every language, Trino included, keeps the DFA's inner literal search
-/// instead of the fixed-width matcher, which would check every `s`, and runs the matcher only for
-/// counts and matcher finds of fewer than 64 bytes, where the search does not run.
+/// instead of the fixed-width matcher, which would check every `s`. Shorter counts and finds run
+/// the ordinary engine.
 /// ORDERED_LITERALS, three literals in order with any text between them, is a control for the
 /// byte-gap ordered-literal find plan, which only RE2 Latin-1 or `\C` and Rust bytes-API patterns
 /// reach: its UTF-8 `(?s:.)` gaps match no malformed UTF-8, so RE2, Java, and Rust run the ordinary
@@ -97,7 +97,7 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// text of the others. LONG inputs contain padding, but anchored URL rows 4–6 reject before
 /// reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s`
 /// without its literal, so its SHORT rows find the literal within their first 64 bytes and its LONG
-/// rows only after them, the two sides of the inner literal search's 64-byte minimum skip. Each
+/// rows only after them, the two sides of the inner literal search's 96-byte minimum skip. Each
 /// target's rows mix matching and non-matching log lines, requests, URLs, or prose.
 ///
 /// Where a route above names no language, it is the route of RE2, Java, and Rust. Trino compiles

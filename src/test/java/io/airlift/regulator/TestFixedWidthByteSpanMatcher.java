@@ -32,7 +32,6 @@ import java.util.stream.IntStream;
 import static io.airlift.regulator.CompiledPattern.shouldAnalyzeFixedWidthByteSpanForTrino;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
-import static io.airlift.regulator.TestingPatternShapes.assertProgramSearchUnless;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
 import static io.airlift.regulator.TestingTrinoJoni.joniPattern;
@@ -1097,11 +1096,11 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
-    public void testMultiByteInnerLiteralKeepsTheDfaExceptOnShortSearches()
+    public void testMultiByteInnerLiteralKeepsTheDfa()
     {
         // The matcher would check every s for [a-z]shing, which English text holds far more often
         // than shing, so boolean find, and count and matcher find on long inputs, keep the DFA's
-        // search for the inner literal; the last block below covers the short searches.
+        // search for the inner literal; the last block below covers the short searches too.
         for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns("[a-z]shing").entrySet()) {
             String label = entry.getKey();
             CompiledPattern pattern = entry.getValue();
@@ -1111,8 +1110,9 @@ public class TestFixedWidthByteSpanMatcher
         }
 
         // Trino follows the same rule: its plain subtype answers contains, and count, on the
-        // ordinary engine, which searches for shing in inputs of at least MINIMUM_LONG_SEARCH_BYTES,
-        // and agrees with RE2's general engine; the last block below covers shorter counts.
+        // ordinary engine, which searches for shing in inputs of at least
+        // MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, and agrees with RE2's general engine; the last block
+        // below covers shorter counts.
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[a-z]shing"));
         assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
         assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).isFalse();
@@ -1139,34 +1139,21 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(classPair.count(input)).as(text).isEqualTo(expectedCount);
         }
 
-        // A pattern with a short-search fixed-width matcher runs the inner literal search from
-        // MINIMUM_LONG_SEARCH_BYTES, for a single literal, whose own minimum is longer, as for a
-        // class pair. On fewer bytes every language, Trino included, counts and finds matcher
-        // spans with that matcher, which builds no program search, while full-Slice find stays on
+        // A pattern that keeps the inner literal search holds no fixed-width matcher, so every
+        // language, Trino included, counts and finds matcher spans around the search's minimum on
         // the engine. Each search covers the last bytes of a 1024-byte input that ends in a match,
-        // so the find that resumes after the match has no bytes left. Every match of [a-z]shing
-        // ends at its literal's end, so its count of the 95-byte input, whose hit lies past the
-        // near-start fallback, confirms the hit on the reverse prefix DFA alone.
+        // so the find that resumes after the match has no bytes left.
         for (Map.Entry<String, String> example : List.of(Map.entry("[a-z]shing", "ishing"), Map.entry("[a-z][?!.][\"']x", "a?\"x"))) {
             String expression = example.getKey();
             int matchStart = 1024 - example.getValue().length();
             Slice longInput = utf8Slice("x".repeat(matchStart) + example.getValue());
-            for (int length : List.of(CompiledPattern.MINIMUM_LONG_SEARCH_BYTES - 1, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1)) {
+            for (int length : List.of(CompiledPattern.MINIMUM_LONG_SEARCH_BYTES - 1, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES)) {
                 Slice input = longInput.slice(longInput.length() - length, length);
-                boolean shortSearch = length < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
-                boolean literalEndCount = expression.equals("[a-z]shing") && length == InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1;
                 for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
                     String label = "%s count of %s bytes".formatted(entry.getKey(), length);
                     CompiledPattern pattern = entry.getValue();
-                    assertThat(pattern.shortFixedWidthByteMatcher()).as(label).isNotNull();
+                    assertThat(pattern.fixedWidthByteSpanMatcherForDiagnostics()).as(label).isNull();
                     assertThat(pattern.count(input)).as(label).isEqualTo(1);
-                    if (literalEndCount) {
-                        assertNoProgramSearch(pattern, label);
-                        assertThat(pattern.innerLiteralSearchForDiagnostics().reversePrefixProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(label).isNotNull();
-                    }
-                    else {
-                        assertProgramSearchUnless(shortSearch, pattern, label);
-                    }
                 }
                 for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
                     String label = "%s matcher find with %s bytes left".formatted(entry.getKey(), length);
@@ -1175,7 +1162,6 @@ public class TestFixedWidthByteSpanMatcher
                     assertThat(matcher.find(longInput.length() - length)).as(label).isTrue();
                     assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(matchStart, 1024);
                     assertThat(matcher.find()).as(label).isFalse();
-                    assertProgramSearchUnless(shortSearch, pattern, label);
                 }
                 for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
                     String label = "%s find of %s bytes".formatted(entry.getKey(), length);
@@ -1185,13 +1171,10 @@ public class TestFixedWidthByteSpanMatcher
             }
         }
 
-        // The short-search matcher follows the full matcher's order: where a forward DFA searches
-        // for the start literal filter of [Шш]abc, the engine keeps the short searches too.
+        // A short row with its match before the final `.`, of a pattern whose first character is a
+        // multibyte class.
         RustRegexp cyrillicPrefix = RustRegexp.compile(utf8Slice("[Шш]abc[0-9]"));
-        assertThat(cyrillicPrefix.shortFixedWidthByteMatcher() != null).isEqualTo(!VectorSupport.isAvailable());
-        Slice shortRow = utf8Slice("the row ends in a match: шabc7.");
-        assertThat(cyrillicPrefix.count(shortRow)).isEqualTo(1);
-        assertProgramSearchUnless(!VectorSupport.isAvailable(), cyrillicPrefix, "[Шш]abc[0-9] count of a short row");
+        assertThat(cyrillicPrefix.count(utf8Slice("the row ends in a match: шabc7."))).isEqualTo(1);
 
         // A one-byte inner literal is no rarer than the matcher's byte, so Trino keeps the
         // matcher on its route without a program.
