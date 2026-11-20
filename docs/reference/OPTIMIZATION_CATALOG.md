@@ -1593,28 +1593,20 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
 
 ### Class-run counter
 
-- **Origin:** First described by the JDK, whose greedy class repeat scans a
-  run of members directly ([Pattern.java][jdk-pattern] `CharPropertyGreedy`),
-  by Lamport (1975) for SWAR byte tests ([CACM 1975][lamport-swar]), and, for
+- **Origin:** First described by the JDK, whose greedy class repeat scans a run
+  of members directly ([Pattern.java][jdk-pattern] `CharPropertyGreedy`), by
+  Lamport (1975) for SWAR byte tests ([CACM 1975][lamport-swar]), and, for
   skipping to a member's start, by Hyperscan, whose shufti scan finds a sparse
   byte set with two nibble lookups ([shufti.c][hs-shufti]), and .NET, which
   finds the characters that can start a match with `IndexOfAny`
-  ([.NET 5 regex][dotnet5-blog]), and, for finishing a long run, by
-  Hyperscan, whose bounded-repeat engines scan forward for the first byte
-  outside the repeated class with vermicelli, shufti, or truffle
-  ([lbr.c][hs-lbr-scan], [castle.c][hs-castle-scan]), and .NET, whose
-  compiled greedy set loops find their end with a vectorized `IndexOfAnyExcept`
-  ([.NET 7][dotnet7-blog]); Inspired by gaps against the Rust regex
-  crate on class counts for the byte reads and branch-free updates ([#87],
-  [#144]), on Unicode class extraction ([#91]), and against Hyperscan on long
-  word runs ([#216]), and by rebar's `unicode/codepoints` any-one row, whose
-  count of one character made one DFA search per match ([#231]). Regulator:
-  splitting each run by the repeat's bounds ([#1], [design][d-class-count]),
-  counting single members as repeats of one ([#231]), a branch-free run
-  update ([#144]), the
-  member-start table, which also reads byte and ASCII runs ([#91], [#112]),
-  and the handoff of a long byte run to the
-  [self-loop exit-byte scan](#self-loop-exit-byte-scan) ([#216]).
+  ([.NET 5 regex][dotnet5-blog]); Inspired by gaps against the Rust regex crate
+  on class counts for the byte reads and branch-free updates ([#87], [#144]), on
+  Unicode class extraction ([#91]), and by rebar's `unicode/codepoints` any-one
+  row, whose count of one character made one DFA search per match ([#231]).
+  Regulator: splitting each run by the repeat's bounds ([#1],
+  [design][d-class-count]), counting single members as repeats of one ([#231]),
+  a branch-free run update ([#144]), and the member-start table, which also
+  reads byte and ASCII runs ([#91], [#112]).
 - **Where:** `BoundedCharacterClassCounter.analyzeRepeat`,
   `BoundedCharacterClassCounter.analyzeSingleMember`,
   `BoundedCharacterClassCounter.hasSparseSingleMembers`,
@@ -1624,19 +1616,13 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `BoundedCharacterClassCounter.countUtf8`,
   `BoundedCharacterClassCounter.findSpan`,
   `BoundedCharacterClassCounter.findMemberStart`,
-  `BoundedCharacterClassCounter.byteRunEnd`,
-  `BoundedCharacterClassCounter.vectorRunEnd`,
-  `BoundedCharacterClassCounter.packMemberRanges`,
-  `VectorByteSetScanner.findOutsideRanges`
+  `BoundedCharacterClassCounter.byteRunEnd`
 - **Applies when:** Non-nullable, unanchored greedy repeats of one class, and
   counts of one member of a class, any character, or any byte whose first
   bytes make up at least half of English text; on text of 4 KiB or more whose
   sample finds the members sparse, such a count prefers the DFA and keeps the
   counter for a DFA count that bails. Span searches serve matcher finds and
-  anchored matching, not counts. The run-end vector scan needs the Vector
-  API, a byte or ASCII class whose members fit in at most four ranges of at
-  most 128 bytes each, and a repeat whose maximum, if any, passes the handoff
-  length
+  anchored matching, not counts
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text
@@ -1645,23 +1631,18 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   run length from byte to byte. UTF-8 text of ASCII and two-byte characters is
   checked 32 bytes at a time with SWAR masks. Span searches skip bytes that
   cannot begin a member, with a table or, for a sparse class, a vector nibble
-  scan; for byte and ASCII classes, the table also reads the run. A byte run
-  still going after 128 bytes, or 64 with 64-byte vectors, is finished by
-  the self-loop exit-byte scan's range compares over whole vectors, with the
-  table reading the rest; a run that meets a nonmember before then returns
-  from the table loop. A count of one member of a dense class, any
-  character, or any byte runs on the counter as a repeat of one, and on text
-  of 4 KiB or more whose sample of four 256-byte windows finds the members
-  sparse, it falls back to the DFA count, which skips to their start bytes.
+  scan; for byte and ASCII classes, the table also reads the run. A count of
+  one member of a dense class, any character, or any byte runs on the
+  counter as a repeat of one, and on text of 4 KiB or more whose sample of
+  four 256-byte windows finds the members sparse, it falls back to the DFA
+  count, which skips to their start bytes.
   Counts of one `.`, `(?s:.)`, `[^\n]`, `\w` or `\pL` take 0.06 to 0.29 of
   their earlier time on Graviton in every language and 0.05 to 0.26 on Intel,
   and rebar's `unicode/codepoints` any-one row 0.36 to 0.38, where it made
   1.1 million DFA searches for each count ([#231]).
   Letter-run counts take 0.55 to 0.62 of their earlier time on Graviton and
   0.47 to 0.49 on Intel ([#144]), and finding every `\pL` or `\p{Ll}` letter
-  0.16 to 0.29 ([#91]). rebar's `i1095-word-repetition` ASCII search for
-  `[0-9A-Za-z_]{256}` takes 0.81 of its earlier time on Graviton and 0.55 on
-  Intel, and lines past 64 bytes cost Intel line-heavy text 5 to 10% ([#216]).
+  0.16 to 0.29 ([#91]).
 
 ## Scan plans
 
@@ -2599,7 +2580,6 @@ change is described.
 [#202]: https://github.com/airlift/regulator/pull/202
 [#203]: https://github.com/airlift/regulator/pull/203
 [#208]: https://github.com/airlift/regulator/pull/208
-[#216]: https://github.com/airlift/regulator/pull/216
 [#226]: https://github.com/airlift/regulator/pull/226
 [#229]: https://github.com/airlift/regulator/pull/229
 [#231]: https://github.com/airlift/regulator/pull/231
@@ -2765,10 +2745,8 @@ change is described.
 [hs-accel]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel.c#L138-L141
 [hs-accel-dfa]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel_dfa_build_strat.cpp#L517-L534
 [hs-accelcompile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accelcompile.cpp
-[hs-castle-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/castle.c#L523-L612
 [hs-check-prefix]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L2496-L2505
 [hs-check-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L991-L1021
-[hs-lbr-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/lbr.c#L422-L516
 [hs-limex]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/limex_runtime_impl.h#L164-L238
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658
 [hs-mcclellan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellan.c

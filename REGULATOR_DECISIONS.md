@@ -4808,23 +4808,19 @@ or Unicode `\w`, needs a bitset past them; such a class keeps the DFA on the
 matcher route rather than retain up to 136 KiB. A class with a tail stays
 eligible when the range before its tail ends below U+40000, since its bitset
 ends at that range, as for `\PL`, Rust's `\D`, or a class of every non-ASCII
-character. A counter's span search skips bytes
-that cannot begin a member before decoding, with one table load per byte or, for
-a sparse class, a vector scan after a short scalar prefix. A Latin-1 or
-byte-mode class, or a UTF-8 class of only ASCII members, marks exactly its
-members as start bytes, so the search reads its run on that table, one load per
-byte, cut at the repeat's maximum. When the Vector API is available, the class
-fits in four ranges of at most 128 bytes each, and the maximum allows a longer
-run, a run still going after 128 bytes, or 64 with 64-byte vectors, is finished
-by the self-loop exit byte scan over whole vectors and the table after them. In an unbounded repeat of a UTF-8
-class of every character, such as `(?s:.)+`, only a byte that begins no
-character under the lenient read ends a run, so once the run reaches the minimum
-the search skips to that byte without decoding. A class of every scalar value,
-as in Rust's `(?s:.)+` in bytes mode, reads strictly instead, so its run skip
-checks each character's UTF-8 form, ASCII eight bytes at a time, and stops at a
-malformed or truncated sequence or an encoded surrogate. A dot that matches
-newline counts as a class of every character, so count and Trino's class-span
-functions also take its repeats.
+character. A counter's span search skips bytes that cannot begin a member before
+decoding, with one table load per byte or, for a sparse class, a vector scan
+after a short scalar prefix. A Latin-1 or byte-mode class, or a UTF-8 class of
+only ASCII members, marks exactly its members as start bytes, so the search
+reads its run on that table, one load per byte, cut at the repeat's maximum. In
+an unbounded repeat of a UTF-8 class of every character, such as `(?s:.)+`, only
+a byte that begins no character under the lenient read ends a run, so once the
+run reaches the minimum the search skips to that byte without decoding. A class
+of every scalar value, as in Rust's `(?s:.)+` in bytes mode, reads strictly
+instead, so its run skip checks each character's UTF-8 form, ASCII eight bytes
+at a time, and stops at a malformed or truncated sequence or an encoded
+surrogate. A dot that matches newline counts as a class of every character, so
+count and Trino's class-span functions also take its repeats.
 
 Count also takes a pattern of one member, a class, any character, or any byte,
 such as `(?s:.)`, `.`, `[^\n]`, `\w`, or `\pL`, as a repeat of exactly one, in
@@ -4860,20 +4856,11 @@ decoding method, the decoding method being the search as it was before the byte
 runs, cleared Intel position but made Intel Trino replace 12% slower; do not
 repeat it without an Intel profile of replace.
 
-The vector handoff of a long byte run is chosen per vector width at class
-initialization. Handing off costs more than the table steps it saves on a run
-that ends soon after: on Graviton's 16-byte vectors a 64-byte handoff made
-subtitle lines 3% slower, and at 128 bytes the line rows are 1-1.3% slower,
-where long runs such as rebar's `i1095-word-repetition` take 0.81x the time. On
-Intel's 64-byte vectors the 64-byte handoff keeps long runs fastest (0.55x for
-`i1095-word-repetition`, 0.40x for 256-byte word runs), but 13.5% of Rust source
-lines and 7.2% of subtitle lines pass it, so those rows are 5-10% slower: the
-handoff adds 2-4% instructions, and on subtitles the run loop, which returns at
-a nonmember from inside the loop, takes about 2.5x main's branch misses. Testing
-each run's end against the limit after the loop instead won the Intel line rows
-but made Graviton word rows 3-4% slower, and Intel's 4-6%. Graviton is weighted
-over Intel, so the Intel line rows are accepted. 32-byte vectors keep the
-128-byte handoff unmeasured.
+A byte run still going after 64 or 128 bytes, by vector width, once handed off
+to a vector scan for its first nonmember. It was removed: it bought only
+rebar's constructed `i1095-word-repetition` ASCII search, which takes 1.25
+times as long without it on Graviton and 2.4 times on Intel, and it cost Intel
+line-heavy text 5 to 10%.
 
 `countUtf8`'s two-byte chunk check reads the SWAR constant `0x0101010101010101`
 from a field on aarch64, where C2 cannot encode its subtraction as an immediate
