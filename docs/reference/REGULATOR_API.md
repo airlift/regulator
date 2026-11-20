@@ -235,11 +235,7 @@ Within the budget, compilation and matching keep these limits:
   behind a leading assertion is kept only when the first-match and longest-match
   DFAs both keep their minimum memory beside it, and the folded run a find can
   search for in that literal's place only when they keep it beside both, a
-  minimum that leaves out a forward DFA's start-byte tables. A prefix's literal
-  set, which long vector prefix scans compare at each candidate, is decided
-  under a `maxMemory` after OnePass and every plan and route, so it never takes
-  memory they would use, and is kept only where the first-match and
-  longest-match DFAs then keep their minimum memory beside it. Other plans keep
+  minimum that leaves out a forward DFA's start-byte tables. Other plans keep
   their memory whenever it fits.
 - In every language, boolean `contains` of a contained literal such as
   `.*lit.*` and its dot-star literal spans search a window of fewer than 64

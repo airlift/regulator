@@ -65,9 +65,9 @@ what it covers. Compilation splits it as RE2 does:
   sees what the earlier ones left. With a [lowered boolean
   program](#lowered-boolean-program), the pattern's own program keeps no DFA
   allowance and the lowered program holds the rest; the transparent start
-  literal and folded start run, restored OnePass tables, required bytes, and
-  prefix literal sets are charged to it, while the position automaton still
-  charges the pattern's own program.
+  literal and folded start run, restored OnePass tables, and required bytes are
+  charged to it, while the position automaton still charges the pattern's own
+  program.
 - The reverse share is one third. An inner or window literal search takes its
   memory from it first; the reverse program, compiled lazily on first need,
   gets the rest (`CP.reverseProgramMemory`).
@@ -98,7 +98,6 @@ also admits fewer routes:
   [start class filter](#start-class-filter)
   (`Dfa.DfaInstance.StartLiteralFilterSelection.select`,
   `Dfa.buildStartClassFilter`);
-- no prefix literal set (`Prog.configurePrefixAccelBytes`);
 - no folded literal alternation (`LiteralAlternationSpanMatcher.analyzeFolded`)
   and no Trino full-case-fold alternation;
 - no fixed-width block search and no literal-set root skip.
@@ -137,7 +136,7 @@ exclude it.
 |---|---|---|---|
 | 1 | [Compact class counter](#class-run-counter) | Not longest-match; a large Unicode class repeat, or a class-run alternation with captures (`CP.compactRouteRegexp`, `BoundedCharacterClassCounter.analyzeCompactRoute`); counter plus a placeholder program within the forward share. Returns at once with shape `CLASS_RUN`; a [retained count DFA](#retained-class-count-dfa) may be kept beside it | fits |
 | 2 | [Required prefix](#required-prefix) | The pattern is a concatenation of one or more start-of-text anchors followed directly by a literal (`Regexp.requiredPrefix`); a multiline `^` or a capture before the literal gives none, and a Trino full-case-fold literal qualifies only if its folds stay within ASCII | — |
-| 3 | Forward program | Always, from the suffix after any required prefix (`Compiler.compileNormalizedDeferringPrefixLiteralSet`); prefix acceleration and the folded prefix run are configured on it, and the required prefix stays on the pattern (`CP.requiredPrefix`) | throws if it does not fit |
+| 3 | Forward program | Always, from the suffix after any required prefix (`Compiler.compileNormalized`); prefix acceleration and the folded prefix run are configured on it, and the required prefix stays on the pattern (`CP.requiredPrefix`) | throws if it does not fit |
 | 4 | Final-line OnePass tables released | The program is one-pass only because of a Java or Trino final-line end; restored later if they yield | — |
 | 5 | [Exact literal](#exact-literal) | The pattern is one unanchored case-sensitive literal; its prefix scan is configured | throws if the shift table does not fit |
 | 6 | [Boolean plan kinds](#boolean-plan-kinds) | Always | — |
@@ -196,11 +195,9 @@ or nullable-start `find` as `LOWERED_PROGRAM`
 `CP.selectRoutes` first charges the routes that depend on the final shape, in
 order: the matcher [class counter](#class-run-counter), the
 [single-byte table](#single-byte-table-and-byte-run), the restored final-line
-OnePass tables (yields), the position automaton (yields), the final form of
-the required bytes (yields, stepping down from a long-window search to a
-short-window reject to none), and last the
-[prefix literal set](#prefix-acceleration) (leaves minimum). Then it picks one
-`Shape`:
+OnePass tables (yields), the position automaton (yields), and last the final
+form of the required bytes (yields, stepping down from a long-window search to
+a short-window reject to none). Then it picks one `Shape`:
 
 1. A compact class counter gives `CLASS_RUN`.
 2. Otherwise the find plan decides: `GENERAL` gives `ENGINE`;
@@ -283,8 +280,8 @@ pattern needs (`CP.requiredProgramBudget`, `CP.withRequiredTrinoBudget`).
 | 11 | `TrinoRegexp` | Otherwise |
 
 `CP.tryReserveForwardDfaMemory` hands back the memory charge of the required
-bytes and the prefix literal set, charges the route, then charges the required
-bytes again with their step-down and decides the prefix literal set last. A
+bytes, charges the route, then charges the required bytes again with their
+step-down. A
 Trino pattern also keeps the analyzed repeat (`SingleByteRepeatMatcher.Repeat`)
 of a [single-byte repeat matcher](#single-byte-repeat-matcher), which is built
 on first use.
@@ -1093,14 +1090,10 @@ The vector pair scans live in `VectorPrefixScanner`.
 | Folded prefix masks | A `(?i)` prefix with no lead, scanned over its first 9 bytes for its first and last bytes unless another pair is more than four times rarer |
 | Single-byte prefix | A one-byte case-sensitive prefix; the DFA fuses the scan into its loop |
 | Rare-byte probe | A case-sensitive prefix of at least 2 bytes whose probe `ByteFrequencies.probeOffset` moved from an ASCII first byte to a byte more than four times rarer; checks whichever of the first and last bytes is farther from the probe; the default uniform frequencies never move it |
-| Pair vector scan | A case-sensitive prefix of at least 2 bytes, probe at the first byte, Vector API, window of at least 1 KiB; with a prefix literal set, the set's vector scan |
+| Pair vector scan | A case-sensitive prefix of at least 2 bytes, probe at the first byte, Vector API, window of at least 1 KiB |
 | SWAR pair scan | A case-sensitive prefix of at least 2 bytes, probe at the first byte, a first byte that is not ASCII, and a window under 1 KiB or no Vector API |
 | Repeated first byte | A case-sensitive prefix of at least 2 bytes, probe at the first byte, an ASCII first byte, and a window under 1 KiB or no Vector API; checks the last byte per candidate |
 
-- **Prefix literal set:** up to 8 literals that extend a prefix of 2 to 5
-  bytes and share one exact byte at a common offset past it, built only with
-  the Vector API and a probe at the first byte, charged last in `selectRoutes`
-  and kept only if the DFAs keep their minimum.
 - **Bounds:** a literal scan whose failed candidates compare more than
   64 bytes beyond its progress continues with Knuth-Morris-Pratt (KMP); the
   shift table is charged to the program and must fit.
