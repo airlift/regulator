@@ -43,14 +43,13 @@ public final class DfaCacheQualificationProbe
     private static void print(String scenario, Dfa.CacheSnapshot cacheSnapshot, Dfa.StateMemorySnapshot memorySnapshot)
     {
         System.out.printf(
-                "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
+                "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
                 scenario,
                 cacheSnapshot.stateCount(),
                 cacheSnapshot.cacheEntries(),
                 cacheSnapshot.pairedRows(),
                 cacheSnapshot.pairedTransitionMemory(),
                 cacheSnapshot.availableStateMemory(),
-                cacheSnapshot.fixedDistanceByteCandidateMemory(),
                 memorySnapshot.totalBytes(),
                 memorySnapshot.transitionBytes(),
                 memorySnapshot.stateMetadataBytes(),

@@ -800,8 +800,7 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   ahead of a word scan ([memchr.c][musl-memchr]); Inspired by a gap against
   the Rust regex crate on dense counts ([#144]). Regulator: the set derived
   from the program and capped at 64 bytes, the bytes packed into one `int`,
-  the range test as unsigned Vector API compares, byte sets at offsets up to
-  16, the four-byte run limit, sampling the text being searched to turn a
+  the range test as unsigned Vector API compares, the four-byte run limit, sampling the text being searched to turn a
   scan off, the count's sticky vector choice, and the start class filter's
   third offset, byte ranges rather than nibble tables, and admission by
   English byte frequencies ([#9], [#10], [#43], [#148], [#201],
@@ -813,8 +812,7 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   `VectorByteSetScanner.findThree`, `VectorByteSetScanner.findRange`,
   `VectorByteSetScanner.buildNibbleTables`,
   `VectorByteSetScanner.findNibbleTable`, `Dfa.findByteSet`,
-  `Prog.buildFixedDistanceByteCandidates`,
-  `Dfa.canUseFixedDistanceByteAcceleration`, `ScanPlanRun.scan`,
+  `ScanPlanRun.scan`,
   `VectorScanner.findRunStop`, `ScanPlanRun.matchMinimum`,
   `ScanPlanRun.findCandidate`, `VectorScanner.findRunCandidate`,
   `Dfa.isByteCandidateScanProductive`,
@@ -823,11 +821,10 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   `StartClassFilter.build`, `Prog.buildStartOffsetByteSets`,
   `VectorByteSetScanner.findClassSequence`, `Dfa.findByteSetCandidate`
 - **Applies when:** Unanchored forward searches whose start set is selective;
-  fixed-distance sets on unanchored forward DFA searches of at least 4 KiB;
   every scan-plan run, and run-led unanchored plans; the DFA's vector forms
   with the Vector API from 1 KiB, and scan-plan runs' vector scans at any
   length; the nibble form also serves the Aho-Corasick root skip and the
-  class-run counter. Before a start-byte or fixed-distance scan from 64 KiB,
+  class-run counter. Before a start-byte scan from 64 KiB,
   or a vector set scan from 4 KiB, the DFA samples four 16-byte windows spread
   over the input, and dense samples skip the scan or demote it to a scalar
   membership scan; sets of up to three bytes are sampled only on vectors wider
@@ -837,11 +834,7 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   filter skips that sample, though long searches still sample its
   productivity. The start class filter replaces the start set's own scan on
   unanchored forward DFA searches of at least 1 KiB with the Vector API and no
-  start literal filter of one-bit groups, where a productive fixed-distance
-  scan goes first; a find, count, or group-zero cursor search with under
-  64 KiB left does not sample that scan and takes either start filter when
-  English text holds the fixed-distance bytes more often than the filter
-  passes a position. The start class filter's start set needs a vector scan of
+  start literal filter of one-bit groups. The start class filter's start set needs a vector scan of
   its own and English text holding it at least once in 500 bytes, and its
   first two or three byte ranges, taken as independent, an English estimate of
   at most a sixteenth as often as the start bytes and under once in 500 bytes.
@@ -1171,7 +1164,7 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   `Dfa.DfaInstance.rebuildPairedTransitions`,
   `Dfa.DfaInstance.selectPairedRows`, `Dfa.DfaInstance.recordPairedSearch`
 - **Applies when:** Forward searches of at least 256 bytes from a non-matching
-  start state, when no prefix, long anchored prefix, fixed-distance, or
+  start state, when no prefix, long anchored prefix, or
   start-byte scan route takes the search; not reverse or many-match programs;
   never alongside a pointer table, which waits while paired rows exist and
   turns pairing off once allocated. After 16 paired-loop matches in a row

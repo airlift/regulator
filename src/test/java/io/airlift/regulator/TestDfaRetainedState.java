@@ -87,7 +87,7 @@ public class TestDfaRetainedState
         assertThat(dfa.retainedStateMemory())
                 .isEqualTo(dfa.stateMemorySnapshot().totalBytes());
         assertThat(reset.stateBudget() - reset.availableStateMemory())
-                .isEqualTo(dfa.stateMemorySnapshot().totalBytes() + reset.fixedDistanceByteCandidateMemory());
+                .isEqualTo(dfa.stateMemorySnapshot().totalBytes());
         assertThat(reset.transitionCapacity()).isEqualTo(cold.transitionCapacity());
         assertThat(reset.stateCapacity()).isEqualTo(cold.stateCapacity());
         assertThat(reset.stateReferenceCapacity()).isEqualTo(cold.stateReferenceCapacity());
