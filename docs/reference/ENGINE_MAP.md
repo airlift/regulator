@@ -848,14 +848,14 @@ to them.
   [Bounded DFA Pointer Transition Table](../../REGULATOR_DECISIONS.md#bounded-dfa-pointer-transition-table).
 - **Paired table:** composed two-byte transitions
   (`Dfa.DfaInstance.rebuildPairedTransitions`) for forward searches and counts
-  of at least 256 bytes. The whole table within 64 KiB of object rows, or
-  32 KiB as one flat table on aarch64; otherwise two selected rows within
-  16 KiB, or 8 KiB flat. Never for reverse or many-match DFAs, and never beside
-  a pointer table. Turned off after 16 first-match paired searches in a row
-  whose decoded pair match ends fewer than 16 bytes from the search start;
-  other outcomes leave that streak unchanged, and counts keep their own.
-  [Bounded paired table](OPTIMIZATION_CATALOG.md#bounded-paired-table),
-  [Bounded Paired DFA Transitions](../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions).
+  of at least 256 bytes. The whole table within 64 KiB of object rows;
+  otherwise two selected rows within 16 KiB. Never for reverse or many-match
+  DFAs, and never beside a pointer table. Turned off after 16 first-match
+  paired searches in a row whose decoded pair match ends fewer than 16 bytes
+  from the search start; other outcomes leave that streak unchanged, and counts
+  keep their own. [Bounded paired
+  table](OPTIMIZATION_CATALOG.md#bounded-paired-table), [Bounded Paired DFA
+  Transitions](../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions).
 
 #### Self-loop exit-byte scans
 
