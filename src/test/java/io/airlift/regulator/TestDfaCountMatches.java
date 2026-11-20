@@ -91,26 +91,46 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testShortFixedDistanceSkipUsesCompactContinuation()
+    public void testCountsAcrossLongGapsAndDenseClusters()
     {
-        // Sparse enough for the productivity sample of a 64 KiB search to take the fixed-distance
-        // scan, which a shorter search leaves for the start class filter.
-        Prog program = compile("[a-z]shing");
+        // Counts of a match whose second byte is selective, after 64 KiB of filler that holds that
+        // byte but no match; and, agreeing with Trino's matcher, of a colon after many early
+        // matches and a long gap before the last, and of a colon among a cluster of dense `:`
+        // bytes.
         String filler = "xxxxxxsxxxxxx";
-        String input = filler.repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES / filler.length() + 1) + "ashing";
+        String shing = filler.repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES / filler.length() + 1) + "ashing";
+        assertThat(Dfa.countMatches(compile("[a-z]shing"), utf8Slice(shing), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
 
-        assertThat(Dfa.countMatches(program, utf8Slice(input), Prog.MatchKind.FIRST_MATCH))
-                .isEqualTo(1);
-        assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).fixedDistanceShortSkipFallbackCount())
-                .isGreaterThan(0);
+        String colon = "[a-z]{3}:[0-9]+";
+        Slice colonSource = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "bbb:2" + ".".repeat(2_000));
+        Prog colonProgram = compile(colon);
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertThat(Dfa.countMatches(colonProgram, colonSource, Prog.MatchKind.FIRST_MATCH)).isEqualTo(trinoMatcherCount(colon, colonSource)).isEqualTo(65);
+        }
+
+        String wordColon = "\\w:[0-9]+";
+        Slice wordColonSource = utf8Slice("a:1" + ".".repeat(200) + "1:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000));
+        assertThat(Dfa.countMatches(compile(wordColon), wordColonSource, Prog.MatchKind.FIRST_MATCH)).isEqualTo(trinoMatcherCount(wordColon, wordColonSource)).isEqualTo(23);
     }
 
     @Test
-    public void testUnsampledFixedDistanceScanYieldsToStartLiteralFilter()
+    public void testCountAtSmallBudgetAcrossCacheResets()
     {
-        // The names' fifth bytes are common in English text, so their fixed-distance scan skips
-        // little. Below the sampling threshold, counts and group-zero searches use the more
-        // selective start literal filter.
+        // A 1 MiB budget, which the DFA's states fill and reset over 2 MiB of text. `(?i)` keeps
+        // the pattern off the fixed-width matcher. The input has no uppercase letters, so (?i)
+        // changes no match: pinned native RE2 finds 1,074 non-overlapping matches in this
+        // deterministic input, with 4 KiB of '!' after it, which neither begins nor ends a match.
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(1L << 20));
+        byte[] bytes = Arrays.copyOf(stateExplosionInput(2 * 1024 * 1024), 2 * 1024 * 1024 + 4096);
+        Arrays.fill(bytes, 2 * 1024 * 1024, bytes.length, (byte) '!');
+        assertThat(pattern.count(Slices.wrappedBuffer(bytes))).isEqualTo(1_074);
+        assertThat(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).resetCount()).isPositive();
+    }
+
+    @Test
+    public void testCountsAndCursorSearchesUseStartLiteralFilter()
+    {
+        // Counts and group-zero searches use the start literal filter.
         String expression = "(?i)Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty";
         String filler = "the eel slept here alone, see ".repeat(100);
         for (int nameCount : new int[] {7, 55}) {
@@ -122,7 +142,7 @@ public class TestDfaCountMatches
                     .as("length=%s", source.length())
                     .isEqualTo(trinoMatcherCount(expression, source))
                     .isEqualTo(nameCount);
-            assertUnsampledSearchesUseStartLiteralFilter(dfa, source);
+            assertSearchesUseStartLiteralFilter(dfa, source);
 
             RustRegexp pattern = compileRustBytesWithoutUnicode(expression);
             Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
@@ -134,7 +154,7 @@ public class TestDfaCountMatches
                 found++;
             }
             assertThat(found).as("length=%s", source.length()).isEqualTo(nameCount);
-            assertUnsampledSearchesUseStartLiteralFilter(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
+            assertSearchesUseStartLiteralFilter(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
         }
 
         // A single find of the match end, and one that only asks whether there is a match, take
@@ -142,25 +162,21 @@ public class TestDfaCountMatches
         Slice source = utf8Slice((filler + "irene ADLER ").repeat(7));
         Prog program = compileRustBytesWithoutUnicode(expression).forwardProgramForDiagnostics();
         assertThat(Dfa.search(program, source, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(filler.length() + "irene ADLER".length());
-        assertUnsampledSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
+        assertSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
         program = compileRustBytesWithoutUnicode(expression).forwardProgramForDiagnostics();
         assertThat(Dfa.search(program, source, false, Prog.MatchKind.FIRST_MATCH, false)).isNotNegative();
-        assertUnsampledSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH), source);
+        assertSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH), source);
     }
 
-    // ASCII case folding, as in rebar's sherlock-casei-en row; Unicode folding gives s and k
-    // multibyte variants, which leave no fixed-distance byte.
+    // ASCII case folding, as in rebar's sherlock-casei-en row.
     private static RustRegexp compileRustBytesWithoutUnicode(String expression)
     {
         return RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setUnicode(false));
     }
 
-    private static void assertUnsampledSearchesUseStartLiteralFilter(Dfa.DfaInstance dfa, Slice source)
+    private static void assertSearchesUseStartLiteralFilter(Dfa.DfaInstance dfa, Slice source)
     {
-        assertThat(dfa.fixedDistanceByteOffset()).isEqualTo(4);
-        // Without the vector scanners there is no filter, and the fixed-distance scan runs.
         assertThat(dfa.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
-        assertThat(dfa.fixedDistanceShortSkipFallbackCount() == 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
         assertThat(dfa.startLiteralFilterScanCount() > 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
     }
 
@@ -405,29 +421,6 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testSuccessfulCountDfaThrashingKeepsProductiveScanner()
-    {
-        // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-        // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
-        // and the pinned native RE2 count still holds.
-        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(1L << 20));
-        // 4 KiB of '!' after the text keep the last search, after the last match, as long as the
-        // fixed-distance scan needs (MIN_SELECTIVE_SCAN_SEARCH_BYTES). A dense tail under that
-        // cutoff would make the last search build a state per byte, which could reset the cache
-        // twice and bail the count. '!' neither begins nor ends a match.
-        byte[] bytes = Arrays.copyOf(stateExplosionInput(2 * 1024 * 1024), 2 * 1024 * 1024 + 4096);
-        Arrays.fill(bytes, 2 * 1024 * 1024, bytes.length, (byte) '!');
-        var input = Slices.wrappedBuffer(bytes);
-
-        // Pinned native RE2 finds 1,074 non-overlapping matches in this deterministic input.
-        assertThat(pattern.countMatches(input)).isEqualTo(1_074);
-        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics()
-                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
-        assertThat(dfa.byteScanFallbackCount()).isZero();
-    }
-
-    @Test
     public void testPointerTableThrashingKeepsDfa()
     {
         // These texts reach about 2,700 DFA states. A 1.75 MiB budget holds them all on object
@@ -485,7 +478,7 @@ public class TestDfaCountMatches
         Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
         assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
+        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024, 64)));
         int[] matchEnds = {0};
 
         long result = Dfa.countMatches(program, cached, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
@@ -550,7 +543,7 @@ public class TestDfaCountMatches
         assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         int initialResetCount = dfa.resetCount();
-        resetTwice(dfa, pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024))));
+        resetTwice(dfa, pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024, 64))));
         assertThat(dfa.countResetsTooOften(initialResetCount, false)).isTrue();
 
         dfa.beginSearch(true);
@@ -590,7 +583,7 @@ public class TestDfaCountMatches
         }
         text.append(match.repeat(4_000));
         Slice input = utf8Slice(text.toString());
-        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
+        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024, 64)));
         int startResetCount = dfa.resetCount();
 
         CountDownLatch resetsMade = new CountDownLatch(1);
@@ -1655,29 +1648,6 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testStartByteScanSetNotSampledForFixedDistanceSearches()
-    {
-        String expression = "[a-z]{3}:[0-9]+";
-        // The prefix, dense enough that no wider sample is taken, selects the scalar scan. Searches
-        // with at least 4 KiB remaining use the fixed-distance scan for the colon, so they must
-        // not sample start-byte density. A sample after a late prefix match would see only filler
-        // and promote the range scanner for the final span, which is shorter than 4 KiB and
-        // reaches the start-byte scan without sampling. Three letters keep the start class filter
-        // off, which the selection would keep without the sample.
-        Slice source = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "bbb:2" + ".".repeat(2_000));
-        Prog program = compile(expression);
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa.startClassFilter()).isNull();
-
-        for (int iteration = 0; iteration < 3; iteration++) {
-            assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
-                    .isEqualTo(trinoMatcherCount(expression, source))
-                    .isEqualTo(65);
-        }
-        assertThat(dfa.contiguousRangeScanCount()).isZero();
-    }
-
-    @Test
     public void testStartByteScanSetPromotionSurvivesRetry()
     {
         Prog program = compile("([a-z]+)-([0-9]+)");
@@ -1769,17 +1739,6 @@ public class TestDfaCountMatches
         // start-byte scan productive. The count holds that outcome across the cluster, so no
         // search walks the DFA; sampling at each search would reject the scan inside the cluster.
         assertSingleCountFallbacks("([a-z]+)-([0-9]+)", "abc-1" + ".".repeat(200) + "abc-1".repeat(20) + ".".repeat(70_000), 21, 0);
-        // The cluster's dense `:` bytes reject the fixed-distance scan, and the count holds that
-        // rejection. The searches whose start-scan samples also reject scanning walk the DFA: 15
-        // fallbacks with the start class filter, 16 with the start-byte scan alone. Holding the
-        // earlier productive fixed-distance result instead would leave none. The cluster repeats
-        // `1:1:`, which the start class filter passes at every digit, as densely as the start
-        // bytes; it would pass `a:1:` only at each letter.
-        assertSingleCountFallbacks(
-                "\\w:[0-9]+",
-                "a:1" + ".".repeat(200) + "1:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000),
-                23,
-                VectorSupport.isAvailable() ? 15 : 16);
     }
 
     private static void assertSingleCountFallbacks(String expression, String text, long expectedCount, int expectedFallbackCount)
@@ -1941,11 +1900,19 @@ public class TestDfaCountMatches
 
     private static byte[] stateExplosionInput(int length)
     {
+        return stateExplosionInput(length, 997);
+    }
+
+    // Random text with an x, which can end a match, every `xSpacing` bytes. With a spacing of 64,
+    // finds over it are short searches, which build the pointer table, and each adds few enough
+    // states to reset the DFA at most once.
+    private static byte[] stateExplosionInput(int length, int xSpacing)
+    {
         Random random = new Random(42);
         byte[] alphabet = "abcdefghijklmnopqrst \n,.;0123456789".getBytes(US_ASCII);
         byte[] input = new byte[length];
         for (int index = 0; index < input.length; index++) {
-            input[index] = index % 997 == 996 ? (byte) 'x' : alphabet[random.nextInt(alphabet.length)];
+            input[index] = index % xSpacing == xSpacing - 1 ? (byte) 'x' : alphabet[random.nextInt(alphabet.length)];
         }
         return input;
     }

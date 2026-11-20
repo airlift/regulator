@@ -86,11 +86,11 @@ public class TestDfaStartByteAcceleration
         assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, 1)).isFalse();
     }
 
-    /// The prefix, start-byte and fixed-distance byte scans land in the search's start state at
+    /// The prefix and start-byte scans land in the search's start state at
     /// each skip, so a start state that needs an assertion never skips, wherever the search starts:
     /// at the text start, after a word byte, and after a non-word byte, where no assertion holds
-    /// before the start. A start state that needs none skips from each of them. The start-byte and
-    /// fixed-distance gates are asserted directly; the prefix scan's gate is the same test.
+    /// before the start. A start state that needs none skips from each of them. The start-byte
+    /// gate is asserted directly; the prefix scan's gate is the same test.
     @Test
     public void testSkipNeedsStartStateFreeOfContext()
     {
@@ -102,10 +102,8 @@ public class TestDfaStartByteAcceleration
             int freeFlags = startFlags("the ", text, start);
             assertThat(Dfa.isContextFreeStart(boundaryFlags)).as("\\bthe from %s", start).isFalse();
             assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, boundaryFlags)).as("\\bthe from %s", start).isFalse();
-            assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, boundaryFlags, 8 * 1024)).as("\\bthe from %s", start).isFalse();
             assertThat(Dfa.isContextFreeStart(freeFlags)).as("the from %s", start).isTrue();
             assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, freeFlags)).as("the from %s", start).isTrue();
-            assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, freeFlags, 8 * 1024)).as("the from %s", start).isTrue();
         }
     }
 
@@ -673,7 +671,6 @@ public class TestDfaStartByteAcceleration
 
         assertThat(dfa.canStartByteAcceleration()).isTrue();
         assertThat(dfa.startLiteralFilter()).isNull();
-        assertThat(dfa.canFixedDistanceByteAcceleration()).isFalse();
         assertThat(Dfa.search(program, shortInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
         assertThat(dfa.byteScanFallbackCount()).isZero();
         assertThat(Dfa.search(program, longInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
@@ -681,7 +678,7 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testRejectedFixedDistanceScanUsesStartByteAcceleration()
+    public void testDenseNonMatchingInputUsesStartByteAcceleration()
     {
         Prog program = compile("[a-z]{8}-[0-9]{4}");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
@@ -689,7 +686,6 @@ public class TestDfaStartByteAcceleration
         Arrays.fill(input, (byte) '-');
 
         assertThat(dfa.canStartByteAcceleration()).isTrue();
-        assertThat(dfa.canFixedDistanceByteAcceleration()).isTrue();
         assertThat(Dfa.search(program, Slices.wrappedBuffer(input), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
         assertThat(dfa.byteScanFallbackCount()).isZero();
     }
@@ -1359,28 +1355,15 @@ public class TestDfaStartByteAcceleration
         assertThat(literals.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
         assertThat(literals.startClassFilter()).isNull();
 
-        // A fixed-distance byte still runs first on the searches long enough for its productivity
-        // sample. A shorter one takes the class filter, which English text passes less often than
-        // it holds the colon.
-        Prog fixedDistance = compile("[a-z]:[0-9]");
-        Dfa.DfaInstance fixedDistanceDfa = fixedDistance.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(fixedDistanceDfa.startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
-        assertThat(fixedDistanceDfa.canFixedDistanceByteAcceleration()).isTrue();
+        // Searches the class filter serves.
+        Prog classFiltered = compile("[a-z]:[0-9]");
         Slice text = Slices.utf8Slice("a".repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) + "x:7");
-        assertDfaMatchesNfa(fixedDistance, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
-        assertThat(fixedDistanceDfa.startClassFilterScanCount()).isZero();
+        assertDfaMatchesNfa(classFiltered, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
         text = Slices.utf8Slice("a".repeat(8 * 1024) + "x:7");
-        assertDfaMatchesNfa(fixedDistance, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
-        assertThat(fixedDistanceDfa.startClassFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
-        // A shorter search keeps the fixed-distance scan when English text holds its byte less often
-        // than the class filter passes a position.
-        Prog rareFixedDistance = compile("[a-z][0-9]{2}\\x01");
-        Dfa.DfaInstance rareFixedDistanceDfa = rareFixedDistance.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(rareFixedDistanceDfa.startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
-        assertThat(rareFixedDistanceDfa.canFixedDistanceByteAcceleration()).isTrue();
+        assertDfaMatchesNfa(classFiltered, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
+        assertThat(classFiltered.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startClassFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         text = Slices.utf8Slice("the quiet reader walks along the old road ".repeat(190));
-        assertThat(Dfa.search(rareFixedDistance, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
-        assertThat(rareFixedDistanceDfa.startClassFilterScanCount()).isZero();
+        assertThat(Dfa.search(compile("[a-z][0-9]{2}\\x01"), text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
 
         // A fixed-width pattern keeps its matcher: the matcher yields to a start literal filter but
         // not to a class filter, since the matcher's own scan for its rarest position replaces the
@@ -1466,68 +1449,7 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedDistanceByteSelectsMoreSelectiveCandidate()
-    {
-        Dfa.DfaInstance dfa = firstMatchDfa("[a-z]{8}-[0-9]{4}");
-        byte[] text = "............abcdefgh-1234".getBytes(StandardCharsets.UTF_8);
-
-        assertThat(dfa.stateBudget() - dfa.availableStateMemory())
-                .isEqualTo(dfa.retainedStateMemory());
-        assertThat(dfa.canFixedDistanceByteAcceleration()).isTrue();
-        long memoryAfterCandidateAnalysis = dfa.availableStateMemory();
-        assertThat(dfa.stateBudget() - memoryAfterCandidateAnalysis)
-                .isEqualTo(dfa.retainedStateMemory() + 304);
-        assertThat(dfa.fixedDistanceByteOffset()).isEqualTo(8);
-        assertThat(dfa.findFixedDistanceByteCandidate(text, 0, text.length)).isEqualTo(12);
-        byte[] offsetText = "....-.......abcdefgh-1234".getBytes(StandardCharsets.UTF_8);
-        assertThat(dfa.findFixedDistanceByteCandidate(offsetText, 4, offsetText.length - 4)).isEqualTo(12);
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, 0, 8 * 1024)).isTrue();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, 0, 4096)).isTrue();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, 0, 4095)).isFalse();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, 0, 1024)).isFalse();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(true, true, 0, 8 * 1024)).isFalse();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, false, 0, 8 * 1024)).isFalse();
-        assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, 1, 8 * 1024)).isFalse();
-
-        dfa.resetCacheExternal();
-        assertThat(dfa.availableStateMemory()).isEqualTo(memoryAfterCandidateAnalysis);
-    }
-
-    @Test
-    public void testFixedDistanceByteCandidateRetriesAfterCacheReset()
-            throws Exception
-    {
-        Dfa.DfaInstance dfa = firstMatchDfa("[a-z]{8}-[0-9]{4}");
-        Field availableStateMemory = Dfa.DfaInstance.class.getDeclaredField("availableStateMemory");
-        availableStateMemory.setAccessible(true);
-        availableStateMemory.setLong(dfa, 303);
-
-        assertThat(dfa.canFixedDistanceByteAcceleration()).isFalse();
-        assertThat(dfa.fixedDistanceByteCandidatesInitialized()).isTrue();
-
-        dfa.resetCacheExternal();
-        assertThat(dfa.fixedDistanceByteCandidatesInitialized()).isFalse();
-        assertThat(dfa.canFixedDistanceByteAcceleration()).isTrue();
-        assertThat(dfa.stateBudget() - dfa.availableStateMemory())
-                .isEqualTo(dfa.retainedStateMemory() + 304);
-    }
-
-    @Test
-    public void testFixedDistanceByteAccelerationRequiresOneOffsetOnEveryPath()
-    {
-        assertThat(firstMatchDfa("(?:abc|xyz)-[0-9]").canFixedDistanceByteAcceleration()).isTrue();
-        assertThat(firstMatchDfa("[a-z]:[0-9]").fixedDistanceByteOffset()).isEqualTo(1);
-        assertThat(firstMatchDfa("[a-z]{16}-[0-9]").fixedDistanceByteOffset()).isEqualTo(16);
-        assertThat(firstMatchDfa("[a-z]+-[0-9]").canFixedDistanceByteAcceleration()).isFalse();
-        // Unicode case folding adds multi-byte equivalents, so ':' is not at one byte offset.
-        assertThat(firstMatchDfa("(?i)[a-z]{4}:[0-9]").canFixedDistanceByteAcceleration()).isFalse();
-        assertThat(firstMatchDfa("a*").canFixedDistanceByteAcceleration()).isFalse();
-        assertThat(firstMatchDfa("\\b[a-z]{8}-[0-9]").canFixedDistanceByteAcceleration()).isFalse();
-        assertThat(firstMatchDfa("abc").canFixedDistanceByteAcceleration()).isFalse();
-    }
-
-    @Test
-    public void testFixedDistanceByteSearchMatchesPinnedUpstreamBoundary()
+    public void testUnanchoredSearchMatchesPinnedUpstreamBoundary()
     {
         Prog program = compile("[a-z]{8}-[0-9]{4}");
         byte[] text = new byte[8 * 1024];
@@ -1548,7 +1470,7 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedDistanceByteSearchResetsAfterCacheExhaustion()
+    public void testUnanchoredSearchResetsAfterCacheExhaustion()
             throws Exception
     {
         for (Prog.MatchKind matchKind : List.of(Prog.MatchKind.FIRST_MATCH, Prog.MatchKind.LONGEST_MATCH)) {
@@ -1560,7 +1482,6 @@ public class TestDfaStartByteAcceleration
             Dfa.DfaInstance dfa = program.getCachedDfa(dfaKind);
 
             assertThat(Dfa.search(program, Slices.EMPTY_SLICE, false, matchKind, true)).isEqualTo(SEARCH_NO_MATCH);
-            assertThat(dfa.canFixedDistanceByteAcceleration()).isTrue();
 
             Field availableStateMemory = Dfa.DfaInstance.class.getDeclaredField("availableStateMemory");
             availableStateMemory.setAccessible(true);
@@ -1576,32 +1497,14 @@ public class TestDfaStartByteAcceleration
 
             assertDfaMatchesNfa(program, context, 0, context.length(), matchKind, pattern);
             assertThat(dfa.resetCount()).isEqualTo(resetCount + 1);
-            assertThat(dfa.canFixedDistanceByteAcceleration()).isTrue();
         }
     }
 
     @Test
-    public void testFixedDistanceByteSearchSupportsCandidateSets()
-    {
-        Dfa.DfaInstance byteClass = firstMatchDfa("[a-z]{8}[01][0-9]{4}");
-        assertThat(byteClass.fixedDistanceByteOffset()).isEqualTo(8);
-        assertThat(byteClass.findFixedDistanceByteCandidate("........0....".getBytes(StandardCharsets.UTF_8), 0, 13)).isZero();
-        assertThat(byteClass.findFixedDistanceByteCandidate("........1....".getBytes(StandardCharsets.UTF_8), 0, 13)).isZero();
-        assertThat(byteClass.findFixedDistanceByteCandidate("........2....".getBytes(StandardCharsets.UTF_8), 0, 13)).isEqualTo(-1);
-
-        Dfa.DfaInstance foldedLiteral = firstMatchDfa("[a-z]{8}(?i:x)[0-9]{4}");
-        assertThat(foldedLiteral.fixedDistanceByteOffset()).isEqualTo(8);
-        assertThat(foldedLiteral.findFixedDistanceByteCandidate("........x....".getBytes(StandardCharsets.UTF_8), 0, 13)).isZero();
-        assertThat(foldedLiteral.findFixedDistanceByteCandidate("........X....".getBytes(StandardCharsets.UTF_8), 0, 13)).isZero();
-        assertThat(foldedLiteral.findFixedDistanceByteCandidate("........y....".getBytes(StandardCharsets.UTF_8), 0, 13)).isEqualTo(-1);
-    }
-
-    @Test
-    public void testTwoAndThreeFixedDistanceBytesUseSmallSetScanner()
+    public void testCandidateSetPatternsMatchAtTextEnd()
     {
         for (String pattern : List.of("[a-z]{8}[01][0-9]{4}", "[a-z]{8}[012][0-9]{4}")) {
             Prog program = compile(pattern);
-            Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
             byte[] text = new byte[8 * 1024];
             Arrays.fill(text, (byte) 'a');
             byte[] match = "abcdefgh01234".getBytes(StandardCharsets.UTF_8);
@@ -1609,18 +1512,14 @@ public class TestDfaStartByteAcceleration
 
             assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                     .isEqualTo(text.length);
-            assertThat(dfa.smallByteSetScanCount() > 0).as(pattern).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
     @Test
-    public void testFixedDistanceByteSearchMatchesNfa()
+    public void testUnanchoredSearchMatchesNfa()
     {
-        for (FixedDistanceCase testCase : fixedDistanceCases()) {
+        for (UnanchoredSearchCase testCase : unanchoredSearchCases()) {
             Prog program = compile(testCase.pattern());
-            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).canFixedDistanceByteAcceleration())
-                    .as("pattern %s", testCase.pattern())
-                    .isTrue();
 
             byte[] text = new byte[8 * 1024];
             Arrays.fill(text, (byte) 'a');
@@ -1635,14 +1534,11 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedDistanceByteSearchRandomizedDifferential()
+    public void testUnanchoredSearchRandomizedDifferential()
     {
         Random random = new Random(0);
-        for (FixedDistanceCase testCase : fixedDistanceCases()) {
+        for (UnanchoredSearchCase testCase : unanchoredSearchCases()) {
             Prog program = compile(testCase.pattern());
-            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).canFixedDistanceByteAcceleration())
-                    .as("pattern %s", testCase.pattern())
-                    .isTrue();
 
             for (int trial = 0; trial < 20; trial++) {
                 byte[] text = new byte[8 * 1024];
@@ -1669,7 +1565,7 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedDistanceByteSearchSemanticBoundaries()
+    public void testUnanchoredSearchSemanticBoundaries()
     {
         String pattern = "[a-z]{4}:(?:[0-9]|[0-9]{3})";
         Prog program = compile(pattern);
@@ -1683,7 +1579,6 @@ public class TestDfaStartByteAcceleration
         System.arraycopy(firstMatch, 0, backing, context.byteArrayOffset() + firstMatchStart, firstMatch.length);
         System.arraycopy(secondMatch, 0, backing, context.byteArrayOffset() + secondMatchStart, secondMatch.length);
 
-        assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).canFixedDistanceByteAcceleration()).isTrue();
         assertDfaMatchesNfa(program, context, 0, context.length(), Prog.MatchKind.FIRST_MATCH, pattern);
         assertDfaMatchesNfa(program, context, 0, context.length(), Prog.MatchKind.LONGEST_MATCH, pattern);
         assertThat(Dfa.search(program, context, 0, context.length(), false, Prog.MatchKind.FIRST_MATCH, true))
@@ -1703,7 +1598,7 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
-    public void testFixedDistanceByteSearchLatin1()
+    public void testUnanchoredSearchLatin1()
     {
         String pattern = "[\\x80\\x81]{4}:[0-9]";
         Prog program = compile(pattern, Regexp.LIKE_PERL | Regexp.LATIN1);
@@ -1714,28 +1609,12 @@ public class TestDfaStartByteAcceleration
         System.arraycopy(match, 0, text, matchStart, match.length);
         Slice context = Slices.wrappedBuffer(text);
 
-        assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).canFixedDistanceByteAcceleration()).isTrue();
         assertDfaMatchesNfa(program, context, 0, context.length(), Prog.MatchKind.FIRST_MATCH, pattern);
         assertDfaMatchesNfa(program, context, 0, context.length(), Prog.MatchKind.LONGEST_MATCH, pattern);
     }
 
     @Test
-    public void testAnchoredSearchDoesNotBuildFixedDistanceCandidates()
-    {
-        Prog program = compile("[a-z]{8}-[0-9]{4}");
-        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        byte[] text = new byte[8 * 1024];
-        Arrays.fill(text, (byte) 'a');
-        Slice context = Slices.wrappedBuffer(text);
-
-        assertThat(dfa.fixedDistanceByteCandidatesInitialized()).isFalse();
-        Dfa.search(program, context, 0, text.length, true, Prog.MatchKind.FIRST_MATCH, true);
-
-        assertThat(dfa.fixedDistanceByteCandidatesInitialized()).isFalse();
-    }
-
-    @Test
-    public void testFixedDistanceSearchRemainsCorrectWithConcurrentResets()
+    public void testUnanchoredSearchRemainsCorrectWithConcurrentResets()
             throws Exception
     {
         Prog program = compile("[a-z]{8}-[0-9]{4}");
@@ -1903,15 +1782,15 @@ public class TestDfaStartByteAcceleration
         return -1;
     }
 
-    private static List<FixedDistanceCase> fixedDistanceCases()
+    private static List<UnanchoredSearchCase> unanchoredSearchCases()
     {
         return List.of(
-                new FixedDistanceCase("[a-z]{8}-[0-9]{4}", "abcdefgh-1234"),
-                new FixedDistanceCase("(?:abc|xyz)-[0-9]", "xyz-7"),
-                new FixedDistanceCase("(?i)(?:ab|cd){2}:[0-9]", "AbCd:7"),
-                new FixedDistanceCase("[éĀ]{2}:[0-9]", "éĀ:7"),
-                new FixedDistanceCase("([a-z]{4}):([0-9]+)", "abcd:123"),
-                new FixedDistanceCase("(?:ab|cd){2}:[0-9]", "abcd:7"));
+                new UnanchoredSearchCase("[a-z]{8}-[0-9]{4}", "abcdefgh-1234"),
+                new UnanchoredSearchCase("(?:abc|xyz)-[0-9]", "xyz-7"),
+                new UnanchoredSearchCase("(?i)(?:ab|cd){2}:[0-9]", "AbCd:7"),
+                new UnanchoredSearchCase("[éĀ]{2}:[0-9]", "éĀ:7"),
+                new UnanchoredSearchCase("([a-z]{4}):([0-9]+)", "abcd:123"),
+                new UnanchoredSearchCase("(?:ab|cd){2}:[0-9]", "abcd:7"));
     }
 
     // Exact and case-insensitive name alternations from the 02-literal-alternate and name-alt
@@ -2045,7 +1924,7 @@ public class TestDfaStartByteAcceleration
         }
     }
 
-    private record FixedDistanceCase(String pattern, String match) {}
+    private record UnanchoredSearchCase(String pattern, String match) {}
 
     private record MixedSetCase(String pattern, String match) {}
 
