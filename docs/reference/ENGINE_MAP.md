@@ -834,9 +834,8 @@ and kind, shared by every thread searching the pattern.
 Inside `Dfa.search`, a forward search takes the first route that applies: a
 single-byte prefix loop; the [prefix scan](#prefix-acceleration); an anchored
 long-prefix integer loop for a case-sensitive required prefix of at least
-16 bytes; [fixed-distance byte candidates](#start-byte-scans) on at least
-4 KiB; the [pointer table](#dfa-step-forms) for a short search once the DFA has
-seen 16 short searches; a [start-byte scan](#start-byte-scans); the [paired
+16 bytes; the [pointer table](#dfa-step-forms) for a short search once the DFA
+has seen 16 short searches; a [start-byte scan](#start-byte-scans); the [paired
 table](#dfa-step-forms) on at least 256 bytes; then `Dfa.searchForward`. There
 an end-anchored or full-match search of at least 64 KiB samples
 [self-loops](#self-loop-exit-byte-scans) first; otherwise a search from a
@@ -949,8 +948,8 @@ run behind it, in place of the start bytes.
 
 #### Group-zero forward cursor
 
-The forward first-match DFA kept across a matcher's finds, with its
-fixed-distance candidates and byte-scan state; each find is one count-style
+The forward first-match DFA kept across a matcher's finds, with its byte-scan
+state; each find is one count-style
 forward search for the end (the search `Dfa.countMatches` makes for each
 match), and the start comes from the fixed width, an empty match, a single
 UTF-8 character's lead byte, a nullable pattern without assertions, or the
@@ -1145,11 +1144,7 @@ Each forward unanchored DFA instance without a prefix scan builds a start-byte
 set of up to 64 bytes (`Prog.buildStartByteCandidates`), scanned as packed
 bytes, a range, or nibble tables, after a sample shows candidates are sparse;
 the vector scans for start bytes, start literal filters, and class filters
-live in `VectorByteSetScanner`. Fixed-distance byte candidates use the byte
-set at an offset up to 16 bytes into the match when that set is smaller. A
-forward search or count of at least 4 KiB, or the creation of a group-zero
-forward cursor, requests them, and they are kept only when the DFA's free
-state memory holds them.
+live in `VectorByteSetScanner`.
 [Start-byte and byte-set scans](OPTIMIZATION_CATALOG.md#start-byte-and-byte-set-scans),
 [Small Candidate-Byte Vector Scan](../../REGULATOR_DECISIONS.md#small-candidate-byte-vector-scan).
 

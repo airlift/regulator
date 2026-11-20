@@ -29,8 +29,8 @@ import static io.airlift.regulator.Regexp.NON_GREEDY;
 import static java.util.Objects.requireNonNull;
 
 /// Immutable operation-independent facts derived from one normalized expression walk.
-/// Direction-specific start-byte and fixed-distance candidates remain program metadata because
-/// they are derived from compiled instructions rather than expression semantics.
+/// Direction-specific start-byte candidates remain program metadata because they are derived
+/// from compiled instructions rather than expression semantics.
 final class ExpressionAnalysis
 {
     private static final int MAX_RECURSIVE_DEPTH = 256;
