@@ -1126,7 +1126,8 @@ abstract sealed class CompiledPattern
         // from the program that holds the forward DFA budget: the lowered program, when there is
         // one. A pattern neither can serve keeps no literal, and its DFA keeps the memory. A
         // pattern whose reservation would leave that program's DFAs too little to initialize also
-        // keeps no literal.
+        // keeps no literal. The leading assertion leaves the program no start-byte tables, so the
+        // minimum that Prog.leavesDfaMinimum checks is all its forward DFAs need.
         Prog.FoldedStartRun foldedStartRun = null;
         if (transparentStartLiteral != null) {
             LiteralSearchKernel transparentStartLiteralSearch = new LiteralSearchKernel(Slices.wrappedBuffer(transparentStartLiteral));
