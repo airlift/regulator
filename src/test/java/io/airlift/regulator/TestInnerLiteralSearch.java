@@ -1134,16 +1134,16 @@ public class TestInnerLiteralSearch
     }
 
     @Test
-    public void testRequiredLiteralHandoffFindAgreesWithOrdinaryEngine()
+    public void testLongWindowInnerLiteralFindAgreesWithOrdinaryEngine()
     {
-        // The full-Slice find of a long window that hands the required literal's first occurrence
-        // to the inner literal search agrees with the ordinary engine in every language, as do its
-        // matcher and count routes, with the same lines as for a search that runs first, at
-        // lengths around the window limit and the 1 KiB vector scan minimum, lines of `x` alone
-        // among them: for the literal `,z`, whose search is for `,` with `z` its gate after, and
-        // for the search's own literal. A `,z` near the start, past a `,` before a letter outside
-        // ASCII, makes the search fall back, and where the forward DFA quits on that letter beside
-        // the word boundary, as Java's does, the submatch engines answer.
+        // The full-Slice find of a long window of a pattern with an inner literal search agrees
+        // with the ordinary engine in every language, as do its matcher and count routes, with the
+        // same lines as for a search that runs first, at lengths around the required bytes'
+        // 256-byte limit and the 1 KiB vector scan minimum, lines of `x` alone among them: for the
+        // literal `,z`, whose search is for `,` with `z` its gate after, and for the search's own
+        // literal. A `,z` near the start, past a `,` before a letter outside ASCII, makes the
+        // search fall back, and where the forward DFA quits on that letter beside the word
+        // boundary, as Java's does, the submatch engines answer.
         Map<String, List<String>> pieces = Map.of(
                 "\\w+,\\bz", List.of("ab,z", ",z", " ,z", "a,b", "\u00E9,z", "a,\u00E9a,z"),
                 "(\\w+),(z)", List.of("ab,z", ",z", " ,z", "a,b", "\u00E9,z"),
@@ -1153,76 +1153,7 @@ public class TestInnerLiteralSearch
             String regex = entry.getKey();
             List<byte[]> lines = lines(entry.getValue(), 255, 256, 300, 1023, 1024, 1100);
             for (Language language : Language.values()) {
-                assertThat(language.compiledPattern(regex).requiredBytesForDiagnostics().handsOffToInnerLiteralSearch()).as("%s %s", language, regex).isTrue();
                 assertAgreesWithOrdinaryEngine(language, regex, entry.getValue().getFirst(), lines);
-            }
-        }
-    }
-
-    @Test
-    public void testSearchFromCheckedHitAgreesWithSearch()
-    {
-        // The handoff finds the first occurrence of the required literal, and a search started
-        // there returns what the search of the whole window returns, and a window without one,
-        // such as one without a `,` at all, has no match: for `,z` behind the gated search for
-        // `,`, and for the search's own literal behind a gated or ungated search. The literal lies
-        // at 63 and 64 bytes, around the near-start fallback, after commas the gate after `,`
-        // rules out, after hits that fail a gate, and after a letter past ASCII or malformed UTF-8
-        // where a word byte could be. In windows of at least 1 KiB, whose length keeps the scan for
-        // `,z` from the first `,` on the vector pair scan, the first `,` leaves fewer bytes than
-        // `,z`, fewer than one vector, one vector, one vector of candidates, or one vector and part
-        // of another, with no `,z`, with `,z` at the very end, or with `,z` across the last
-        // boundary of the whole vectors of candidates.
-        Map<String, String> matches = Map.of("\\w+,\\bz", "a,z", "(\\w+)foobar(\\d)", "afoobar1", "[a-zA-Z]+ing", "aing");
-        Slice filler = utf8Slice(FILLER);
-        List<Slice> texts = new ArrayList<>();
-        for (String match : matches.values()) {
-            Slice rest = utf8Slice(match.substring(1));
-            texts.add(utf8Slice("-".repeat(62) + match + FILLER));
-            texts.add(utf8Slice("-".repeat(63) + match + FILLER));
-            texts.add(utf8Slice(FILLER + ("a," + "-".repeat(8)).repeat(6) + "b" + match));
-            texts.add(utf8Slice(FILLER + " ,z foobarx  ing " + FILLER + "b" + match));
-            texts.add(Slices.wrappedBuffer(ByteArrays.concat(filler, utf8Slice("\u00E9"), rest)));
-            texts.add(Slices.wrappedBuffer(ByteArrays.concat(filler, Slices.wrappedBuffer((byte) 0xFF), rest)));
-        }
-        int lanes = VectorSupport.isAvailable() ? VectorSupport.preferredByteLanes() : 16;
-        for (int windowLength : List.of(1024, 1100)) {
-            for (int restLength : List.of(1, 10, lanes, lanes + 1, lanes + lanes / 2)) {
-                int wholeVectorEnd = (restLength - 1) / lanes * lanes;
-                for (int literalIndex : IntStream.of(-1, restLength - 2, wholeVectorEnd - 1, wholeVectorEnd).distinct().toArray()) {
-                    if (literalIndex <= restLength - 2) {
-                        byte[] text = "x".repeat(windowLength).getBytes(UTF_8);
-                        int firstComma = windowLength - restLength;
-                        text[firstComma] = ',';
-                        if (literalIndex >= 0) {
-                            text[firstComma + literalIndex] = ',';
-                            text[firstComma + literalIndex + 1] = 'z';
-                        }
-                        texts.add(Slices.wrappedBuffer(text));
-                    }
-                }
-            }
-        }
-        for (String regex : matches.keySet()) {
-            for (Language language : Language.values()) {
-                String description = "%s %s".formatted(language, regex);
-                CompiledPattern pattern = language.compiledPattern(regex);
-                InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
-                RequiredBytes bytes = pattern.requiredBytesForDiagnostics();
-                assertThat(bytes.handsOffToInnerLiteralSearch()).as(description).isTrue();
-                for (Slice text : texts) {
-                    String textDescription = "%s on %s".formatted(description, text.toStringUtf8());
-                    int length = text.length();
-                    long expected = search.search(text, 0, length, 0, length);
-                    int literalStart = bytes.handoffIndexIn(text, 0, length, search);
-                    assertThat(literalStart).as(textDescription).isEqualTo(text.indexOf(utf8Slice(bytes.toString())));
-                    if (literalStart < 0) {
-                        assertThat(expected).as(textDescription).isEqualTo(Dfa.SEARCH_NO_MATCH);
-                    }
-                    else {
-                        assertThat(search.searchFromCheckedHit(text, 0, length, 0, length, literalStart)).as(textDescription).isEqualTo(expected);
-                    }
-                }
             }
         }
     }
@@ -1355,7 +1286,7 @@ public class TestInnerLiteralSearch
     private static String literal(InnerLiteralSearch search)
     {
         assertThat(search).isNotNull();
-        return Stream.of(search.literals())
+        return Stream.of(search.literalsForDiagnostics())
                 .map(literal -> new String(literal, UTF_8))
                 .collect(joining("|"));
     }

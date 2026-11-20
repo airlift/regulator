@@ -141,7 +141,7 @@ public class TestHotMethodSize
     @Test
     public void testInnerLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("searchGatedFrom", "searchUngatedFrom")) {
+        for (String method : List.of("searchGatedFrom", "searchUngated")) {
             assertThat(codeLength(InnerLiteralSearch.class, method))
                     .as("InnerLiteralSearch.%s bytecode bytes", method)
                     .isPositive()

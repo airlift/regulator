@@ -574,7 +574,7 @@ final class InnerLiteralSearch
     /// The literal, or the members of the literal set in alternation order, or for a class pair in
     /// class order. A case-insensitive
     /// literal has its case-insensitive letters lowered and its exact bytes unchanged.
-    byte[][] literals()
+    byte[][] literalsForDiagnostics()
     {
         if (foldedBytes != null) {
             return new byte[][] {foldedBytes.clone()};
@@ -583,13 +583,6 @@ final class InnerLiteralSearch
             return new byte[][] {literalSearch.literal()};
         }
         return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
-    }
-
-    /// The masks of a case-insensitive literal, `0x20` at each case-insensitive letter of its one
-    /// [#literals] member, or null for any other search.
-    byte[] foldedMasks()
-    {
-        return foldedMasks == null ? null : foldedMasks.clone();
     }
 
     /// The filter a literal set's search scans for its members with, or null for any other search.
@@ -605,44 +598,6 @@ final class InnerLiteralSearch
     boolean addedByClassRunProof()
     {
         return addedByClassRunProof;
-    }
-
-    /// Whether every match begins with the literal: the prefix before it matches only the empty
-    /// string, as the word boundary before `the` in `\bthe\b.*?,z` does, so the prefix consumes
-    /// no byte, and its reverse program reaches no byte instruction. A hit then lands where a
-    /// match would start, as a prefix scan's does, and not inside a match, as the hit for `,` in
-    /// `\w+,\bz` does; see `CompiledPattern.mayCheckRequiredLiteralOnLongWindows`.
-    boolean literalBeginsEveryMatch()
-    {
-        Prog program = reversePrefixProgram;
-        boolean[] visited = new boolean[program.size()];
-        // Each instruction is visited once and pushes at most three others, after the start.
-        int[] stack = new int[3 * program.size() + 1];
-        int stackPointer = 0;
-        stack[stackPointer++] = program.start();
-        while (stackPointer > 0) {
-            int instructionId = stack[--stackPointer];
-            if (instructionId <= 0 || instructionId >= program.size() || visited[instructionId]) {
-                continue;
-            }
-            visited[instructionId] = true;
-            long instruction = program.word(instructionId);
-            if (Prog.instOpcode(instruction) == InstOp.BYTE_RANGE) {
-                return false;
-            }
-            if (!Prog.instLast(instruction)) {
-                stack[stackPointer++] = instructionId + 1;
-            }
-            switch (Prog.instOpcode(instruction)) {
-                case ALT, ALT_MATCH -> {
-                    stack[stackPointer++] = Prog.instOut1(instruction);
-                    stack[stackPointer++] = Prog.instOut(instruction);
-                }
-                case CAPTURE, EMPTY_WIDTH, NOP -> stack[stackPointer++] = Prog.instOut(instruction);
-                default -> {}
-            }
-        }
-        return true;
     }
 
     /// The bytes the byte before the literal and the byte after it must be one of, each as a
@@ -744,22 +699,6 @@ final class InnerLiteralSearch
         return checksShortWindows;
     }
 
-    /// Whether the search is for the one literal `literal`, without case-insensitive letters.
-    boolean searchesExactLiteral(byte[] literal)
-    {
-        return literalSearch != null && foldedBytes == null && Arrays.equals(literalSearch.literalBytes(), literal);
-    }
-
-    /// Whether the gate after the literal admits the ASCII byte `value` alone: no other byte, and
-    /// not the window's end, which only a gate that word boundaries alone set admits.
-    boolean admitsOnlyAfterLiteral(byte value)
-    {
-        if (value < 0 || suffixGateFromWordBoundaries) {
-            return false;
-        }
-        return value < 64 ? suffixGate0 == 1L << value && suffixGate1 == 0 : suffixGate0 == 0 && suffixGate1 == 1L << value;
-    }
-
     /// The byte of a one-byte exact literal, as an unsigned value, or `-1` for every other literal
     /// kind.
     int oneByteLiteral()
@@ -856,19 +795,10 @@ final class InnerLiteralSearch
     /// of `text` lacks it. Every match holds that literal, so such a window holds no match. A
     /// route that skips the search scans for the literal in its place, since a pattern with a
     /// search the class-run proof does not [add][#addedByClassRunProof] never checks long windows
-    /// for this literal: such a search inside a match keeps the pattern from the long-window
-    /// check, and one for a literal that begins every match checks only for a literal beside it.
+    /// for this literal: such a search keeps the pattern from the long-window check.
     boolean windowLacksLiteral(Slice text, int start, int end)
     {
         return literalSearch != null && foldedBytes == null && nextLiteral(text, start, end) < 0;
-    }
-
-    /// Returns the Slice offset of the first hit of the search's literal in `[start, end)` of
-    /// `text`, before any gate, or -1, by the scan the search itself runs; see
-    /// `RequiredBytes.handoffIndexIn`.
-    int literalIndexIn(Slice text, int start, int end)
-    {
-        return nextLiteral(text, start, end);
     }
 
     /// Searches `[start, end)` of `text` with assertions seeing `[contextStart, contextEnd)`, and
@@ -899,44 +829,17 @@ final class InnerLiteralSearch
         if (hasByteGates) {
             return searchGated(text, contextStart, contextEnd, start, end, toLiteralEnd);
         }
-        return searchUngatedFrom(text, contextStart, contextEnd, start, end, start, toLiteralEnd);
+        return searchUngated(text, contextStart, contextEnd, start, end, toLiteralEnd);
     }
 
-    /// As [#search], for a caller that has already found `literalStart`, the first occurrence in
-    /// `[start, end)` of the literal of a search for one literal without case-insensitive letters,
-    /// or, where the gate after that literal admits one byte alone, the first occurrence of the
-    /// literal followed by that byte; see `CompiledPattern.findFromRequiredLiteral`. The search
-    /// starts there, rather than scanning the window from `start` again, and returns what [#search]
-    /// returns, unless hits before `literalStart` would make [#search] fall back. Before
-    /// `literalStart` lies no hit, or, where the gate after the literal admits one byte alone, none
-    /// that passes that gate, and a hit that fails a gate changes no state of the loop but its
-    /// count of [dense rejected hits][#MINIMUM_DENSE_REJECTED_HITS], so the loop reaches
-    /// `literalStart` as [#search] does. The caller's scan passed those earlier hits without
-    /// stopping at each, so they are not counted, and where [#search] would fall back on a dense
-    /// run of them, this search goes on from `literalStart`. A search without a gate falls
-    /// back on a first hit near the start, as the first step of [#search] does, and otherwise
-    /// continues as that loop does after its first scan.
-    long searchFromCheckedHit(Slice text, int contextStart, int contextEnd, int start, int end, int literalStart)
-    {
-        if (hasByteGates) {
-            return searchGatedFrom(text, contextStart, contextEnd, start, end, literalStart, false);
-        }
-        if (literalStart - start < MINIMUM_SKIPPED_BYTES) {
-            return FALLBACK;
-        }
-        return searchUngatedFrom(text, contextStart, contextEnd, start, end, literalStart, false);
-    }
-
-    // The search loop of a pattern without a byte gate, scanning from `firstScanStart`: `start`, or
-    // a hit that searchFromCheckedHit's caller supplied and searchFromCheckedHit judged past the
-    // near-start bytes.
-    private long searchUngatedFrom(Slice text, int contextStart, int contextEnd, int start, int end, int firstScanStart, boolean toLiteralEnd)
+    // The search loop of a pattern without a byte gate.
+    private long searchUngated(Slice text, int contextStart, int contextEnd, int start, int end, boolean toLiteralEnd)
     {
         // The reverse search may read back to the end of the previous candidate, and a candidate
         // may not start inside the text the previous confirmation read.
         int minimumMatchStart = start;
         int minimumLiteralStart = start;
-        int scanStart = firstScanStart;
+        int scanStart = start;
         while (end - scanStart >= minimumLiteralLength) {
             int literalStart = findLiteral(text, scanStart, end - scanStart);
             if (literalStart < 0) {

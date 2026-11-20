@@ -356,7 +356,7 @@ A full-`Slice` boolean `find` (Trino `contains`) dispatches on the shape:
 |---|---|---|
 | `ENGINE` | `CP.findOnEngine`, below | the ordinary engine |
 | `EXACT_LITERAL` | `CP.findOnExactLiteral`: the program's [prefix scan](#prefix-acceleration) | none |
-| `LITERAL_KERNEL` | `CP.findOnLiteralKernel` by find plan: `CONTAINS` on the [literal search kernel](#literal-search-kernel) for windows of at least 64 bytes where the pattern kept one, else `Slice.indexOf`; `EQUALS`, `STARTS_WITH`, `ENDS_WITH`, and the final-line forms by comparison; `ORDERED_LITERALS` on the [ordered-literal matcher](#ordered-literals); `LITERAL_NEIGHBORS` on the [neighbor matcher](#literal-neighbors) | neighbors only: `findOnEngine` when the matcher is undecided, or on a long window whose required literal hands off to the inner literal search |
+| `LITERAL_KERNEL` | `CP.findOnLiteralKernel` by find plan: `CONTAINS` on the [literal search kernel](#literal-search-kernel) for windows of at least 64 bytes where the pattern kept one, else `Slice.indexOf`; `EQUALS`, `STARTS_WITH`, `ENDS_WITH`, and the final-line forms by comparison; `ORDERED_LITERALS` on the [ordered-literal matcher](#ordered-literals); `LITERAL_NEIGHBORS` on the [neighbor matcher](#literal-neighbors) | neighbors only: `findOnEngine` when the matcher is undecided |
 | `LITERAL_ALTERNATION` | `CP.findOnLiteralAlternation`: the [trie](#literal-alternation), or the [literal set](#literal-set) when `literalSetFind` | trie `DECLINED`: the ordinary engine; no trie and no `literalSetFind`: `findOnEngine` |
 | `FIXED_WIDTH` | `CP.findOnFixedWidth`: [fixed-width span](#fixed-width-byte-span) | `BAILED`: `findOnEngine` |
 | `CLASS_RUN` | `CP.findOnClassRun`: [class-run counter](#class-run-counter) | none |
@@ -375,9 +375,8 @@ A full-`Slice` boolean `find` (Trino `contains`) dispatches on the shape:
 2. With [required bytes](#required-bytes), a window shorter than their window
    limit (256 bytes for most forms) is rejected when its first byte cannot
    start an anchored match, when it is shorter than the minimum match, or when
-   it lacks the bytes. A longer window either hands the required literal's
-   first hit to the inner literal search (`CP.findFromRequiredLiteral`) or is
-   rejected when it lacks the literal (`CP.longWindowLacksRequiredLiteral`).
+   it lacks the bytes. A longer window is rejected when it lacks the literal
+   (`CP.longWindowLacksRequiredLiteral`).
 3. A nullable pattern with no text-dependent assertions whose DFA can return an
    empty match at the start answers true
    (`CP.canReturnEmptyAtStartForBooleanMatch`).
@@ -1205,8 +1204,6 @@ two forms in the reverse order:
 |---|---|---|
 | Short-window reject | `CP.shortWindowLacksRequiredBytes`, in full-`Slice` `find`, unanchored scan-plan `find`, and matcher finds | Required bytes and no single-byte table; windows under 256 bytes, less beside an inner literal search |
 | Long-window literal | `CP.longWindowLacksRequiredLiteral` in full-`Slice` `find`, DFA counts, unanchored one-shot calls, and `RM.findGeneral` | `CP.mayCheckRequiredLiteralOnLongWindows` and `CP.checksRequiredLiteralOnLongWindows`: a general pattern with no prefix, anchor, counter, scan plan, or other literal route that would search the same bytes |
-| Literal beside a route | the long-window check | The long-window check was refused, and `RequiredBytes.literalBesideRoutes` finds a rarer literal no other route searches |
-| Inner-literal handoff | `CP.findFromRequiredLiteral` | `CP.handsOffRequiredLiteral`: the inner literal search runs first, its minimum is at most 256 bytes, and the literal is the inner literal, or the inner literal plus one final byte that its suffix gate admits alone |
 
 [Required-byte and match-length rejects](OPTIMIZATION_CATALOG.md#required-byte-and-match-length-rejects),
 [Short-Window Required Bytes Reject](../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject),
@@ -1280,7 +1277,7 @@ and confirm forward.
   past the previous candidate's end, a DFA fails, or at least 64 hits rejected
   by the byte gates average fewer than 8 bytes apart.
 - **Callers:** the ordinary engine, full-`Slice` `find` (first for a gated
-  one-byte literal), counts, and the required-literal handoff.
+  one-byte literal), and counts.
 - **Catalog:** [Reverse-inner literal search](OPTIMIZATION_CATALOG.md#reverse-inner-literal-search),
   [Inner literal byte gates](OPTIMIZATION_CATALOG.md#inner-literal-byte-gates).
 - **Decision:** [Minimum Inner Literal Search Window](../../REGULATOR_DECISIONS.md#minimum-inner-literal-search-window),

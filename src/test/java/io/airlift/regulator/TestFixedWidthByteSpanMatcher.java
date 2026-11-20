@@ -1107,7 +1107,7 @@ public class TestFixedWidthByteSpanMatcher
             CompiledPattern pattern = entry.getValue();
             assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(label).isFalse();
             assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.ENGINE);
-            assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
+            assertThat(pattern.innerLiteralSearchForDiagnostics().literalsForDiagnostics()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 
         // Trino follows the same rule: its plain subtype answers contains, and count, on the
@@ -1116,7 +1116,7 @@ public class TestFixedWidthByteSpanMatcher
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[a-z]shing"));
         assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
         assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).isFalse();
-        assertThat(trino.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
+        assertThat(trino.re2().innerLiteralSearchForDiagnostics().literalsForDiagnostics()).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         Re2 reference = Re2.compile(utf8Slice("[a-z]shing"));
         String prose = "the status of these sessions is still unsettled, so we must assess its uses. ";
         for (String text : List.of("", "fishing", prose, prose + "go fishing, then washing", "shing ashing " + prose)) {
@@ -1130,7 +1130,7 @@ public class TestFixedWidthByteSpanMatcher
         // of at least MINIMUM_LONG_SEARCH_BYTES; these shorter ones check that its routes agree.
         TrinoRegexp classPair = TrinoRegexp.compile(utf8Slice("[a-z][?!.][\"']x"));
         assertThat(classPair).isExactlyInstanceOf(TrinoRegexp.class);
-        assertThat(classPair.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"!\"".getBytes(ISO_8859_1), "!'".getBytes(ISO_8859_1), ".\"".getBytes(ISO_8859_1), ".'".getBytes(ISO_8859_1), "?\"".getBytes(ISO_8859_1), "?'".getBytes(ISO_8859_1)});
+        assertThat(classPair.re2().innerLiteralSearchForDiagnostics().literalsForDiagnostics()).isDeepEqualTo(new byte[][] {"!\"".getBytes(ISO_8859_1), "!'".getBytes(ISO_8859_1), ".\"".getBytes(ISO_8859_1), ".'".getBytes(ISO_8859_1), "?\"".getBytes(ISO_8859_1), "?'".getBytes(ISO_8859_1)});
         Re2 classPairReference = Re2.compile(utf8Slice("[a-z][?!.][\"']x"));
         for (String text : List.of("?\"x has no letter before", "ab?\"x", "no.'x here", "ok!\"x, so?'x and z.\"x")) {
             Slice input = utf8Slice(text);
