@@ -59,11 +59,10 @@ import static java.util.Objects.requireNonNull;
 /// runs the ordinary engine. A gated one-byte search, for a one-byte exact literal with byte
 /// gates, also runs on a shorter find window, as a [check][#checksShortWindows] that rejects a
 /// window without a gate-passing hit, and where the pattern qualifies the ordinary engine's
-/// full-Slice boolean find, which, for a pattern on the literal-neighbor plan, runs only when that
-/// matcher leaves the find undecided, runs it first, in place of a required-bytes check of its
-/// byte; see `CompiledPattern.runsInnerLiteralSearchFirst`. A matcher's find or a full-Slice
-/// boolean find first takes the short-window required bytes reject where the pattern keeps required
-/// bytes, though a ranged find and `findInto` do not: a literal of two or more bytes, and a single
+/// full-Slice boolean find runs it first, in place of a required-bytes check of its byte; see
+/// `CompiledPattern.runsInnerLiteralSearchFirst`. A matcher's find or a full-Slice boolean find
+/// first takes the short-window required bytes reject where the pattern keeps required bytes,
+/// though a ranged find and `findInto` do not: a literal of two or more bytes, and a single
 /// required byte, check windows shorter than 256 bytes, and a one-of set of two or three distinct
 /// bytes only those too short for the search, which itself scans a longer window for its literal
 /// before any engine runs unless the find skips the DFA. The minimums are where the literal's scan
@@ -134,9 +133,8 @@ final class InnerLiteralSearch
     // conservative answer, which keeps the proofs stack safe, as MatchLength bounds its own
     // recursion. Another proof, such as the fixed-length check, may still admit the search.
     private static final int MAX_RECURSIVE_DEPTH = 256;
-    // Each overlapping hit of a longer literal re-reads the whole literal. LiteralNeighborMatcher,
-    // which restarts its scan one byte past each hit, and WindowLiteralSearch, which visits every
-    // overlapping occurrence, take the same limit.
+    // Each overlapping hit of a longer literal re-reads the whole literal. WindowLiteralSearch,
+    // which visits every overlapping occurrence, takes the same limit.
     static final int MAXIMUM_LITERAL_LENGTH = 64;
     // The set filter tests three positions of every member and holds at most eight members. The
     // crate treats its Teddy prefilter as fast only when every literal has at least three bytes.
@@ -545,9 +543,7 @@ final class InnerLiteralSearch
     /// only a check: a window whose hits all fail the gates has no match, and one with a hit that
     /// passes them falls back near its start to the ordinary engine. A whole-text count keeps
     /// [#minimumCountBytes]. Where the pattern qualifies, the ordinary engine's full-Slice boolean
-    /// find, which, for a pattern on the literal-neighbor plan, runs only when that matcher leaves
-    /// the find undecided, runs such a search first; see
-    /// `CompiledPattern.runsInnerLiteralSearchFirst`.
+    /// find runs such a search first; see `CompiledPattern.runsInnerLiteralSearchFirst`.
     boolean checksShortWindows()
     {
         return checksShortWindows;

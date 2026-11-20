@@ -36,10 +36,8 @@ import static java.util.Objects.requireNonNull;
 /// the one-of-bytes shape, of a pattern that has no other literal route also rejects a long
 /// window, with the search of [#indexIn], as Hyperscan proves a literal absent before it runs its
 /// automaton. A pattern that another literal route keeps from that check keeps the short-window
-/// check alone. The literal-neighbor find plan is no such route, since the pattern's other
-/// operations keep the ordinary engine. A window literal search also keeps the
-/// long-window check, because finds that use BitState for captures, or that skip the DFA, never
-/// run the window search.
+/// check alone. A window literal search also keeps the long-window check, because finds that use
+/// BitState for captures, or that skip the DFA, never run the window search.
 final class RequiredBytes
 {
     /// Windows at least this long skip the short-window check. Most lines of a line-by-line search

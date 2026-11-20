@@ -154,12 +154,11 @@ exclude it.
 | 17 | [Transparent start literal](#transparent-start-literal) and folded start run | `CP.searchesTransparentStartLiteral`, `Prog.buildTransparentStartLiteral`; the run when the DFA runs the program's assertions and the run's probe pair is more than four times rarer than the literal's (`CP.rarerFoldedStartRun`) | leaves minimum |
 | 18 | [Literal set](#literal-set) | Not longest-match; `LiteralSetSpanMatcher.analyze` (no captures, more than 64 literals); its root skip is dropped unless both forward DFAs still initialize beside the set measured without its search tables, and its dense rows and skip table are dropped together where they alone cost a forward DFA its initialization | fits |
 | 19 | [Ordered literals](#ordered-literals) | Find plan general, no scan plan, every inner gap matches any byte sequence (`CP.createByteGapOrderedLiteralMatcher`); no lowered or tagged alternation program | yields |
-| 20 | [Literal neighbors](#literal-neighbors) | Find plan still general, no scan plan, no required prefix, `LiteralNeighborMatcher.analyze`; no lowered or tagged alternation program | yields |
-| 21 | [Literal alternation](#literal-alternation) | Find plan general, no scan plan, not longest-match, `LiteralAlternationSpanMatcher.analyze` | fits |
-| 22 | [Fixed-width byte span](#fixed-width-byte-span) | Find plan general, no scan plan, no literal-alternation candidate analyzed, no captures, bounded length up to 1,024 bytes, no inner literal of 2 or more bytes, `FixedWidthByteSpanMatcher.analyze`, and the matcher does not step aside for the engine's scans (`CP.yieldsToEngineRoute`) | fits |
-| 23 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
-| 24 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
-| 25 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
+| 20 | [Literal alternation](#literal-alternation) | Find plan general, no scan plan, not longest-match, `LiteralAlternationSpanMatcher.analyze` | fits |
+| 21 | [Fixed-width byte span](#fixed-width-byte-span) | Find plan general, no scan plan, no literal-alternation candidate analyzed, no captures, bounded length up to 1,024 bytes, no inner literal of 2 or more bytes, `FixedWidthByteSpanMatcher.analyze`, and the matcher does not step aside for the engine's scans (`CP.yieldsToEngineRoute`) | fits |
+| 22 | [Byte run](#single-byte-table-and-byte-run) | Find plan general, no literal-alternation candidate analyzed, no fixed-width candidate left after the step-aside check, no captures, `SingleByteMatcher.analyzeRun` | fits |
+| 23 | Required-bytes narrowing | A [one-of set](#required-bytes) of several distinct bytes beside an inner search gets the lesser of that search's minimum and 256 bytes as its window limit; a single required byte keeps 256, and one the gated one-byte inner search already scans is dropped | — |
+| 24 | [Position automaton](#position-automaton) candidate | `PositionNfa.build` accepts the program | charged in `selectRoutes` |
 
 The tagged alternation program compiles in the program's DFA allowance; a
 third of what remains goes to its many-match DFA, which must initialize at
@@ -185,8 +184,7 @@ empty pattern's `find` is `LITERAL_SEARCH` and a `find` that can match empty
 with no required prefix is `NULLABLE_START`. Later analysis relabels a general
 or nullable-start `find` as `LOWERED_PROGRAM`
 ([lowered boolean program](#lowered-boolean-program)), a general `find` as
-`ORDERED_LITERALS` ([ordered literals](#ordered-literals)) or
-`LITERAL_NEIGHBORS` ([literal neighbors](#literal-neighbors)), and a general
+`ORDERED_LITERALS` ([ordered literals](#ordered-literals)), and a general
 `lookingAt` as `LOWERED_PROGRAM`.
 
 #### Shape (`selectRoutes`)
@@ -202,8 +200,8 @@ a short-window reject to none). Then it picks one `Shape`:
 2. Otherwise the find plan decides: `GENERAL` gives `ENGINE`;
    `LITERAL_SEARCH` gives `EXACT_LITERAL` for a non-empty literal and
    `ENGINE` for the empty pattern; `NULLABLE_START` and `LOWERED_PROGRAM` give
-   `ENGINE`; every other plan, `ORDERED_LITERALS` and `LITERAL_NEIGHBORS`
-   included, gives `LITERAL_KERNEL`.
+   `ENGINE`; every other plan, `ORDERED_LITERALS` included, gives
+   `LITERAL_KERNEL`.
 3. A single-byte table on a pattern whose find plan is `GENERAL` (a general
    pattern) gives `BYTE_TABLE`.
 4. A scan plan gives `SCAN_PLAN`, overriding every shape above, and sets three
@@ -346,7 +344,7 @@ A full-`Slice` boolean `find` (Trino `contains`) dispatches on the shape:
 |---|---|---|
 | `ENGINE` | `CP.findOnEngine`, below | the ordinary engine |
 | `EXACT_LITERAL` | `CP.findOnExactLiteral`: the program's [prefix scan](#prefix-acceleration) | none |
-| `LITERAL_KERNEL` | `CP.findOnLiteralKernel` by find plan: `CONTAINS` on the [literal search kernel](#literal-search-kernel) for windows of at least 64 bytes where the pattern kept one, else `Slice.indexOf`; `EQUALS`, `STARTS_WITH`, `ENDS_WITH`, and the final-line forms by comparison; `ORDERED_LITERALS` on the [ordered-literal matcher](#ordered-literals); `LITERAL_NEIGHBORS` on the [neighbor matcher](#literal-neighbors) | neighbors only: `findOnEngine` when the matcher is undecided |
+| `LITERAL_KERNEL` | `CP.findOnLiteralKernel` by find plan: `CONTAINS` on the [literal search kernel](#literal-search-kernel) for windows of at least 64 bytes where the pattern kept one, else `Slice.indexOf`; `EQUALS`, `STARTS_WITH`, `ENDS_WITH`, and the final-line forms by comparison; `ORDERED_LITERALS` on the [ordered-literal matcher](#ordered-literals) | none |
 | `LITERAL_ALTERNATION` | `CP.findOnLiteralAlternation`: the [trie](#literal-alternation), or the [literal set](#literal-set) when `literalSetFind` | trie `DECLINED`: the ordinary engine; no trie and no `literalSetFind`: `findOnEngine` |
 | `FIXED_WIDTH` | `CP.findOnFixedWidth`: [fixed-width span](#fixed-width-byte-span) | `BAILED`: `findOnEngine` |
 | `CLASS_RUN` | `CP.findOnClassRun`: [class-run counter](#class-run-counter) | none |
@@ -1159,13 +1157,13 @@ probability is at least 0.002 (`Dfa.buildStartClassFilter`). Vector scans from
 
 #### Required prefix
 
-A pattern of the form `^literal…` compiles only its suffix; the ordinary
-engine requires the prefix at the context start and continues anchored after
-it, and the DFA has an integer loop for case-sensitive prefixes of at least
-16 bytes. A required prefix excludes the tagged alternation program,
-pre-engine matchers, inner and window literal searches, literal neighbors, the
-candidate start cursor, transparent start literal, group-zero forward cursor,
-matcher class counter, single-byte table, and long-window required literal.
+A pattern of the form `^literal…` compiles only its suffix; the ordinary engine
+requires the prefix at the context start and continues anchored after it, and
+the DFA has an integer loop for case-sensitive prefixes of at least 16 bytes. A
+required prefix excludes the tagged alternation program, pre-engine matchers,
+inner and window literal searches, the candidate start cursor, transparent
+start literal, group-zero forward cursor, matcher class counter, single-byte
+table, and long-window required literal.
 [RE2 optimizations used as ported](OPTIMIZATION_CATALOG.md#re2-optimizations-used-as-ported).
 
 #### Required bytes
@@ -1212,9 +1210,9 @@ first and last bytes, with KMP once failed candidates compare more than
 64 bytes past its progress. A `CONTAINS` plan of a literal of at least 2 bytes
 keeps one (yields, except in Trino and for literals over 64 bytes); `find` uses
 it on windows of at least 64 bytes and `Slice.indexOf` below. The dot-star
-literal span, ordered literals, literal gaps, literal neighbors, inner and
-window literal searches, required bytes, and LIKE's contains matcher also use
-it, LIKE at every length.
+literal span, ordered literals, literal gaps, inner and window literal
+searches, required bytes, and LIKE's contains matcher also use it, LIKE at
+every length.
 [Call-free pair word scan](OPTIMIZATION_CATALOG.md#call-free-pair-word-scan).
 
 #### Short literal in two words
@@ -1300,14 +1298,6 @@ RE2 Latin-1 or Rust bytes mode; Trino for `contains` with dot-all gaps, falling
 back to the ordinary engine when a gap is not whole characters; LIKE for
 literals separated by `%`.
 [Ordered literals](OPTIMIZATION_CATALOG.md#ordered-literals).
-
-#### Literal neighbors
-
-`C+ L D+`, a literal between two class runs, answered for boolean `find` by
-scanning the literal and reading one byte on each side
-(`LiteralNeighborMatcher`). Undecided, as on dense one-byte literals, it
-defers to `CP.findOnEngine`.
-[Literal neighbors](OPTIMIZATION_CATALOG.md#literal-neighbors).
 
 #### Literal alternation
 
