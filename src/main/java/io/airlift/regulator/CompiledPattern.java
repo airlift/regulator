@@ -2146,12 +2146,6 @@ abstract sealed class CompiledPattern
         return plan != null && plan.isAnchoredStart() && plan.isPartialMatch();
     }
 
-    boolean usesAsciiFoldedScanExecutorForDiagnostics()
-    {
-        ScanPlan plan = booleanPlans.scanPlan();
-        return plan != null && plan.usesAsciiFoldedExecutor();
-    }
-
     /// Returns whether full-Slice [#find(Slice)] dispatches to the scan plan rather than a
     /// retained literal kernel. Only the scan-plan shape's classes can.
     boolean usesScanPlanForFindForDiagnostics()
@@ -3142,12 +3136,12 @@ abstract sealed class CompiledPattern
     /// visiting each candidate.
     private boolean findWithOrdinaryHandoff(Slice input, ScanPlan plan)
     {
-        int result = plan.searchBeforeHandoff(input, 0, input.length(), 0, plan.usesAsciiFoldedExecutor());
+        int result = plan.searchBeforeHandoff(input, 0, input.length(), 0);
         return finishScanSearch(input, 0, input.length(), result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
     }
 
-    /// Runs the attempt of a start-anchored plan: the partial or end-anchored executor, ASCII-folded
-    /// or not, as the plan's facts pick, after rejecting a context too long to hold a match of a
+    /// Runs the attempt of a start-anchored plan: the partial or end-anchored executor, as the
+    /// plan's facts pick, after rejecting a context too long to hold a match of a
     /// pattern anchored at both ends. Like a failed executor, the rejection clears the groups.
     /// Each executor is too large for C2 to inline, so this selector keeps their calls out of the
     /// routes that use it.
@@ -3159,23 +3153,15 @@ abstract sealed class CompiledPattern
             }
             return false;
         }
-        if (plan.usesAsciiFoldedExecutor()) {
-            return plan.isPartialMatch()
-                    ? plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, fullMatch, groups)
-                    : plan.matchAsciiFoldedEndAnchored(text, contextStart, contextEnd, fullMatch, groups);
-        }
         return plan.isPartialMatch()
                 ? plan.matchPartial(text, contextStart, contextEnd, fullMatch, groups)
                 : plan.matchEndAnchored(text, contextStart, contextEnd, fullMatch, groups);
     }
 
-    /// Selects the ASCII-folded or case-sensitive search for an unanchored plan; `anchored`
-    /// restricts it to `start`.
+    /// Runs the search of an unanchored plan; `anchored` restricts it to `start`.
     private static int searchScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
-        return plan.usesAsciiFoldedExecutor()
-                ? plan.searchAsciiFolded(text, contextStart, contextEnd, start, anchored, fullMatch, groups)
-                : plan.search(text, contextStart, contextEnd, start, anchored, fullMatch, groups);
+        return plan.search(text, contextStart, contextEnd, start, anchored, fullMatch, groups);
     }
 
     /// Returns whether a scan-plan search that returned `result` matched. A nonnegative result
@@ -3463,8 +3449,7 @@ abstract sealed class CompiledPattern
     /// either. A Java matcher region whose $ reads a CR before it runs on the NFA instead.
     ScanPlan caseSensitiveScanPlan()
     {
-        ScanPlan plan = booleanPlans.scanPlan();
-        return plan != null && !plan.usesAsciiFoldedExecutor() ? plan : null;
+        return booleanPlans.scanPlan();
     }
 
     /// Returns how [#countMatches] counts this pattern, for a pattern with a
@@ -4240,7 +4225,6 @@ abstract sealed class CompiledPattern
     private long countUnanchoredScanMatches(Slice text, ScanPlan plan)
     {
         // The count that ScanKernelGenerator emits copies this loop; keep in step.
-        boolean asciiFolded = plan.usesAsciiFoldedExecutor();
         int length = text.length();
         long count = 0;
         int start = 0;
@@ -4248,9 +4232,7 @@ abstract sealed class CompiledPattern
         // storage. The first handoff allocates it, and later ones in this call reuse it.
         int[] handoffGroups = null;
         while (start < length) {
-            int matchEnd = asciiFolded
-                    ? plan.searchAsciiFolded(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS)
-                    : plan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
+            int matchEnd = plan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
             if (matchEnd < 0) {
                 if (matchEnd == ScanPlan.NO_MATCH) {
                     break;

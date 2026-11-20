@@ -121,7 +121,6 @@ public class TestRe2BooleanPlans
                 new ShapeRow("\\p{L}+", CLASS_RUN, CLASS_RUN, CLASS_RUN, CLASS_RUN),
                 new ShapeRow("[,;]", BYTE_TABLE, BYTE_TABLE, BYTE_TABLE, BYTE_TABLE),
                 new ShapeRow("https?://([^/]+)/", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
-                new ShapeRow("(?i)content-type:([^;]+);", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
                 // Patterns more than one shape could serve.
                 // A Rust `\s` is Unicode, so it is no byte run.
                 new ShapeRow("\\s+", BYTE_TABLE, BYTE_TABLE, ENGINE, BYTE_TABLE),

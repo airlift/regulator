@@ -433,23 +433,4 @@ final class VectorScanner
         return -1;
     }
 
-    /// Returns the first byte at or after `cursor` that equals `folded`, a lowercase
-    /// ASCII letter, after setting bit `0x20`, or `-1` when none remains.
-    static int findAsciiFoldedByte(byte[] bytes, int cursor, int end, byte folded)
-    {
-        ByteVector mask = ByteVector.broadcast(SPECIES, (byte) 0x20);
-        ByteVector wanted = ByteVector.broadcast(SPECIES, folded);
-        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
-            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, bytes, cursor).or(mask).compare(VectorOperators.EQ, wanted);
-            if (matches.anyTrue()) {
-                return cursor + matches.firstTrue();
-            }
-        }
-        for (; cursor < end; cursor++) {
-            if ((bytes[cursor] | 0x20) == folded) {
-                return cursor;
-            }
-        }
-        return -1;
-    }
 }

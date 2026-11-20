@@ -490,10 +490,6 @@ public class TestScanKernel
             String expression = search.expression();
             TrinoRegexp compiled = generated(expression);
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
-            if (interpreted.re2().usesAsciiFoldedScanExecutorForDiagnostics()) {
-                assertThat(compiled.usesGeneratedBytecode()).as(expression).isFalse();
-                continue;
-            }
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
             List<Slice> sources = new ArrayList<>();
             for (int units : new int[] {8, 70, 300, 1500}) {

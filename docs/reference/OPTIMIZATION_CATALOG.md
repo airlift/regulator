@@ -1060,25 +1060,20 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
 - **Origin:** First described by glibc's memcmp, which compares short lengths
   with two overlapping loads ([memcmp.S][glibc-memcmp]), .NET 5 (literals
   compared as words against constants,
-  [RegexCompiler.cs][dotnet5-regex-compiler]), .NET 7 (`[Aa]` tested as
-  `(ch | 0x20) == 'a'`, [.NET 7][dotnet7-blog]), ClickHouse (folded bytes
-  compared with OR `0x20`, [CompileRegexp.cpp][ch-compile-regexp]), and memchr
-  (an overlapping last load, [memchr.rs][memchr-generic]). Regulator:
-  per-position fold masks, the words held in LIKE pattern fields, the
+  [RegexCompiler.cs][dotnet5-regex-compiler]), and memchr (an overlapping
+  last load, [memchr.rs][memchr-generic]). Regulator: the words held in LIKE
+  pattern fields, the
   rare-plan split under C2's inline limit, and the unchecked reads ([#10],
   [#24], [#81], [#153], [design][d-short-like]).
 - **Where:** `LiteralMatchKernel.shortLiteralWidth`,
   `LiteralMatchKernel.matchesShortLiteralAt`, `ScanPlan.Step.matches`,
-  `ScanPlan.Step.matchesAsciiFolded`, `ScanPlan.Builder.emit`,
+  `ScanPlan.Builder.emit`,
   `TrinoLikePattern.matches`, `TrinoLikePattern.matchesComplex`
 - **Applies when:** LIKE equality, prefix, and suffix tests, interpreted and
-  generated; scan-plan literal operations, folded for ASCII case pairs whose
-  fold stays ASCII
+  generated; scan-plan literal operations
 - **What it does:** A literal of 1 to 16 bytes is compared as its first and
   last word, of the width that `shortLiteralWidth` picks, which overlap when
-  needed. The reads skip `Slice` bounds checks. Folded literals OR a `0x20`
-  mask into both sides, so an ASCII pair such as `[Kk]` becomes a folded
-  literal byte instead of a two-member run. A LIKE pattern holds its literal
+  needed. The reads skip `Slice` bounds checks. A LIKE pattern holds its literal
   as one or two `long` words in its fields, and rare plans live in a separate
   method, so `matches` stays under C2's 325-byte hot-method inline limit. The
   changes in [#81], which include putting the words in the pattern's fields,
