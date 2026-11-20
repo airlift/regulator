@@ -57,6 +57,7 @@ and intermediate benchmark reports are not kept here.
 | [Measurement quality](benchmarks/MEASUREMENT_QUALITY.md) | Timing uncertainty, native controls, repaired protocols and reproduction |
 | [`benchmarks/SCAN_PLAN.md`](benchmarks/SCAN_PLAN.md) | Specialized scan-plan design for Rust, RE2, Java, and Trino patterns, eligibility, and benchmarks |
 | [`reference/OPTIMIZATION_CATALOG.md`](reference/OPTIMIZATION_CATALOG.md) | Regulator's main optimizations, where each applies, and where it came from |
+| [`reference/ENGINE_MAP.md`](reference/ENGINE_MAP.md) | Every engine and kernel, how one is chosen for each operation, and what runs when it declines |
 | [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | C++ RE2 optimizations and their exact triggers, for upstream fidelity audits |
 | [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
 
