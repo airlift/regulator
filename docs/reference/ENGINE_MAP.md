@@ -1408,11 +1408,10 @@ covers the whole context.
 
 ### Scan plans
 
-A short bounded program of literal, run, optional, and capture operations for
-a common shape (`ScanPlan.analyze`), interpreted by six executors: end-anchored,
-partial, and unanchored search, each with an ASCII case-folded twin. Runs live
-in `ScanPlanRun`, which reads sets of some but not all non-ASCII characters
-through `Utf8MemberTable`.
+A short bounded program of literal, run, optional, and capture operations for a
+common shape (`ScanPlan.analyze`), interpreted by three executors:
+end-anchored, partial, and unanchored search. Runs live in `ScanPlanRun`, which
+reads sets of some but not all non-ASCII characters through `Utf8MemberTable`.
 
 - **Chosen:** in [Analysis](#analysis-buildwithprogram) (the scan plan rows),
   for a leftmost-first pattern that cannot match empty, starting anchored, with
@@ -1420,9 +1419,10 @@ through `Utf8MemberTable`.
   variable-length run, and a continuation its search can find. At most 32
   operations, 4 optional parts, 16 groups, and 256 bytes per literal operation,
   counting an expanded fixed literal repeat. A plan refuses Latin-1 nodes, lazy
-  repeats, and an unbounded-run start with a final-line end, so RE2 Latin-1
-  patterns get none; eligible Rust bytes-mode patterns keep theirs. A plan
-  gives the `SCAN_PLAN` shape.
+  repeats, an ASCII-folded literal, such as `(?i)abc` or `[Kk]`, and an
+  unbounded-run start with a final-line end, so RE2 Latin-1 patterns get none;
+  eligible Rust bytes-mode patterns keep theirs. A plan gives the `SCAN_PLAN`
+  shape.
 - **Bounds:** an unanchored search hands off once failed attempts examine more
   than 2,048 bytes plus four times the distance covered; a boolean search also
   hands off after dense failed attempts.
@@ -1442,17 +1442,17 @@ through `Utf8MemberTable`.
 
 With `setGenerateBytecode(true)`:
 
-- **RE2, Java, Rust:** a `SCAN_PLAN` pattern whose plan is case-sensitive
-  (`CP.generateScanPattern`) becomes a hidden subclass of its scan-plan class
+- **RE2, Java, Rust:** a `SCAN_PLAN` pattern (`CP.generateScanPattern`) becomes
+  a hidden subclass of its scan-plan class
   (`ScanKernelGenerator.generateCompiledScanPattern`) that emits
   `matchInternal`, and `find`, `count`, `matches`, and `lookingAt` where they
-  reach the plan. Its helpers live in `ScanKernelSupport`, with vector loops
-  in `VectorScanKernelSupport`.
+  reach the plan. Its helpers live in `ScanKernelSupport`, with vector loops in
+  `VectorScanKernelSupport`.
 - **Trino:** only when no specialized `TrinoRegexp` class was chosen and
-  `ScanKernelGenerator.TrinoRoutes.of` accepts: a case-sensitive plan, a pattern
-  that cannot match empty, and a count that runs on the plan. The class emits
-  each operation that reaches the plan; `contains` answered by a retained
-  literal kernel is inherited, not emitted.
+  `ScanKernelGenerator.TrinoRoutes.of` accepts: a plan, a pattern that cannot
+  match empty, and a count that runs on the plan. The class emits each
+  operation that reaches the plan; `contains` answered by a retained literal
+  kernel is inherited, not emitted.
 - **LIKE:** every strategy (`TrinoLikeKernelGenerator.generate`), unless a
   method would exceed 8,000 bytes of bytecode; its helpers, KMP fallback
   included, live in `TrinoLikeKernelSupport`.

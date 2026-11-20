@@ -57,8 +57,7 @@ abstract sealed class CompiledPattern
         LOWERED_PROGRAM,
     }
 
-    /// How [#countMatches] counts a pattern with a case-sensitive scan plan. See
-    /// [#scanPlanCount()].
+    /// How [#countMatches] counts a pattern with a scan plan. See [#scanPlanCount()].
     enum ScanPlanCount
     {
         // countMatches loops over the search of an unanchored plan.
@@ -1997,12 +1996,6 @@ abstract sealed class CompiledPattern
         return plan != null && plan.isAnchoredStart() && plan.isPartialMatch();
     }
 
-    boolean usesAsciiFoldedScanExecutorForDiagnostics()
-    {
-        ScanPlan plan = booleanPlans.scanPlan();
-        return plan != null && plan.usesAsciiFoldedExecutor();
-    }
-
     /// Returns whether full-Slice [#find(Slice)] dispatches to the scan plan rather than a
     /// retained literal kernel. Only the scan-plan shape's classes can.
     boolean usesScanPlanForFindForDiagnostics()
@@ -2889,12 +2882,12 @@ abstract sealed class CompiledPattern
     /// visiting each candidate.
     private boolean findWithOrdinaryHandoff(Slice input, ScanPlan plan)
     {
-        int result = plan.searchBeforeHandoff(input, 0, input.length(), 0, plan.usesAsciiFoldedExecutor());
+        int result = plan.searchBeforeHandoff(input, 0, input.length(), 0);
         return finishScanSearch(input, 0, input.length(), result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
     }
 
-    /// Runs the attempt of a start-anchored plan: the partial or end-anchored executor, ASCII-folded
-    /// or not, as the plan's facts pick, after rejecting a context too long to hold a match of a
+    /// Runs the attempt of a start-anchored plan: the partial or end-anchored executor, as the
+    /// plan's facts pick, after rejecting a context too long to hold a match of a
     /// pattern anchored at both ends. Like a failed executor, the rejection clears the groups.
     /// Each executor is too large for C2 to inline, so this selector keeps their calls out of the
     /// routes that use it.
@@ -2906,23 +2899,15 @@ abstract sealed class CompiledPattern
             }
             return false;
         }
-        if (plan.usesAsciiFoldedExecutor()) {
-            return plan.isPartialMatch()
-                    ? plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, fullMatch, groups)
-                    : plan.matchAsciiFoldedEndAnchored(text, contextStart, contextEnd, fullMatch, groups);
-        }
         return plan.isPartialMatch()
                 ? plan.matchPartial(text, contextStart, contextEnd, fullMatch, groups)
                 : plan.matchEndAnchored(text, contextStart, contextEnd, fullMatch, groups);
     }
 
-    /// Selects the ASCII-folded or case-sensitive search for an unanchored plan; `anchored`
-    /// restricts it to `start`.
+    /// Runs the search of an unanchored plan; `anchored` restricts it to `start`.
     private static int searchScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
-        return plan.usesAsciiFoldedExecutor()
-                ? plan.searchAsciiFolded(text, contextStart, contextEnd, start, anchored, fullMatch, groups)
-                : plan.search(text, contextStart, contextEnd, start, anchored, fullMatch, groups);
+        return plan.search(text, contextStart, contextEnd, start, anchored, fullMatch, groups);
     }
 
     /// Returns whether a scan-plan search that returned `result` matched. A nonnegative result
@@ -3204,19 +3189,18 @@ abstract sealed class CompiledPattern
         return matchStartAnchoredScanPlan(plan, text, contextStart, contextEnd, false, groups);
     }
 
-    /// Returns the case-sensitive scan plan that every capture search of this pattern runs, or
-    /// `null`. As for [#startAnchoredScanPlan()], the compile-time plan is the whole decision,
-    /// so no [#matchRegionInto] check runs ahead of the plan route of [#matchInternalOnScanPlan]
-    /// either. A Java matcher region whose $ reads a CR before it runs on the NFA instead.
-    ScanPlan caseSensitiveScanPlan()
+    /// Returns the scan plan that every capture search of this pattern runs, or `null`. As for
+    /// [#startAnchoredScanPlan()], the compile-time plan is the whole decision, so no
+    /// [#matchRegionInto] check runs ahead of the plan route of [#matchInternalOnScanPlan] either.
+    /// A Java matcher region whose $ reads a CR before it runs on the NFA instead.
+    ScanPlan scanPlan()
     {
-        ScanPlan plan = booleanPlans.scanPlan();
-        return plan != null && !plan.usesAsciiFoldedExecutor() ? plan : null;
+        return booleanPlans.scanPlan();
     }
 
-    /// Returns how [#countMatches] counts this pattern, for a pattern with a
-    /// [#caseSensitiveScanPlan()], which only the scan-plan shape's classes have. This base
-    /// method, for every other class, returns [ScanPlanCount#OTHER].
+    /// Returns how [#countMatches] counts this pattern, for a pattern with a [#scanPlan()], which
+    /// only the scan-plan shape's classes have. This base method, for every other class, returns
+    /// [ScanPlanCount#OTHER].
     ScanPlanCount scanPlanCount()
     {
         return ScanPlanCount.OTHER;
@@ -3966,7 +3950,6 @@ abstract sealed class CompiledPattern
     private long countUnanchoredScanMatches(Slice text, ScanPlan plan)
     {
         // The count that ScanKernelGenerator emits copies this loop; keep in step.
-        boolean asciiFolded = plan.usesAsciiFoldedExecutor();
         int length = text.length();
         long count = 0;
         int start = 0;
@@ -3974,9 +3957,7 @@ abstract sealed class CompiledPattern
         // storage. The first handoff allocates it, and later ones in this call reuse it.
         int[] handoffGroups = null;
         while (start < length) {
-            int matchEnd = asciiFolded
-                    ? plan.searchAsciiFolded(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS)
-                    : plan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
+            int matchEnd = plan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
             if (matchEnd < 0) {
                 if (matchEnd == ScanPlan.NO_MATCH) {
                     break;
@@ -5993,13 +5974,13 @@ abstract sealed class CompiledPattern
         return 31 - Integer.numberOfLeadingZeros(value);
     }
 
-    /// Returns a copy of this pattern as an instance of a class generated for its case-sensitive
-    /// scan plan, or `null` when the pattern has no such plan or the class cannot be generated.
-    /// The caller keeps the copy and discards this pattern. The class extends `superclass`, the
-    /// language's `CompiledScan…` class.
+    /// Returns a copy of this pattern as an instance of a class generated for its scan plan, or
+    /// `null` when the pattern has no such plan or the class cannot be generated. The caller keeps
+    /// the copy and discards this pattern. The class extends `superclass`, the language's
+    /// `CompiledScan…` class.
     final <T extends CompiledPattern> T generateScanPattern(Class<T> superclass)
     {
-        if (caseSensitiveScanPlan() == null) {
+        if (scanPlan() == null) {
             return null;
         }
         try {
