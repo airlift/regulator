@@ -1059,7 +1059,7 @@ abstract sealed class CompiledPattern
             long searchMemory = reverseMemory - fullReverseMemory;
             long prefixMemory = Math.max(1, reverseMemory / 2);
             boolean dotStarLiteralShape = DotStarLiteralSpanMatcher.analyze(expressionAnalysis, booleanPlans.literal(), null, (flags & Regexp.LATIN1) != 0) != null;
-            InnerLiteralSearch innerLiteralSearch = dotStarLiteralShape ? null : InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding, byteFrequencies);
+            InnerLiteralSearch innerLiteralSearch = dotStarLiteralShape ? null : InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
             if (innerLiteralSearch != null) {
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }

@@ -370,13 +370,10 @@ so the automata run only where a match can be.
   `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
   `Regexp.foldedRunsBehindStartLiteral`, `Prog.FoldedStartRun`,
   `Dfa.searchFoldedRunCandidateBoundary`,
-  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`,
-  `InnerLiteralSearch.findFoldedLiteralVector`
-- **Applies when:** `(?i)` ASCII prefixes, and the vector form for a
-  case-insensitive [inner literal](#reverse-inner-literal-search); the vector
-  form from 1 KiB, with the in-loop kernel for probe pairs that the
-  distribution that chose them predicts in 15% or more of vectors, as for
-  common pairs in 64-byte vectors.
+  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`
+- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB, with the
+  in-loop kernel for probe pairs that the distribution that chose them
+  predicts in 15% or more of vectors, as for common pairs in 64-byte vectors.
   Folded runs: case-insensitive patterns under Unicode case folding with no
   folded prefix, or whose folded prefix stops at a letter whose fold leaves
   ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
@@ -508,29 +505,25 @@ so the automata run only where a match can be.
 - **Origin:** Adapted from the Rust regex crate
   ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy],
   [teddy.rs][ra-teddy], [literal.rs][rs-literal], [#90]); First described by
-  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask]),
-  for class pairs ([shufti.c][hs-shufti-double]), and for a count that ends
-  each match at its literal, whose Rose program asks only whether the prefix
-  engine accepts at the hit and reports the match there without its start
+  Hyperscan for class pairs ([shufti.c][hs-shufti-double]), and for a count that
+  ends each match at its literal, whose Rose program asks only whether the
+  prefix engine accepts at the hit and reports the match there without its start
   ([program_runtime.c][hs-check-prefix] `CHECK_PREFIX`), and by .NET for a
   prefix of an unbounded class that cannot hold the literal
-  ([RegexPrefixAnalyzer.cs][dotnet-literal-after-loop]); Inspired by
-  Hyperscan, whose Rose compiler anchors literals behind pure-repeat prefixes,
-  for class-run prefixes ([rose_build_castle.cpp][hs-rose-castle],
-  [rose_build_lookaround.cpp][hs-rose-leftfix]). Regulator: the exact head
-  with a folded tail, the vector kernels for long searches, class pairs with
-  an English-rarity gate and their own no-earlier-match proof, and the proof
-  for a bounded or unbounded run of one class that can hold the literal,
-  behind assertions, and each literal kind's minimum search window, at its
-  measured crossover with the DFA, and the proofs that a count's matches end
-  at their literal's end ([#103], [#138], [#143], [#152], [#193],
-  [design][d-class-pairs], [design][d-min-inner-window],
+  ([RegexPrefixAnalyzer.cs][dotnet-literal-after-loop]); Inspired by Hyperscan,
+  whose Rose compiler anchors literals behind pure-repeat prefixes, for
+  class-run prefixes ([rose_build_castle.cpp][hs-rose-castle],
+  [rose_build_lookaround.cpp][hs-rose-leftfix]). Regulator: the vector kernels
+  for long searches, class pairs with an English-rarity gate and their own
+  no-earlier-match proof, and the proof for a bounded or unbounded run of one
+  class that can hold the literal, behind assertions, and each literal kind's
+  minimum search window, at its measured crossover with the DFA, and the proofs
+  that a count's matches end at their literal's end ([#103], [#138], [#143],
+  [#152], [#193], [design][d-class-pairs], [design][d-min-inner-window],
   [design][d-count-literal-end]).
 - **Where:** `InnerLiteralSearch.analyze`, `InnerLiteralSearch.search`,
   `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
   `InnerLiteralSearch.findLiteralSetMember`,
-  `InnerLiteralSearch.findFoldedLiteral`,
-  `InnerLiteralSearch.findFoldedLiteralVector`,
   `InnerLiteralSearch.usesVectorSearch`, `InnerLiteralSearch.asciiClassPair`,
   `InnerLiteralSearch.hasNoEarlierMatchAcrossLastByte`,
   `InnerLiteralSearch.findClassPairMember`,
@@ -552,9 +545,7 @@ so the automata run only where a match can be.
   counted texts of at least 64 bytes for a class pair or one-byte literal, 96
   for a longer single literal, 256 for a literal set, and 1 KiB for a set
   behind a class run that only the class-run proof admits, since below them
-  the literal's scan costs more than the DFA; 1 KiB, the folded prefix scan's
-  vector cutoff and unmeasured for this search, for a case-insensitive literal
-  whose exact head is empty or one common byte; from 64 bytes for a count of a
+  the literal's scan costs more than the DFA; from 64 bytes for a count of a
   set not behind a class run, whose one search continues across many matches,
   and for a pattern with a fixed-width short-search matcher, which answers its
   shorter counts and matcher finds and loses to the search from 64 bytes.
@@ -575,19 +566,13 @@ so the automata run only where a match can be.
   and confirms forward. A case-insensitive ASCII letter in the prefix consumes
   only its two cases, so the proof that the prefix cannot consume some byte of
   the literal holds behind one, as in `(?i:x)?\d+ = value`.
-  The required piece can take three other forms: one of
+  The required piece can take two other forms: one of
   up to 8 ASCII literals of 3 to 64 bytes, searched with the start literal
-  filter; a literal with case-insensitive ASCII letters, such as `# (?i:noqa)`,
-  found from 1 KiB with the Vector API by the folded pair kernel over its
-  first nine bytes and in shorter windows by its exact leading bytes, such as
-  `# `, with the rest checked by an OR mask; or two adjacent elements that
+  filter; or two adjacent elements that
   each consume one of at most three ASCII bytes, such as `[?!.]["']`, which
   English text rarely holds as a pair (estimated below once in 500 bytes),
   scanned for its two-byte members with a counted loop. A case-insensitive
-  literal whose exact leading bytes are none or one common byte, such as
-  `noqa` in `\s+(?i:noqa)`, is found only by the kernel. With no exact leading
-  bytes its proofs count both cases of every letter, exact ones included; a
-  one-byte head is proven by that byte. The prefix may also be a class run:
+  literal is not searched. The prefix may also be a class run:
   empty-width assertions and one class repeated `{lo,hi}`, as `\b\w+` in
   `\b\w+nn\b` or `.{0,2}` before a set of names, even where the class can hold
   the literal. A run that matches an earlier match's span also matches the
@@ -933,7 +918,7 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   XORs the block with the needle and does one signed compare below 1, which
   finds needle bytes and every non-ASCII byte together; several needles
   combine by lane-wise unsigned minimum. The folded pair kernels of the folded
-  prefix scan and inner literal search first OR `0x20` into the loaded bytes
+  prefix scan first OR `0x20` into the loaded bytes
   at letter probes, then XOR each probe's bytes with its lower-case byte. On
   Graviton with JDK 25, the two-byte candidate scans take Leipzig `∞|✓` to
   0.45 of its earlier time and RE2 `aqj` to 0.82 ([#132]), the RE2 run stop

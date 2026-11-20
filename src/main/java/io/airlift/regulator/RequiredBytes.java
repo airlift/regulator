@@ -186,7 +186,7 @@ final class RequiredBytes
         List<Regexp> elements = elements(regexp);
         for (int index = 0; index < elements.size(); index++) {
             InnerLiteralSearch.FoldedLiteral folded = InnerLiteralSearch.foldedLiteral(elements, index);
-            if (folded != null && folded.head().length >= MINIMUM_LITERAL_LENGTH) {
+            if (folded != null && folded.headLength() >= MINIMUM_LITERAL_LENGTH) {
                 return new RequiredBytes(false, folded.bytes(), folded.masks());
             }
             byte[] literal = InnerLiteralSearch.asciiLiteral(elements.get(index));
