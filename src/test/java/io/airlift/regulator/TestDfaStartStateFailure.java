@@ -145,7 +145,7 @@ public class TestDfaStartStateFailure
     @Test
     public void testSecondStartStateFailureUsesManyMatchFallback()
     {
-        Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
+        Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults().setMaxMemory(16L << 20), Re2Set.MatchMode.FIND);
         builder.add(utf8Slice("a"));
         builder.add(utf8Slice("b"));
         Re2Set set = builder.build();
@@ -153,7 +153,8 @@ public class TestDfaStartStateFailure
         dfa.failStateAllocationsForTesting(2);
 
         assertThatThrownBy(() -> set.matchesAny(utf8Slice("a")))
-                .isInstanceOf(RegexpMatchMemoryLimitException.class);
+                .isInstanceOfSatisfying(RegexpMatchMemoryLimitException.class, exception ->
+                        assertThat(exception.maxMemoryBytes()).isEqualTo(16L << 20));
         assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
         assertThat(set.matchesAny(utf8Slice("a"))).isTrue();
     }

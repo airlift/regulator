@@ -298,9 +298,9 @@ final class Dfa
     private static final long REVERSE_SELF_LOOP_NO_SKIP = -1;
     private static final IntPredicate COUNT_EVERY_MATCH = Dfa::countEveryMatch;
 
-    // Like upstream dfa_should_bail_when_slow. When true (default), the DFA
-    // returns SEARCH_FAILED if it detects cache thrashing. Tests can set this
-    // to false to force the DFA to keep going despite thrashing.
+    // Like upstream dfa_should_bail_when_slow. When true (default), a DFA other
+    // than a many-match one returns SEARCH_FAILED if it detects cache thrashing.
+    // Tests can set this to false to force the DFA to keep going despite thrashing.
     static volatile boolean dfaShouldBailWhenSlow = true;
 
     enum ManyMatchResult
@@ -3725,7 +3725,10 @@ final class Dfa
 
                 // Cache exhaustion: save/reset/restore
                 position++;
+                // As in upstream, a many-match search keeps going through slow resets, since a
+                // set has no NFA to fall back to. The other loops that bail never run one.
                 if (dfaShouldBailWhenSlow &&
+                        dfa.kind != DfaInstance.Kind.MANY_MATCH &&
                         resetPosition >= 0 &&
                         (position - resetPosition) < 10 * dfa.stateCount &&
                         !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {

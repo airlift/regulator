@@ -320,18 +320,6 @@ public class TestRe2Set
     }
 
     @Test
-    public void testMatchesAnyReportsDfaMemoryExhaustion()
-    {
-        Slice input = Slices.utf8Slice(deBruijnString(22) + "0");
-        assertThat(Re2.compile(Slices.utf8Slice("0[01]{22}$")).find(input)).isTrue();
-        Re2Set set = createExhaustingSet();
-
-        assertThatThrownBy(() -> set.matchesAny(input))
-                .isInstanceOfSatisfying(RegexpMatchMemoryLimitException.class, exception ->
-                        assertThat(exception.maxMemoryBytes()).isEqualTo(Re2.Options.DEFAULT_MAX_MEMORY));
-    }
-
-    @Test
     public void testMatchesAnyStopsAtFirstMatchInFullCache()
     {
         Re2Set set = buildSet(Re2.Options.defaults(), Re2Set.MatchMode.FIND, "a", "ab");
@@ -367,17 +355,18 @@ public class TestRe2Set
     }
 
     @Test
-    public void testMatchingPatternIdsSurvivesDefaultBudgetCacheResets()
+    public void testSearchesSurviveDefaultBudgetCacheResets()
     {
         Slice input = Slices.utf8Slice(deBruijnString(22) + "0");
         Re2Set set = createExhaustingSet();
 
-        assertThat(set.matchingPatternIds(input)).containsExactly(0);
+        assertThat(set.matchesAny(input)).isTrue();
         assertThat(set.dfaForDiagnostics().resetCount()).isPositive();
+        assertThat(set.matchingPatternIds(input)).containsExactly(0);
     }
 
     @Test
-    public void testMatchingPatternIdsSurvivesCustomBudgetCacheResets()
+    public void testSearchesSurviveCustomBudgetCacheResets()
     {
         Slice input = Slices.utf8Slice(deBruijnString(18) + "0");
         Re2.Options options = Re2.Options.defaults().setMaxMemory(64L << 10);
@@ -386,11 +375,10 @@ public class TestRe2Set
         Re2Set set = builder.build();
 
         assertThat(set.maxMemoryBytes()).isEqualTo(64L << 10);
-        assertThatThrownBy(() -> set.matchesAny(input))
-                .isInstanceOfSatisfying(RegexpMatchMemoryLimitException.class, exception ->
-                        assertThat(exception.maxMemoryBytes()).isEqualTo(set.maxMemoryBytes()));
-        assertThat(set.matchingPatternIds(input)).containsExactly(0);
-        assertThat(set.dfaForDiagnostics().resetCount()).isPositive();
+        // A set has no NFA to fall back to, so, as in upstream RE2::Set, a search whose cache
+        // resets again within a few bytes per state keeps going rather than giving up.
+        assertThat(set.matchesAny(input)).isTrue();
+        assertThat(set.dfaForDiagnostics().resetCount()).isGreaterThanOrEqualTo(2);
         assertThat(set.matchingPatternIds(input)).containsExactly(0);
     }
 
