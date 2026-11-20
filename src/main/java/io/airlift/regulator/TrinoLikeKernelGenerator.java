@@ -107,8 +107,8 @@ final class TrinoLikeKernelGenerator
                     OrderedLiterals,
                     Wildcard {}
 
-    /// Literals that occur in order, each searched after the end of the previous one, as
-    /// [OrderedLiteralMatcher] searches them; one literal is a contains search.
+    /// Literals that occur in order, each searched after the end of the previous one; one literal
+    /// is a contains search.
     record OrderedLiterals(List<LiteralSearchKernel> literals)
             implements Region
     {
@@ -384,8 +384,7 @@ final class TrinoLikeKernelGenerator
             }
         }
 
-        /// A copy of `OrderedLiteralMatcher.matches` over the middle `[start, end)` of
-        /// the backing array.
+        /// Searches the literals in order over the middle `[start, end)` of the backing array.
         private MethodDefinition defineOrderedLiterals(OrderedLiterals region)
         {
             List<MethodDefinition> searches = defineSearches(region.literals());

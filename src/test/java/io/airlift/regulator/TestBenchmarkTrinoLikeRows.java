@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -47,6 +48,7 @@ public class TestBenchmarkTrinoLikeRows
                         .toList());
     }
 
+    @Disabled("Sweep leg m-l7-engine: the ordered-literal matcher is removed")
     @Test
     public void testOrderedCellsUseOrderedLiteralsPlan()
     {

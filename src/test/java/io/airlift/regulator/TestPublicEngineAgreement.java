@@ -31,7 +31,6 @@ import java.util.stream.Stream;
 
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
-import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
@@ -308,9 +307,6 @@ public class TestPublicEngineAgreement
                 new Row(RustRegexp.compile(utf8Slice("(?s-u:a.*b)"), RustRegexp.Options.bytes()), true));
         for (Row row : twoLiterals) {
             assertThat(row.pattern().find(bytes("61ff62"))).as(label(row.pattern())).isEqualTo(row.orderedLiterals());
-            if (row.orderedLiterals()) {
-                assertNoProgramSearch(row.pattern(), label(row.pattern()));
-            }
         }
         // Longer sequences, with literals of more than one byte and leading and trailing gaps of
         // any character, which can match empty.
@@ -326,8 +322,7 @@ public class TestPublicEngineAgreement
         for (Row row : Stream.concat(twoLiterals.stream(), longer.stream()).toList()) {
             CompiledPattern pattern = row.pattern();
             String label = label(pattern);
-            assertThat(pattern.findPlanForDiagnostics()).as(label).isEqualTo(row.orderedLiterals() ? ORDERED_LITERALS : GENERAL);
-            assertThat(pattern.orderedLiteralMatcherForDiagnostics() != null).as(label).isEqualTo(row.orderedLiterals());
+            assertThat(pattern.findPlanForDiagnostics()).as(label).isEqualTo(GENERAL);
             Random random = new Random(20261105);
             for (int inputIndex = 0; inputIndex < 300; inputIndex++) {
                 ByteArrayOutputStream text = new ByteArrayOutputStream();
@@ -352,11 +347,9 @@ public class TestPublicEngineAgreement
                 "Re2 Latin-1 (?s:a.*b)", maxMemory -> Re2.compile(utf8Slice("(?s:a.*b)"), Re2.Options.latin1().setMaxMemory(maxMemory)),
                 "RustRegexp bytes (?s-u:a.*b)", maxMemory -> RustRegexp.compile(utf8Slice("(?s-u:a.*b)"), RustRegexp.Options.bytes().setMaxMemory(maxMemory)));
         for (Map.Entry<String, LongFunction<CompiledPattern>> compiler : compilers.entrySet()) {
-            assertThat(compiler.getValue().apply(Re2.Options.DEFAULT_MAX_MEMORY).orderedLiteralMatcherForDiagnostics()).as(compiler.getKey()).isNotNull();
             for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
                 CompiledPattern pattern = compileAtSmallestDfaBudget(compiler.getValue(), kind);
                 String label = compiler.getKey() + " " + kind;
-                assertThat(pattern.orderedLiteralMatcherForDiagnostics()).as(label).isNull();
                 assertThat(pattern.find(bytes("61ff62"))).as(label).isTrue();
             }
         }

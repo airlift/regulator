@@ -45,8 +45,7 @@ public sealed class TrinoRegexp
                 TrinoRegexp.FixedWidthByteTrinoRegexp,
                 TrinoRegexp.FullCaseFoldAlternationTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
-                TrinoRegexp.LiteralSetTrinoRegexp,
-                TrinoRegexp.OrderedLiteralTrinoRegexp
+                TrinoRegexp.LiteralSetTrinoRegexp
 {
     /// Mutable engine resource options. Compilation snapshots every option, so later changes do not
     /// affect an existing [TrinoRegexp]. Options instances are not thread-safe.
@@ -252,11 +251,6 @@ public sealed class TrinoRegexp
         if (fullCaseFoldAlternation != null && compiledPattern.tryReserveForwardDfaMemory(fullCaseFoldAlternation.estimatedRetainedSize())) {
             return new FullCaseFoldAlternationTrinoRegexp(compiledPattern, inputs, fullCaseFoldAlternation);
         }
-        OrderedLiteralMatcher orderedLiteralMatcher = compiledPattern.createOrderedLiteralMatcher();
-        // The ordered matcher takes precedence over the required bytes.
-        if (orderedLiteralMatcher != null && compiledPattern.tryReserveForwardDfaMemory(orderedLiteralMatcher.estimatedRetainedSize())) {
-            return new OrderedLiteralTrinoRegexp(compiledPattern, inputs, orderedLiteralMatcher);
-        }
         DotStarLiteralSpanMatcher dotStarLiteralSpanMatcher = compiledPattern.createDotStarLiteralSpanMatcher();
         if (dotStarLiteralSpanMatcher != null) {
             return new DotStarLiteralTrinoRegexp(compiledPattern, inputs, dotStarLiteralSpanMatcher);
@@ -372,11 +366,6 @@ public sealed class TrinoRegexp
         return null;
     }
 
-    boolean usesOrderedLiteralMatcherForDiagnostics()
-    {
-        return false;
-    }
-
     boolean usesLiteralGapMatcherForDiagnostics()
     {
         return false;
@@ -390,11 +379,6 @@ public sealed class TrinoRegexp
     boolean usesTrinoBeginLineCountForDiagnostics()
     {
         return false;
-    }
-
-    long orderedLiteralMatcherRetainedSizeForDiagnostics()
-    {
-        return 0;
     }
 
     boolean isSingleByteRepeatMatcherComputed()
@@ -509,50 +493,6 @@ public sealed class TrinoRegexp
                 }
             }
             return count;
-        }
-    }
-
-    private static final class OrderedLiteralTrinoRegexp
-            extends TrinoRegexp
-    {
-        private final OrderedLiteralMatcher matcher;
-
-        private OrderedLiteralTrinoRegexp(TrinoCompiledPattern re2, CompileInputs compileInputs, OrderedLiteralMatcher matcher)
-        {
-            super(re2, compileInputs);
-            this.matcher = requireNonNull(matcher, "matcher is null");
-        }
-
-        @Override
-        boolean usesOrderedLiteralMatcherForDiagnostics()
-        {
-            return true;
-        }
-
-        @Override
-        long orderedLiteralMatcherRetainedSizeForDiagnostics()
-        {
-            return matcher.estimatedRetainedSize();
-        }
-
-        @Override
-        long shapeRetainedSize()
-        {
-            return matcher.estimatedRetainedSize();
-        }
-
-        /// Searches the literals in order and reads the gaps between them as the engine's dot
-        /// does. A gap holding bytes the dot rejects leaves the answer to the engine on the whole
-        /// input, so contains agrees with the operations the engine answers.
-        @Override
-        public boolean contains(Slice source)
-        {
-            requireNonNull(source, "source is null");
-            int decision = matcher.findWithCharacterGaps(source);
-            if (decision == OrderedLiteralMatcher.UNDECIDED) {
-                return super.contains(source);
-            }
-            return decision == OrderedLiteralMatcher.MATCH;
         }
     }
 

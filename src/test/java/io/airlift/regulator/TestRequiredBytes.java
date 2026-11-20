@@ -1447,21 +1447,16 @@ public class TestRequiredBytes
         assertThat(requiredBytesAt(longMatches, longMatchesInitializes - 1).isLongWindowsOnly()).isTrue();
         assertThat(requiredBytesAt(longMatches, longMatchesInitializes)).isNull();
 
-        // The same holds after compilation, where Trino's ordered-literal route is charged with
-        // the required bytes' charge handed back, and they are judged again beside it, although
-        // compiled without the route the pattern takes the long-window literal at that budget.
+        // After compilation, the pattern keeps the short-window literal at the first budget that
+        // keeps required bytes. (Sweep leg m-l7-engine: no ordered-literal route to compare with.)
         Slice pattern = utf8Slice(expression);
         LongFunction<CompiledPattern> compileTrino = maxMemory -> compileTrinoWithMaxMemory(pattern, maxMemory).re2();
         long initializes = smallestBudget(maxMemory -> firstMatchDfaInitializes(compileTrino.apply(maxMemory)));
         long budget = firstBudgetKeepingRequiredBytes(initializes, compileTrino);
         TrinoRegexp regexp = compileTrinoWithMaxMemory(pattern, budget);
-        assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
         RequiredBytes kept = regexp.re2().requiredBytesForDiagnostics();
         assertThat(kept).hasToString(",z");
         assertThat(kept.searchesLongWindows()).isFalse();
-        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        TrinoCompiledPattern withoutRoute = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, budget, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
-        assertThat(withoutRoute.requiredBytesForDiagnostics().searchesLongWindows()).isTrue();
         assertThat(regexp.contains(utf8Slice("x,z q"))).isTrue();
         assertThat(regexp.contains(utf8Slice("x, zq"))).isFalse();
     }

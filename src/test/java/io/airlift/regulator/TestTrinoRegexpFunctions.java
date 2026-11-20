@@ -36,7 +36,6 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -257,44 +256,12 @@ public class TestTrinoRegexpFunctions
                 backing.length() - 2);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
-        assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(regexp.orderedLiteralMatcherRetainedSizeForDiagnostics()).isPositive();
         assertThat(regexp.contains(source)).isTrue();
         assertThat(regexp.contains(utf8("first third second"))).isFalse();
-        assertNoCachedDfa(regexp);
 
         assertThat(regexp.extract(source, 1)).isEqualTo(utf8("first"));
         assertThat(regexp.extract(source, 2)).isEqualTo(utf8("second"));
         assertThat(regexp.extract(source, 3)).isEqualTo(utf8("third"));
-    }
-
-    @Test
-    public void testOrderedLiteralContainsEligibility()
-    {
-        for (String pattern : List.of(
-                "first(?s:.*)second",
-                "(?s:.*)first(?s:.*)second",
-                "first(?s:.*)second(?s:.*)")) {
-            assertThat(TrinoRegexp.compile(utf8(pattern)).usesOrderedLiteralMatcherForDiagnostics())
-                    .as(pattern)
-                    .isTrue();
-        }
-
-        for (String pattern : List.of(
-                "first.*second",
-                "^first(?s:.*)second",
-                "first(?s:.*)second$",
-                "(?i:first)(?s:.*)second",
-                "first.{2}second",
-                "first\\b(?s:.*)second",
-                "first")) {
-            assertThat(TrinoRegexp.compile(utf8(pattern)).usesOrderedLiteralMatcherForDiagnostics())
-                    .as(pattern)
-                    .isFalse();
-        }
-
-        assertThat(TrinoRegexp.compile(utf8("first(?s:.*)second")).contains(utf8("first\nsecond"))).isTrue();
-        assertThat(TrinoRegexp.compile(utf8("first.*second")).contains(utf8("first\nsecond"))).isFalse();
     }
 
     @Test
@@ -316,67 +283,6 @@ public class TestTrinoRegexpFunctions
         assertThat(TrinoRegexp.compile(utf8("^alpha(?s:.)omega")).usesLiteralGapMatcherForDiagnostics()).isFalse();
         assertThat(TrinoRegexp.compile(utf8("alpha(?s:.)omega$")).usesLiteralGapMatcherForDiagnostics()).isFalse();
         assertThat(TrinoRegexp.compile(utf8("(?i:alpha)(?s:.)omega")).usesLiteralGapMatcherForDiagnostics()).isFalse();
-    }
-
-    @Test
-    public void testOrderedLiteralMatcherMemoryIsReservedFromForwardDfa()
-    {
-        Slice pattern = utf8("first(?s:.*)second(?s:.*)third");
-        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
-        TrinoRegexp regexp = TrinoRegexp.compile(pattern);
-
-        long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();
-        assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
-                .isEqualTo(retainedSize);
-
-        // The smallest budget that compiles fits the program before flattening at 72 bytes per
-        // instruction, and the flattened program is charged 49. When flattening does not grow the
-        // program, its DFA keeps at least 23 bytes per unflattened instruction, more when flattening
-        // removes instructions, so this short pattern keeps the matcher at that budget.
-        TrinoRegexp smallest = compileAtSmallestBudget(pattern);
-        assertThat(smallest.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(smallest.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
-
-        // The required bytes give way to the matcher: at its smallest budget, a 256-byte leading
-        // literal leaves too little allowance after their charge for the matcher, which takes
-        // their memory instead.
-        TrinoRegexp shorter = compileAtSmallestBudget(utf8("a".repeat(256) + "(?s:.*)b"));
-        assertThat(shorter.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(shorter.re2().requiredBytesForDiagnostics()).isNull();
-        assertThat(shorter.contains(utf8("x" + "a".repeat(256) + "yyb"))).isTrue();
-
-        // A long leading literal whose first byte recurs keeps a prefix shift table, charged after
-        // flattening, and at its smallest budget still keeps the matcher. It keeps no required
-        // bytes, since its prefix scan leaves no literal to check beside it: the `a` run is its
-        // start bytes, and `b` is one byte.
-        String literal = "a".repeat(320);
-        TrinoRegexp longPrefix = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
-        assertThat(longPrefix.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(longPrefix.re2().requiredBytesForDiagnostics()).isNull();
-        Slice source = utf8("x" + literal + "yyb\nb");
-        assertThat(longPrefix.contains(source)).isTrue();
-        assertThat(longPrefix.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
-        assertThat(longPrefix.count(source)).isEqualTo(1);
-        assertThat(longPrefix.extract(source)).isEqualTo(utf8(literal + "yyb\nb"));
-
-        // No Trino pattern takes the ordered-literal find plan of the other languages, whose gaps
-        // must read any bytes, so the subtype's reservation is its only ordered-literal
-        // reservation. Each pattern takes the subtype from the smallest budget that compiles, and
-        // neither it nor the patterns above has the plan.
-        List<TrinoRegexp> compiledPatterns = new ArrayList<>(List.of(smallest, longPrefix));
-        for (String expression : List.of("a(?s:.*)b(?s:.*)c", "(?s)a.*b.*c")) {
-            TrinoRegexp orderedLiterals = compileAtSmallestBudget(utf8(expression));
-            assertThat(orderedLiterals.usesOrderedLiteralMatcherForDiagnostics()).as(expression).isTrue();
-            assertThat(orderedLiterals.contains(utf8("xxfirst-a-second-b-third-cyy"))).as(expression).isTrue();
-            compiledPatterns.add(orderedLiterals);
-        }
-        for (TrinoRegexp compiled : compiledPatterns) {
-            String label = compiled.re2().pattern().toStringUtf8();
-            assertThat(compiled.re2().findPlanForDiagnostics()).as(label).isNotEqualTo(ORDERED_LITERALS);
-            assertThat(compiled.re2().orderedLiteralMatcherForDiagnostics()).as(label).isNull();
-        }
     }
 
     @Test
@@ -405,48 +311,6 @@ public class TestTrinoRegexpFunctions
             assertThat(smallest.count(source)).isEqualTo(regexp.count(source));
             assertThat(smallest.extractAll(source, 0)).isEqualTo(regexp.extractAll(source, 0));
         }
-    }
-
-    @Test
-    public void testOrderedLiteralMatcherKeepsRequiredBytesOnlyWhereForwardDfasStillInitialize()
-    {
-        // The matcher is charged first, with the required bytes' memory handed back, and the
-        // required bytes stay only where they fit what is left and every forward DFA that
-        // initializes with it still does after their charge. The baseline, compiled without the
-        // matcher, holds the required bytes the pattern had before the matcher's charge. The
-        // budgets run from the smallest that compiles until both forward DFAs initialize beside
-        // the required bytes, crossing each DFA's boundary in steps finer than the band, about
-        // 150 bytes of budget wide, where the required bytes would cost that DFA.
-        Slice pattern = utf8("Yeah(?s:.*)there");
-        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        List<Boolean> outcomes = new ArrayList<>();
-        boolean bothInitialize = false;
-        for (long maxMemory = smallestBudget(pattern); !bothInitialize; maxMemory += 16) {
-            assertThat(maxMemory).isLessThan(1 << 20);
-            TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, maxMemory, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
-            TrinoRegexp regexp = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-            assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).as("matcher at %s", maxMemory).isTrue();
-            long requiredBytes = baseline.requiredBytesRetainedSizeForDiagnostics();
-            if (requiredBytes == 0) {
-                continue;
-            }
-            Prog program = regexp.re2().forwardProgramForDiagnostics();
-            boolean keeps = regexp.re2().requiredBytesForDiagnostics() != null;
-            long allowance = program.dfaMemory() + (keeps ? requiredBytes : 0);
-            boolean costsDfa = false;
-            for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
-                costsDfa |= Dfa.DfaInstance.initializes(program, kind, allowance / 2) &&
-                        !Dfa.DfaInstance.initializes(program, kind, (allowance - requiredBytes) / 2);
-            }
-            assertThat(keeps).as("required bytes at %s", maxMemory).isEqualTo(requiredBytes <= allowance && !costsDfa);
-            if (requiredBytes <= allowance) {
-                outcomes.add(keeps);
-            }
-            bothInitialize = keeps &&
-                    Dfa.DfaInstance.initializes(program, Dfa.DfaInstance.Kind.FIRST_MATCH, program.dfaMemory() / 2) &&
-                    Dfa.DfaInstance.initializes(program, Dfa.DfaInstance.Kind.LONGEST_MATCH, program.dfaMemory() / 2);
-        }
-        assertThat(outcomes).contains(false, true);
     }
 
     @Test
@@ -1299,7 +1163,6 @@ public class TestTrinoRegexpFunctions
                 new MalformedInputRoute("fixed-width byte", TrinoRegexp.compile(utf8("\\d{3}-\\d{2}")), "123-45é", regexp -> regexp instanceof TrinoRegexp.FixedWidthByteTrinoRegexp),
                 new MalformedInputRoute("character class", TrinoRegexp.compile(utf8("\\p{L}+")), "aé 中", regexp -> regexp.re2().hasCharacterClassSpan()),
                 new MalformedInputRoute("literal neighbors", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().literalNeighborMatcherForDiagnostics() != null),
-                new MalformedInputRoute("ordered literals", TrinoRegexp.compile(utf8("first(?s:.*)second")), "firsté\nsecond", TrinoRegexp::usesOrderedLiteralMatcherForDiagnostics),
                 new MalformedInputRoute("dot-star literal", TrinoRegexp.compile(utf8(".*ab.*")), "éab\nab", TrinoRegexp::usesDotStarLiteralSpanMatcherForDiagnostics),
                 new MalformedInputRoute("literal alternation", TrinoRegexp.compile(utf8("WARN|é中")), "WARN é中", regexp -> regexp.literalAlternationSpanMatcher() != null),
                 new MalformedInputRoute("folded literal alternation", TrinoRegexp.compile(utf8("[Xx]ylophone|[Zz]ephyr")), "Xylophone ézephyr", regexp -> (regexp.literalAlternationSpanMatcher() instanceof LiteralAlternationSpanMatcher.FoldedMatcher) == VectorSupport.isAvailable()),

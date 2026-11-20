@@ -204,7 +204,6 @@ public class TestScanKernel
             assertThat(generated.getClass()).as(expression).isEqualTo(TrinoRegexp.compile(utf8Slice(expression)).getClass());
             assertNoGeneratedCode(expression, generated);
         }
-        assertThat(generated("first(?s:.*)second(?s:.*)third").usesOrderedLiteralMatcherForDiagnostics()).isTrue();
     }
 
     private static void assertNoGeneratedCode(String expression, TrinoRegexp regexp)

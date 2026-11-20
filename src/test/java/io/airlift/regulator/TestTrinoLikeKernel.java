@@ -117,8 +117,8 @@ public class TestTrinoLikeKernel
                 new Shape("%abcdefghijklmnopqrs%", CONTAINS),
                 new Shape("a%b%c", CONTAINS),
                 new Shape("a%b", ORDERED_LITERALS),
-                new Shape("%a%bc%x😀%", ORDERED_LITERALS),
-                new Shape("ab%abcdefghijklmnopqrs%cd%", ORDERED_LITERALS),
+                new Shape("%a%bc%x😀%", TRINO_WILDCARD),
+                new Shape("ab%abcdefghijklmnopqrs%cd%", TRINO_WILDCARD),
                 new Shape("%ab_c%", LITERAL_GAPS),
                 new Shape("%ab__é_😀%", LITERAL_GAPS),
                 new Shape("%ab_____cd%", LITERAL_GAPS),
@@ -258,8 +258,7 @@ public class TestTrinoLikeKernel
 
         for (Search search : List.of(
                 new Search("%x%", CONTAINS, "x", 1),
-                new Search("%needle%", CONTAINS, "needle", 1),
-                new Search("%x%x%", ORDERED_LITERALS, "x", 2))) {
+                new Search("%needle%", CONTAINS, "needle", 1))) {
             String pattern = search.pattern();
             byte[] literal = search.literal().getBytes(UTF_8);
             TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));

@@ -359,7 +359,7 @@ public class TestTrinoLikeCorpus
         assertPlan("needle%%%", STARTS_WITH);
         assertPlan("%%%needle", ENDS_WITH);
         assertPlan("%%%needle%%%", CONTAINS);
-        assertPlan("%alpha%%omega%", ORDERED_LITERALS);
+        assertPlan("%alpha%%omega%", TRINO_WILDCARD);
         assertPlan("alpha%%omega", ORDERED_LITERALS);
         assertPlan("_", TRINO_WILDCARD);
         assertPlan("%alpha_omega%", LITERAL_GAPS);
@@ -373,8 +373,7 @@ public class TestTrinoLikeCorpus
     public void testOrderedLiteralSharedSearchRoute()
     {
         TrinoLikePattern pattern = TrinoLikePattern.compile(Slices.utf8Slice("%alpha%omega%tail%"));
-        assertThat(pattern.planForDiagnostics()).isEqualTo(ORDERED_LITERALS);
-        assertThat(pattern.usesSharedOrderedLiteralSearchForDiagnostics()).isTrue();
+        assertThat(pattern.planForDiagnostics()).isEqualTo(TRINO_WILDCARD);
 
         byte[] bytes = {'!', '!', (byte) 0xFF, 'a', 'l', 'p', 'h', 'a', '-', 'o', 'm', 'e', 'g', 'a', '-', 't', 'a', 'i', 'l', (byte) 0xC0, '!', '!'};
         Slice input = Slices.wrappedBuffer(bytes).slice(2, bytes.length - 4);

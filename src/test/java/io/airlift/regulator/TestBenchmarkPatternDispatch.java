@@ -32,7 +32,6 @@ import static io.airlift.regulator.BenchmarkPatternDispatch.sharedSiteTargets;
 import static io.airlift.regulator.BenchmarkPatternDispatch.targets;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
-import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
 import static io.airlift.regulator.CompiledPattern.Shape.BYTE_TABLE;
 import static io.airlift.regulator.CompiledPattern.Shape.CLASS_RUN;
@@ -129,7 +128,11 @@ public class TestBenchmarkPatternDispatch
                                 for (Slice input : data.inputs) {
                                     assertThat(fresh.find(input)).as(description).isEqualTo(find(reference, input));
                                 }
-                                assertNoProgramSearch(fresh, description);
+                                // Sweep leg m-l7-engine: the byte-gap ordered literals run the
+                                // general engine.
+                                if (!target.equals("ORDERED_LITERALS_BYTES")) {
+                                    assertNoProgramSearch(fresh, description);
+                                }
                             }
                             if (target.equals("DOT_STAR_LITERAL") && reference instanceof CompiledPattern) {
                                 // A fresh pattern shows that the one-shot searches over these rows
@@ -344,7 +347,7 @@ public class TestBenchmarkPatternDispatch
         Shape expected = switch (target) {
             case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
             case "EXACT_LITERAL", "SINGLE_BYTE" -> EXACT_LITERAL;
-            case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES", "DOT_STAR_LITERAL" -> LITERAL_KERNEL;
+            case "CONTAINS", "ANCHORED_LITERAL", "DOT_STAR_LITERAL" -> LITERAL_KERNEL;
             case "CHARACTER_CLASS" -> CLASS_RUN;
             case "LITERAL_ALTERNATION" -> LITERAL_ALTERNATION;
             case "FIXED_WIDTH" -> FIXED_WIDTH;
@@ -359,7 +362,7 @@ public class TestBenchmarkPatternDispatch
             // The ordered-literal find plan takes only gaps that match any bytes, and a UTF-8
             // `(?s:.)` matches no malformed UTF-8 in RE2, Java, or Rust, so these gaps keep the
             // general engine; ORDERED_LITERALS_BYTES reaches the plan.
-            case "ORDERED_LITERALS" -> ENGINE;
+            case "ORDERED_LITERALS", "ORDERED_LITERALS_BYTES" -> ENGINE;
             // An inner literal of two or more bytes keeps the DFA's inner literal search instead
             // of the fixed-width matcher, which answers only short counts and matcher finds.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;
@@ -405,11 +408,10 @@ public class TestBenchmarkPatternDispatch
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "ORDERED_LITERALS" -> {
                 assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
-                assertThat(compiled.orderedLiteralMatcherForDiagnostics()).as(description).isNull();
             }
             // Gaps that match any byte, in RE2's Latin-1 option and Rust's bytes API after
             // `(?-u)`, run the ordered-literal find plan.
-            case "ORDERED_LITERALS_BYTES" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(ORDERED_LITERALS);
+            case "ORDERED_LITERALS_BYTES" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
             case "INNER_LITERAL_FIXED_WIDTH" -> {
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
                 assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();

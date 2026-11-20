@@ -41,7 +41,6 @@ import static io.airlift.regulator.TestingAllocations.assertAllocatesNothingOnce
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
-import static io.airlift.regulator.TrinoLikePattern.Plan.ORDERED_LITERALS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.TRINO_WILDCARD;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -704,7 +703,7 @@ public class TestRe2Allocations
             assertThat(List.of(contains, ordered, gaps, wildcard)).allMatch(pattern -> pattern.usesGeneratedBytecode() == generateBytecode);
             assertThat(List.of(contains, ordered, gaps, wildcard))
                     .extracting(TrinoLikePattern::planForDiagnostics)
-                    .containsExactly(CONTAINS, ORDERED_LITERALS, LITERAL_GAPS, TRINO_WILDCARD);
+                    .containsExactly(CONTAINS, TRINO_WILDCARD, LITERAL_GAPS, TRINO_WILDCARD);
             Slice containsInput = Slices.utf8Slice("xxneedleyy");
             Slice orderedInput = Slices.utf8Slice("xxalpha--omegayy");
             Slice gapsInput = Slices.utf8Slice("xxalpha💰omegayy");

@@ -142,7 +142,7 @@ final class LiteralSearchKernel
     }
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher, LiteralGapMatcher,
+    /// `-1`. Requires a one-byte literal; LiteralGapMatcher,
     /// LiteralNeighborMatcher, and InnerLiteralSearch call it for such literals and
     /// [#findContains(Slice,int,int)] for longer ones. It scans two words at a time, reading
     /// LOW_BITS from [#lowBits], and finishes the range with [#findSingleByteTail].
@@ -221,7 +221,7 @@ final class LiteralSearchKernel
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`, for a literal of at least two bytes and a valid range. LIKE, every language's regexp
-    /// contains and dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal,
+    /// contains and dot-star spans, LiteralGapMatcher's first literal,
     /// LiteralNeighborMatcher, InnerLiteralSearch, and WindowLiteralSearch call it for such
     /// literals. Its word scan makes no call until it finds a possible candidate, and a separate
     /// method verifies the candidates.

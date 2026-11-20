@@ -57,17 +57,6 @@ public class TestBenchmarkTrinoRows
     }
 
     @Test
-    public void testOrderedCellsUseOrderedLiteralMatcher()
-    {
-        List<Map<String, String>> ordered = TestingTrinoRowsBenchmarkInputs.cellRows("ordered");
-        assertThat(ordered).isNotEmpty();
-        for (Map<String, String> row : ordered) {
-            String cell = row.get("workload") + "/" + row.get("literal_id");
-            assertThat(TrinoRegexp.compile(utf8Slice(row.get("pattern"))).usesOrderedLiteralMatcherForDiagnostics()).as(cell).isTrue();
-        }
-    }
-
-    @Test
     public void testDotStarCellsUseDotStarLiteralSpanMatcher()
     {
         List<Map<String, String>> dotStar = TestingTrinoRowsBenchmarkInputs.cellRows("dotstar");

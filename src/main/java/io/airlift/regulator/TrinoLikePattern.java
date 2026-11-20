@@ -299,12 +299,14 @@ public sealed class TrinoLikePattern
                         literals.add(literal.bytes());
                     }
                 }
-                if (!literals.isEmpty()) {
-                    Slice[] literalArray = literals.toArray(Slice[]::new);
-                    matcher = literals.size() == 1
-                            ? new ContainsMatcher(literalArray[0], exact)
-                            : new OrderedMatcher(new OrderedLiteralMatcher(literalArray, exact));
-                    plan = literals.size() == 1 ? Plan.CONTAINS : Plan.ORDERED_LITERALS;
+                if (literals.size() == 1) {
+                    matcher = new ContainsMatcher(literals.getFirst(), exact);
+                    plan = Plan.CONTAINS;
+                }
+                else if (!literals.isEmpty()) {
+                    // Sweep leg: literals in order, with no `_`, run on the wildcard matcher.
+                    matcher = new WildcardMatcher(new TrinoLikeWildcardMatcher(elements, patternStart, patternEnd, exact));
+                    plan = Plan.TRINO_WILDCARD;
                 }
             }
         }
@@ -523,11 +525,6 @@ public sealed class TrinoLikePattern
         return shortLiteralWidth != 0;
     }
 
-    boolean usesSharedOrderedLiteralSearchForDiagnostics()
-    {
-        return matcher instanceof OrderedMatcher orderedMatcher && orderedMatcher.matcher().usesSharedLiteralSearchForDiagnostics();
-    }
-
     boolean usesSharedLiteralGapSearchForDiagnostics()
     {
         return matcher instanceof LiteralGapPlanMatcher;
@@ -651,24 +648,6 @@ public sealed class TrinoLikePattern
         }
     }
 
-    private record OrderedMatcher(OrderedLiteralMatcher matcher)
-            implements Matcher
-    {
-        private static final int INSTANCE_SIZE = SizeOf.instanceSize(OrderedMatcher.class);
-
-        @Override
-        public long estimatedRetainedSize()
-        {
-            return INSTANCE_SIZE + matcher.estimatedRetainedSize();
-        }
-
-        @Override
-        public boolean matches(Slice input, int offset, int length)
-        {
-            return matcher.matches(input, offset, length);
-        }
-    }
-
     private record LiteralGapPlanMatcher(LiteralGapMatcher matcher)
             implements Matcher
     {
@@ -764,8 +743,6 @@ public sealed class TrinoLikePattern
                 case null -> null;
                 case ContainsMatcher contains -> new TrinoLikeKernelGenerator.OrderedLiterals(
                         List.of(contains.search == null ? new LiteralSearchKernel(contains.literal) : contains.search));
-                case OrderedMatcher ordered -> new TrinoLikeKernelGenerator.OrderedLiterals(
-                        ordered.matcher().literals());
                 case LiteralGapPlanMatcher gaps -> new TrinoLikeKernelGenerator.LiteralGaps(
                         gaps.matcher().literals(),
                         gaps.matcher().codePointGaps());

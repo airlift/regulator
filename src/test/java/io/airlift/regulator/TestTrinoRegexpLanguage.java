@@ -89,7 +89,6 @@ public class TestTrinoRegexpLanguage
         // rule leaves free to differ from Joni.
         TrinoRegexp pair = TrinoRegexp.compile(utf8Slice("first(?s:.*)second"));
         Slice malformedGap = orderedLiteralInput(rawBytes(0xFF));
-        assertThat(pair.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
         assertThat(pair.contains(malformedGap)).isFalse();
         assertThat(pair.extract(malformedGap)).isNull();
 
@@ -106,20 +105,11 @@ public class TestTrinoRegexpLanguage
                 utf8Slice("\n💰"), true);
         for (String pattern : List.of("first(?s:.*)second", "(first)(?s:.*)(second)(?s:.*)(third)", "(?s:.*)first(?s:.*)second(?s:.*)")) {
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
-            assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).as(pattern).isTrue();
             gaps.forEach((gap, matches) -> {
                 Slice input = orderedLiteralInput(gap);
                 String description = "%s with gap %s".formatted(pattern, HexFormat.of().formatHex(gap.getBytes()));
                 assertThat(regexp.contains(input)).as(description).isEqualTo(matches);
                 assertThat(regexp.extract(input) != null).as(description).isEqualTo(matches);
-                if (matches) {
-                    // An accepted gap answers on the literal search alone: the engine builds no DFA.
-                    TrinoRegexp fresh = TrinoRegexp.compile(utf8Slice(pattern));
-                    assertThat(fresh.contains(input)).as(description).isTrue();
-                    for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
-                        assertThat(fresh.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(kind)).as("%s initialized %s DFA", description, kind).isNull();
-                    }
-                }
             });
             // A rejected gap does not decide: the engine finds the later literals.
             Slice laterMatch = orderedLiteralInput(rawBytes(0xFF), utf8Slice(" first second third"));
