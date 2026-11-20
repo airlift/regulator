@@ -100,7 +100,7 @@ also admits fewer routes:
   `Dfa.buildStartClassFilter`);
 - no folded literal alternation (`LiteralAlternationSpanMatcher.analyzeFolded`)
   and no Trino full-case-fold alternation;
-- no fixed-width block search and no literal-set root skip.
+- no literal-set root skip.
 
 With 64-lane preferred vectors (such as x86 with AVX-512), compilation drops a
 no-prefix folded run that starts every match (`Compiler.foldedRunForAccel`),
@@ -1348,20 +1348,17 @@ it as `LiteralSetTrinoRegexp` with no program.
 
 Matches of one fixed character count, up to 256 positions: scan one candidate
 position, verify the rest (`FixedWidthByteSpanMatcher`). Candidates are an
-ASCII byte, a rare position, or, with the Vector API, a block of classes
-(`VectorBlockMaskScanner`). A matcher whose candidate byte set includes a
+ASCII byte or a rare position. A matcher whose candidate byte set includes a
 non-ASCII byte, set at construction, returns `BAILED` after at least 64 failed
-candidates at more than one per 32 bytes, and the ordinary engine continues;
-a block search never bails. Only a rare-candidate or block search steps aside
-for the engine's scans (`CP.yieldsToEngineRoute`); an ASCII singleton scan
-never does. It steps aside where the program skips to start candidates on its
-own, a matcher that bails on dense candidates qualifies for the matcher class
-counter, or the first-match DFA gives a one-bit start literal filter. Trino's
-forms are `FixedWidthByteTrinoRegexp` and a `FIXED_WIDTH` pattern with no
-program.
+candidates at more than one per 32 bytes, and the ordinary engine continues.
+Only a rare-candidate search steps aside for the engine's scans
+(`CP.yieldsToEngineRoute`); an ASCII singleton scan never does. It steps aside
+where the program skips to start candidates on its own, a matcher that bails on
+dense candidates qualifies for the matcher class counter, or the first-match
+DFA gives a one-bit start literal filter. Trino's forms are
+`FixedWidthByteTrinoRegexp` and a `FIXED_WIDTH` pattern with no program.
 [Fixed-width byte span](OPTIMIZATION_CATALOG.md#fixed-width-byte-span),
 [Fixed-width rare class scan](OPTIMIZATION_CATALOG.md#fixed-width-rare-class-scan),
-[Fixed-width block search](OPTIMIZATION_CATALOG.md#fixed-width-block-search),
 [Fixed-Width Rare Class Candidates](../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates).
 
 #### Disjoint suffix-repeat matcher

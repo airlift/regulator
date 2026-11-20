@@ -42,7 +42,6 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestFixedWidthByteSpanMatcher
 {
@@ -175,17 +174,12 @@ public class TestFixedWidthByteSpanMatcher
             }
         }
 
-        // A candidate of several bytes, one that can bail, a pattern that reads characters, and a
-        // block search keep the shared loops, and a search of at least 1,024 candidate positions
+        // A candidate of several bytes, one that can bail, and a pattern that reads characters
+        // keep the shared loops, and a search of at least 1,024 candidate positions
         // takes the vector scan where the Vector API runs.
         assertCandidateByteSearches("[0-9]{4}", matcher("[0-9]{4}"), utf8Slice("in 2024 and 2025"), 2, false);
         assertCandidateByteSearches("Latin-1 [a-z]{3}\\xE0", optionalMatcher("[a-z]{3}\\xE0", Re2.Options.latin1()), wrappedBuffer(bytes('a', 'b', 'c', 0xE0, ' ', 'x', 'y', 'z', 0xE0)), 2, false);
         assertCandidateByteSearches("[a-q][^u-z]{13}x", matcher("[a-q][^u-z]{13}x"), utf8Slice("a0123456789abcx"), 1, false);
-        if (VectorSupport.isAvailable()) {
-            for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns("\\w{5}\\s\\w{6}\\s\\w{7}").entrySet()) {
-                assertCandidateByteSearches(entry.getKey(), entry.getValue().fixedWidthByteSpanMatcherForDiagnostics(), utf8Slice("hello planet journey"), 1, false);
-            }
-        }
         assertCandidateByteSearches("long [0-9]{4}-[0-9]{2}-[0-9]{2}", matcher("[0-9]{4}-[0-9]{2}-[0-9]{2}"), utf8Slice("b".repeat(2_048) + "2025-12-09"), 1, !VectorSupport.isAvailable());
     }
 
@@ -355,13 +349,9 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(wideAsciiTrino.re2().forwardProgramForDiagnostics().start()).isZero();
 
         // Where every position's first bytes are common in English text, analysis refuses the
-        // pattern unless the block search takes it, and the engine keeps it. The search refuses a
-        // pattern whose estimated starts are denser than once a block, \w\s\w; one of a single
-        // class, a class repeat that the class-run counter counts, [a-z]{5} and \w{20}; one of
-        // five classes; one with a class whose ranges and complement both exceed four, [aeiou];
-        // and one wider than a block. \w{20}, the five classes, and [aeiou]\w{8}\s\w{3} estimate
-        // 0.011, 0.0036, and 0.0042, under 1/64, so only their own limits refuse them.
+        // pattern, and the engine keeps it.
         for (String expression : List.of(
+                "\\w{5}\\s\\w{6}\\s\\w{7}",
                 "\\w\\s\\w",
                 "[a-z]{5}",
                 "\\w{20}",
@@ -564,72 +554,45 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
-    public void testBlockSearch()
+    public void testCommonClassPatternsAgreeWithGeneralEngine()
     {
-        // No position of \w{5}\s\w{6}\s\w{7} is rare enough to scan for: English text holds word
-        // bytes and whitespace far more often than once in 100 bytes. Where every position reads
-        // one byte and the Vector API runs, the matcher tests every start of a 64-byte block at
-        // once instead; VectorScannerProbe checks that without it the engine keeps the pattern.
-        // Rust's Unicode \w and \s hold characters above ASCII, so there the pattern keeps the
-        // engine.
-        String words = "\\w{5}\\s\\w{6}\\s\\w{7}";
-        assertThat(RustRegexp.compile(utf8Slice(words)).hasRetainedFixedWidthByteSpanMatcher()).isFalse();
-        if (!VectorSupport.isAvailable()) {
-            return;
-        }
-        assertBlockSearch(blockSearchPatterns(words));
-        // Trino's \w and \s are ASCII classes, and its subtype answers every operation from the
-        // search without a program.
-        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(words));
-        assertThat(trino).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
-        assertThat(trino.re2().fixedWidthByteSpanMatcherForDiagnostics().searchesBlocksForDiagnostics()).isTrue();
-        assertThat(trino.re2().forwardProgramForDiagnostics().start()).isZero();
-
-        // A pattern with a rare candidate keeps scanning it. testWideClassPatternsTakeTheMatcher
-        // covers a singleton position and the patterns the search refuses.
-        for (String expression : List.of("[0-9]{4}-[0-9]{2}-[0-9]{2}", "[a-q][^u-z]{16}[x\\xE0-\\xFF]")) {
-            for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns(expression).entrySet()) {
-                assertThat(entry.getValue().fixedWidthByteSpanMatcherForDiagnostics().searchesBlocksForDiagnostics()).as(entry.getKey()).isFalse();
-            }
-        }
-
-        // Count, boolean find, and the span searches agree with the general engine on short
-        // rows and malformed UTF-8, and on rows several blocks long of English words, digits,
-        // and text above ASCII, whose matches start in every offset of a block and cross into
-        // the next. The patterns hold two to four classes, a class of four ranges, and positions
-        // at every offset of a block.
+        // No position of these fixed-width patterns is rare enough to scan for in English text.
+        // These patterns keep no fixed-width matcher and run the ordinary engine. Count, boolean
+        // find, and the span searches agree with the general engine on short rows and malformed
+        // UTF-8, and on long rows of English words, digits, and text above ASCII. The patterns hold
+        // two to four classes and a class of four ranges.
         List<Slice> shortInputs = new ArrayList<>(fragmentInputs());
         shortInputs.addAll(List.of(
                 utf8Slice("Holmes, which there lived a"),
                 utf8Slice("about which Holmes thought\nawhile"),
                 utf8Slice("Ab_9z w0rd_x abcdefg"),
                 wrappedBuffer("cafés à la carte, whichÿ".getBytes(ISO_8859_1))));
-        List<Slice> longInputs = blockSearchInputs();
+        List<Slice> longInputs = wordRowInputs();
+        String words = "\\w{5}\\s\\w{6}\\s\\w{7}";
         for (String expression : List.of(
                 words,
                 "[A-Z][a-z]{4}\\s[a-z]{3}",
                 "[A-Z][a-z]{3}[a-fn-z]\\s",
                 "\\w{30}\\s\\w{33}")) {
-            assertBlockSearch(blockSearchPatterns(expression));
-            assertGeneralEngineAgreement(blockSearchPatterns(expression), shortInputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
-            assertGeneralEngineAgreement(blockSearchPatterns(expression), longInputs, TestFixedWidthByteSpanMatcher::blockRegionEnds);
+            assertPublicOperationsAgreeWithGeneralEngine(byteClassPatterns(expression), shortInputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
+            assertPublicOperationsAgreeWithGeneralEngine(byteClassPatterns(expression), longInputs, TestFixedWidthByteSpanMatcher::blockRegionEnds);
         }
-        // Classes above ASCII take the search where they read bytes, among them a class with
-        // more than four ranges whose complement fits in four.
+        // Classes above ASCII, read as bytes, among them a class with more than four ranges whose
+        // complement fits in four.
         String separated = "[^\\t\\n ,.]{4}[ ,.][^\\t\\n ,.]{4}[ ,.]";
-        assertBlockSearch(separatedPatterns(separated));
-        assertGeneralEngineAgreement(separatedPatterns(separated), shortInputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
-        assertGeneralEngineAgreement(separatedPatterns(separated), longInputs, TestFixedWidthByteSpanMatcher::blockRegionEnds);
+        Map<String, CompiledPattern> separatedPatterns = Map.of(
+                "RE2 Latin-1 " + separated, Re2.compile(utf8Slice(separated), Re2.Options.latin1()),
+                "Rust bytes (?-u)" + separated, RustRegexp.compile(utf8Slice("(?-u)" + separated), RustRegexp.Options.bytes()));
+        assertPublicOperationsAgreeWithGeneralEngine(separatedPatterns, shortInputs, TestFixedWidthByteSpanMatcher::everyRegionEnd);
+        assertPublicOperationsAgreeWithGeneralEngine(separatedPatterns, longInputs, TestFixedWidthByteSpanMatcher::blockRegionEnds);
 
-        // \w{30}\s\w{33} is a block wide, so its last position reads the next block's word. Its
-        // matches start at a block's first byte (0 and 64), inside a block (1, 37, and 100), and
-        // at its last byte (63); each that starts past a block's first byte crosses into the next
-        // block. A find from inside the match finds the overlapping match of its last 30 y's and
-        // the z's, which the count skips.
+        // \w{30}\s\w{33} is 64 bytes wide. Its matches start at offsets 0, 1, 37, 63, 64, and 100.
+        // A find from inside the match finds the overlapping match of its last 30 y's and the z's,
+        // which the count skips.
         String widest = "\\w{30}\\s\\w{33}";
         for (int matchStart : List.of(0, 1, 37, 63, 64, 100)) {
             Slice input = utf8Slice(" ".repeat(matchStart) + "x".repeat(30) + " " + "y".repeat(33) + " " + "z".repeat(70));
-            for (Map.Entry<String, CompiledPattern> entry : blockSearchPatterns(widest).entrySet()) {
+            for (Map.Entry<String, CompiledPattern> entry : byteClassPatterns(widest).entrySet()) {
                 String label = "%s at %s".formatted(entry.getKey(), matchStart);
                 CompiledPattern pattern = entry.getValue();
                 assertThat(pattern.count(input)).as(label).isEqualTo(1);
@@ -642,6 +605,7 @@ public class TestFixedWidthByteSpanMatcher
             }
         }
 
+        // Trino's \w and \s are ASCII classes, and every operation agrees with Joni.
         Regex oracle = joniPattern(words);
         List<Slice> trinoSources = new ArrayList<>();
         for (Slice input : longInputs) {
@@ -649,72 +613,12 @@ public class TestFixedWidthByteSpanMatcher
                 trinoSources.add(input);
             }
         }
-        verifyOperations(words, trino, source -> joniMatches(oracle, source), trinoSources);
-    }
-
-    @Test
-    public void testBlockSearchNearMaximumInput()
-    {
-        // An input within a block of the largest array finds the match at its start. There
-        // lastStart - block would overflow, so the block loop's exit compares block with
-        // lastStart - BLOCK_BYTES.
-        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
-        assumeTrue(Runtime.getRuntime().maxMemory() >= 3L << 30, "the input needs a heap of 3 GiB");
-        byte[] bytes = new byte[Integer.MAX_VALUE - 16];
-        byte[] words = "abcde abcdef abcdefg".getBytes(UTF_8);
-        System.arraycopy(words, 0, bytes, 0, words.length);
-        Slice input = wrappedBuffer(bytes);
-        String expression = "\\w{5}\\s\\w{6}\\s\\w{7}";
-        Re2 pattern = Re2.compile(utf8Slice(expression));
-        assertBlockSearch(Map.of("RE2 " + expression, pattern));
-        assertThat(pattern.count(input)).isEqualTo(1);
-        RegexpMatcher matcher = pattern.matcher(input);
-        assertThat(matcher.find()).isTrue();
-        assertThat(matcher.start()).isZero();
-        assertThat(matcher.end()).isEqualTo(words.length);
-    }
-
-    @Test
-    public void testBlockClassWordsInBothForms()
-    {
-        // Both forms of a block's class word, whichever this platform takes, set the bit of each
-        // byte in one of one to four ranges, ranges that start at 0x00 and end at 0xFF included.
-        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
-        Random random = new Random(20261108);
-        for (int iteration = 0; iteration < 2_000; iteration++) {
-            int rangeCount = 1 + random.nextInt(4);
-            int[] bounds = random.ints(2L * rangeCount, 0, 256).sorted().toArray();
-            if (iteration % 7 == 0) {
-                bounds[0] = 0;
-                bounds[bounds.length - 1] = 0xFF;
-            }
-            long ranges = 0;
-            for (int range = 0; range < rangeCount; range++) {
-                ranges |= (long) ((bounds[2 * range + 1] - bounds[2 * range]) << 8 | bounds[2 * range]) << (16 * range);
-            }
-            byte[] data = new byte[64 + 8];
-            for (int index = 0; index < data.length; index++) {
-                data[index] = (byte) (random.nextBoolean() ? bounds[random.nextInt(bounds.length)] + random.nextInt(3) - 1 : random.nextInt(256));
-            }
-            int position = random.nextInt(9);
-            long expected = 0;
-            for (int index = 0; index < 64; index++) {
-                int value = data[position + index] & 0xFF;
-                for (int range = 0; range < rangeCount; range++) {
-                    if (bounds[2 * range] <= value && value <= bounds[2 * range + 1]) {
-                        expected |= 1L << index;
-                    }
-                }
-            }
-            String label = "ranges %s at %s".formatted(Arrays.toString(bounds), position);
-            assertThat(VectorBlockMaskScanner.members(data, position, ranges, rangeCount)).as(label).isEqualTo(expected);
-            assertThat(VectorBlockMaskScanner.membersSve(data, position, ranges, rangeCount)).as(label).isEqualTo(expected);
-        }
+        verifyOperations(words, TrinoRegexp.compile(utf8Slice(words)), source -> joniMatches(oracle, source), trinoSources);
     }
 
     // Compiles `expression` in the languages whose \w and \s read one byte: RE2, in UTF-8 and
     // Latin-1, Java, and Rust's byte mode without Unicode.
-    private static Map<String, CompiledPattern> blockSearchPatterns(String expression)
+    private static Map<String, CompiledPattern> byteClassPatterns(String expression)
     {
         return Map.of(
                 "RE2 " + expression, Re2.compile(utf8Slice(expression)),
@@ -723,29 +627,12 @@ public class TestFixedWidthByteSpanMatcher
                 "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
     }
 
-    // Compiles `expression`, whose classes hold bytes above ASCII, where those classes read
-    // bytes: RE2's Latin-1 mode and Rust's byte mode.
-    private static Map<String, CompiledPattern> separatedPatterns(String expression)
-    {
-        return Map.of(
-                "RE2 Latin-1 " + expression, Re2.compile(utf8Slice(expression), Re2.Options.latin1()),
-                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
-    }
-
-    private static void assertBlockSearch(Map<String, CompiledPattern> patterns)
-    {
-        for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
-            assertThat(entry.getValue().hasRetainedFixedWidthByteSpanMatcher()).as(entry.getKey()).isTrue();
-            assertThat(entry.getValue().fixedWidthByteSpanMatcherForDiagnostics().searchesBlocksForDiagnostics()).as(entry.getKey()).isTrue();
-        }
-    }
-
     // Rows of 300 to 1,500 bytes: English words of one to nine letters between whitespace and
     // punctuation, words among digits, Cyrillic and Chinese text around English words, and
     // malformed UTF-8 bytes among words. Each row is also searched as a view with bytes on both
     // sides, which must not reach results, so its blocks start past the array's first byte. The
     // seed is fixed, so a failure replays.
-    private static List<Slice> blockSearchInputs()
+    private static List<Slice> wordRowInputs()
     {
         Random random = new Random(20261108);
         List<String> separators = List.of(" ", " ", " ", ", ", ". ", "\n", "\t", "  ");
@@ -785,6 +672,48 @@ public class TestFixedWidthByteSpanMatcher
             inputs.add(padded.slice().slice(3, row.length()));
         }
         return inputs;
+    }
+
+    // The ends of the regions from `start` that end near a 64-byte block boundary past it, and of
+    // the one that ends a byte before the input, for inputs several blocks long.
+    private static IntStream blockRegionEnds(Slice input, int start)
+    {
+        return IntStream.of(start + 63, start + 64, start + 65, start + 127, start + 128, input.length() - 1).filter(end -> end >= start && end <= input.length());
+    }
+
+    // Requires boolean find, count, the one-shot findInto, a matcher's find from every start and
+    // region findInto from there to each of `regionEnds`, and a matcher's group-zero finds, to
+    // match the general engine's.
+    private static void assertPublicOperationsAgreeWithGeneralEngine(Map<String, CompiledPattern> patterns, List<Slice> inputs, BiFunction<Slice, Integer, IntStream> regionEnds)
+    {
+        for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
+            String label = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            int[] groups = new int[2];
+            for (Slice input : inputs) {
+                String inputLabel = "%s input %s".formatted(label, HexFormat.of().formatHex(input.getBytes()));
+                long expectedCount = generalEngineCount(pattern, input);
+                assertThat(pattern.find(input)).as(inputLabel).isEqualTo(expectedCount > 0);
+                assertThat(pattern.count(input)).as(inputLabel).isEqualTo(expectedCount);
+                RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                Arrays.fill(groups, 7);
+                assertThat(findIntoSpan(pattern.findInto(input, groups), groups, "%s findInto", inputLabel)).as(inputLabel).isEqualTo(generalMatcher.find() ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH);
+                RegexpMatcher matcher = pattern.matcher(input);
+                for (int start = 0; start <= input.length(); start++) {
+                    long expected = generalMatcher.find(start) ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH;
+                    assertThat(matcherSpan(matcher.find(start), matcher)).as("%s start %s", inputLabel, start).isEqualTo(expected);
+                    for (int end : regionEnds.apply(input, start).toArray()) {
+                        expected = generalMatcher.reset(input, start, end).find() ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH;
+                        Arrays.fill(groups, 7);
+                        assertThat(findIntoSpan(pattern.findInto(input, start, end, groups), groups, "%s findInto %s-%s", inputLabel, start, end)).as("%s findInto %s-%s", inputLabel, start, end).isEqualTo(expected);
+                    }
+                }
+                assertMatcherSpans(pattern, input, 0, input.length(), inputLabel);
+                if (input.length() >= 2) {
+                    assertMatcherSpans(pattern, input, 1, input.length() - 1, inputLabel);
+                }
+            }
+        }
     }
 
     @Test
@@ -988,14 +917,6 @@ public class TestFixedWidthByteSpanMatcher
         return IntStream.rangeClosed(start, input.length());
     }
 
-    // The ends of the regions from `start` that end near a block boundary past it, and of the
-    // one that ends a byte before the input, for inputs several blocks long.
-    private static IntStream blockRegionEnds(Slice input, int start)
-    {
-        return IntStream.of(start + 63, start + 64, start + 65, start + 127, start + 128, input.length() - 1)
-                .filter(end -> end >= start && end <= input.length());
-    }
-
     // Requires, for every region of `input`, `pattern`'s boolean find and its find, lookingAt,
     // and matches group zero, and a matcher's lookingAt and find spans and matches boolean, to
     // match `reference`'s.
@@ -1191,12 +1112,12 @@ public class TestFixedWidthByteSpanMatcher
         // Each pattern compiles from the least maxMemory at which the route without a program
         // fits; below it neither the matcher nor a program fits. Up to 8 KiB the inner literal
         // search of a shing pattern does not fit, so the matcher is the route. The last pattern
-        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4933 it
+        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4921 it
         // compiles only on the route without one.
         Map<String, Long> minimumMaxMemory = Map.of(
-                "[a-z]shing", 4477L,
-                "\\d{4}-\\d{2}-\\d{2}", 4573L,
-                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4933L);
+                "[a-z]shing", 4465L,
+                "\\d{4}-\\d{2}-\\d{2}", 4561L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4921L);
         for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
             Slice expression = utf8Slice(entry.getKey());
             for (long maxMemory = 256; maxMemory <= 8192; maxMemory++) {
@@ -1210,7 +1131,7 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
-        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4933));
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4921));
         assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
 
         // The repetitions of a repeated group share its positions' ranges, so the matcher charges
@@ -1221,8 +1142,8 @@ public class TestFixedWidthByteSpanMatcher
         // Where the program fits but neither the inner literal search nor the matcher fits beside
         // it, the pattern takes the route without a program, which reserves the matcher.
         Map<String, List<Long>> matcherOnlyMaxMemory = Map.of(
-                "[a-z]shing", List.of(5123L, 5137L),
-                "[a-z]{2}ing", List.of(5015L, 5040L));
+                "[a-z]shing", List.of(5123L, 5125L),
+                "[a-z]{2}ing", List.of(5015L, 5028L));
         for (Map.Entry<String, List<Long>> entry : matcherOnlyMaxMemory.entrySet()) {
             for (long maxMemory = entry.getValue().get(0); maxMemory <= entry.getValue().get(1); maxMemory++) {
                 String label = "%s at %s".formatted(entry.getKey(), maxMemory);
