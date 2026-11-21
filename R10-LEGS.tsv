@@ -1,0 +1,12 @@
+leg	sha	subject	jvm_extra	note
+main	5fc520136a94bc3d5b5751c6888482c848236f08	Say when count takes the group-zero span search	-	base: origin/main
+removals	94a6bd9a14672ac9484f18823246aa41fccba443	Drop the always-on byte scan productivity switch	-	head of user/dain/sweep-removals (src/main identical to round 9 leg 0fefcbc60)
+removals-inline	94a6bd9a14672ac9484f18823246aa41fccba443	Drop the always-on byte scan productivity switch	-XX:CompileCommand=inline,io.airlift.regulator.BitState::search	cell A: force the inline
+main-dontinline	5fc520136a94bc3d5b5751c6888482c848236f08	Say when count takes the group-zero span search	-XX:CompileCommand=dontinline,io.airlift.regulator.BitState::search	cell A: forbid the inline
+f3-parent	3bcac08cf7fc37b2bc8b90025eff6c83aec36a8b	Drop the prefix literal set	-	cell B: parent of F3
+f3	d9de709f54bfe97a6a7d7b82e36f74248822a257	Drop the fixed-width block search	-	cell B: F3
+f7-parent	885452cf1360d49ad971b84d17004dcade9ddd42	Drop the disjoint suffix-repeat matcher	-	cell B: parent of F7
+f7	2a5b8bb2b212a9721505ef9dde334805ab309465	Drop the Trino single-byte repeat matcher	-	cell B: F7; cell D: parent of P2
+p2	22e0db206bd6612834e0a523be3d317328145236	Drop the ASCII-folded scan plans	-	cells C and D: P2, mid-stack
+l9-parent	eda089bdba250c259c08a4765ac49ae16b32a5bb	Drop the flat paired DFA table	-	cell C2: parent of L9
+l9	96a0730ea5014468009cd05a45e4f0f7fed7f04c	Drop the lowered final-line program	-	cell C2: L9

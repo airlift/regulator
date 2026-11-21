@@ -1,0 +1,24 @@
+cell	row_id	language	operation	mode	platform	legs	cut_tier	note
+A	baseline/trino-specialized-patterns/urlHostPort/extract/regular-engine	trino	extract	native	r9g	main,removals,removals-inline,main-dontinline	never	item 1
+B	baseline/trino-operations/everyday/isoDate/replaceLambda	trino	replaceLambda	native	r9g	f3-parent,f3,f7-parent,f7	never	item 2
+B	baseline/trino-operations/everyday/trinoPhone/replaceLambda	trino	replaceLambda	native	r9g	f3-parent,f3,f7-parent,f7	never	item 2
+B	baseline/trino-operations/everyday/keyValue/replaceLambda	trino	replaceLambda	native	r9g	f3-parent,f3,f7-parent,f7	never	item 2
+B	baseline/trino-operations/everyday/isoDate/replaceLambda	trino	replaceLambda	native	r9g	main,removals	never	item 2: reproduce the combined move
+B	baseline/trino-operations/everyday/isoDate/replace	trino	replace	native	r9g	f3-parent,f3,f7-parent,f7	3	item 2: control (string replace)
+C1	language-bulk/curated/02-literal-alternate/sherlock-en/execute	trino	execute	native	r8i	main,p2,removals	never	item 3
+C1	language-bulk/curated/02-literal-alternate/sherlock-zh/execute	java	execute	native	r8i	main,p2,removals	never	item 3
+C1	language-bulk/curated/02-literal-alternate/sherlock-zh/execute	rust	execute	native	r8i	main,p2,removals	never	item 3
+C2	language-bulk/unicode/overlapping-words/english/execute	trino	execute	native	r9g	main,p2,removals,l9-parent,l9	never	item 6
+C2	language-bulk/unicode/overlapping-words/english/execute	trino	execute	native	r8i	main,p2,removals,l9-parent,l9	4	item 6
+D	baseline/trino-operations/everyday/keyValue/extract	trino	extract	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/keyValue/split	trino	split	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/keyValue/positionThird	trino	positionThird	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/extract	trino	extract	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/split	trino	split	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/positionThird	trino	positionThird	native	r9g	f7,p2	2	item 4 (first cut)
+D	baseline/trino-operations/everyday/keyValue/extract	trino	extract	native	r8i	f7,p2	1	item 4 (first cut)
+D	baseline/trino-operations/everyday/keyValue/split	trino	split	native	r8i	f7,p2	1	item 4 (first cut)
+D	baseline/trino-operations/everyday/keyValue/positionThird	trino	positionThird	native	r8i	f7,p2	1	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/extract	trino	extract	native	r8i	f7,p2	1	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/split	trino	split	native	r8i	f7,p2	1	item 4 (first cut)
+D	baseline/trino-operations/everyday/quotedField/positionThird	trino	positionThird	native	r8i	f7,p2	1	item 4 (first cut)
