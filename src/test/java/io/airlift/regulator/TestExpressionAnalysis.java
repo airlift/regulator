@@ -309,19 +309,6 @@ public class TestExpressionAnalysis
     }
 
     @Test
-    public void testCanConsumeLineFeed()
-    {
-        assertThat(analyze("abc").canConsumeLineFeed()).isFalse();
-        assertThat(analyze("[a-z]+").canConsumeLineFeed()).isFalse();
-        assertThat(analyze(".+").canConsumeLineFeed()).isFalse();
-        assertThat(analyze("\\n").canConsumeLineFeed()).isTrue();
-        assertThat(analyze("[\\n]").canConsumeLineFeed()).isTrue();
-        assertThat(analyze("a|\\n").canConsumeLineFeed()).isTrue();
-        assertThat(analyze("(?s:.)").canConsumeLineFeed()).isTrue();
-        assertThat(analyze("\\C").canConsumeLineFeed()).isTrue();
-    }
-
-    @Test
     public void testExistingAnalysisEquivalence()
     {
         for (String pattern : List.of(

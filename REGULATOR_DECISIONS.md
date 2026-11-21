@@ -1159,17 +1159,15 @@ Each root reaches at most one allowance of Java memory plus the paired rows or
 heap pointer table it carried, so at most two allowances. Releasing paired rows
 refunds their charge, and states built afterward fill arrays an older root
 still shares, so a root that carried paired rows can reach one allowance plus
-those rows, at most the paired cap: 64 KiB for object rows, or 32 KiB for the
-flat table plus its uncharged segment view of about 72 bytes with compressed
-oops. A heap pointer table that the budget rule gives back, or that a failed
-allocation withholds, refunds its charge the same way, so a root that carried
-it can reach one allowance plus the table, which was itself charged within an
-allowance. A superseded root becomes eligible for collection once no search
-retains it. A charge would require knowing when the last reader of a generation
-finishes, which is the reader registration this design removes; as with the
-member table under [Trino Specialized Byte
-Scans](#trino-specialized-byte-scans), bounded memory the DFA does not retain
-needs no charge of its own.
+those rows, at most the paired cap of 64 KiB. A heap pointer table that the
+budget rule gives back, or that a failed allocation withholds, refunds its
+charge the same way, so a root that carried it can reach one allowance plus the
+table, which was itself charged within an allowance. A superseded root becomes
+eligible for collection once no search retains it. A charge would require
+knowing when the last reader of a generation finishes, which is the reader
+registration this design removes; as with the member table under [Trino
+Specialized Byte Scans](#trino-specialized-byte-scans), bounded memory the DFA
+does not retain needs no charge of its own.
 
 A heap pointer table that a reset, a growth, or the budget rule supersedes is
 ordinary garbage, like the superseded Java tables, and is neither counted nor
@@ -1205,56 +1203,22 @@ for small DFA graphs. The table is demand-built only after a search of at least
 and is charged against the DFA state budget. Normal state allocation discards
 the table before reporting budget exhaustion.
 
-The table takes one of two forms, chosen once at class initialization by
-platform. On every platform but aarch64, each selected state has an object row
-holding the row each pair of byte classes reaches and then the state. On
-aarch64, the rows live in one flat `int` array, one row for each selected state
-holding the byte offset of the row each pair reaches and then the state's offset
-in the DFA's transitions, plus an array of each state's row offset. The search
-reads the flat array through a heap memory segment, as the heap pointer table
-under
-[Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
-does. Pre-scaled byte offsets lost to object rows before 1.0, but C2 on AArch64
-folds the segment's base add into the load's address, so a step adds the pair's
-byte offset to the row's and loads, with no scaling between one load and the
-next. On r9g (Graviton 4) the flat step ran paired rows 9-21% faster than object
-rows, in rebar and in all four JMH languages. On r8i the same rows ran 3-72%
-slower, slow in 12 of 12 fresh JVMs, because C2 kept the loop-carried row offset
-in a vector register. Object rows on r8i run in a fast or a slow mode by launch;
-a flat table read as a plain `int` array, whose step scales each index, removed
-that variance but cost r9g 6-18%. No single form won on both hosts, so each of
-them keeps the form it runs faster. Only r9g and r8i were measured: Graviton 2
-and 3, Apple, and other aarch64 hosts get the flat form by `os.arch` without
-measurement, and every x86 host keeps object rows. The
-`io.airlift.regulator.dfa.flat-paired-rows` system property overrides the form
-for a run, as a testing and diagnostic switch. Tests run
-`TestDfaPairedTransitions`' cases in both forms on every host: child JVMs force
-the property each way.
+Each selected state has an object row holding the row each pair of byte classes
+reaches and then the state, on every platform. aarch64 once held the rows in one
+flat table of byte offsets instead. It bought only rebar's Sherlock
+`word-ending-n` rows on Graviton, which take 1.08 to 1.12 times as long on
+object rows, while the other 35 paired rows read 0.97 to 1.03, so it was
+removed, and both platforms now use object rows.
 
 Object rows are charged a retained-size estimate with eight-byte references that
-includes each row's header, capped at 64 KiB. The flat table is charged its two
-arrays' sizes, capped at 32 KiB. Its segment view, about 72 bytes with
-compressed oops (the `MemorySegment` and its heap session), is not charged, as
-the heap pointer table's is not. The flat slots take four bytes where the
-estimate counts eight, and the flat rows have no header, so under its cap the
-flat table pairs complete tables of more states. On the default 64-bit layout
-with compressed oops, at a `maxMemory` of 8 MiB, `^x*(a[01]{280}|a)` pairs all
-283 of its states on the flat table, charged 30,600 bytes, and none as object
-rows, whose estimate of 65,680 bytes exceeds 64 KiB. Where the DFA's free state
-budget is the smaller limit, both forms share it, so the flat table fits about
-twice the rows: at a `maxMemory` of 17 KiB, `(?s).*x` pairs all five of its
-states on the flat table and two as object rows. These absolute caps are
-independent of the configured memory budget: larger budgets must not enable
-cache-hostile global transition expansion. When the complete graph does not fit,
-partial pairing is limited to exactly two selected rows and 16 KiB of object
-rows or 8 KiB of flat table. Selection considers cached forward entry states
-before states with observed self-loops. Broader and larger partial tables remain
-on the compact path to bound retained memory and avoid cache-hostile global
-transition expansion.
-
-The cache root holds both forms' fields on every platform, so the unused pair
-costs each DFA 8 bytes of state budget with compressed oops (16 without),
-charged as fixed overhead.
+includes each row's header, capped at 64 KiB. This cap and the partial cap below
+are absolute, independent of the configured memory budget: larger budgets must
+not enable cache-hostile global transition expansion. When the complete graph
+does not fit, partial pairing is limited to exactly two selected rows and 16 KiB
+of object rows. Selection considers cached forward entry states before states
+with observed self-loops. Broader and larger partial tables remain on the
+compact path to bound retained memory and avoid cache-hostile global transition
+expansion.
 
 The paired loop decodes already-computed normal, dead, full-match, and match
 transitions directly. After a first-match candidate, it preserves the candidate
@@ -1554,9 +1518,7 @@ start while at least 4 KiB remain, and the count keeps the vector scan from the
 first sample that selects it; on a text of at least 64 KiB, a later scalar
 choice holds for the next 64 KiB past its sample. A start literal filter or
 start class filter is kept without this sample, though the per-search
-productivity check still samples its stops. Searches served by the
-fixed-distance scan do not sample, so dense input such as `[a-z]{3}:[0-9]+`
-over repeated `zza:1.` does not pay a start-byte density sample per match.
+productivity check still samples its stops.
 Below 4 KiB the check reports the span as productive without sampling, so
 resampling there would promote the vector scan for uniformly dense input. The per-search
 productivity check that can reject candidate scanning altogether runs for each
@@ -1566,8 +1528,7 @@ current selection. A count under 64 KiB with no sampling carried across calls
 discards a vector scan promotion made by the search that retried, and the retry
 samples again; a longer count, or one that carries sampling, keeps what its
 sampling recorded. The selected primitive changes only how candidates are found,
-never which candidates the DFA processes. Fixed-distance candidate selection
-still samples at each match.
+never which candidates the DFA processes.
 
 Sampling at each match boundary made the choice depend on where the previous
 match ended rather than on the input. On sparse capture input with a match
@@ -1597,8 +1558,8 @@ fused counts.
 Each sample spreads its windows over the whole remaining text, so every one of
 those counts read the same far, cold bytes again. These counts therefore share
 their sampling outcomes: a vector selection holds for the rest of the
-inner-literal count, and a scalar selection and each start-byte and
-fixed-distance productivity result, productive or not, hold for the next 64 KiB
+inner-literal count, and a scalar selection and each start-byte
+productivity result, productive or not, hold for the next 64 KiB
 past the position sampled, as the group-zero search cursor holds a rejection. A
 vector selection recorded by a search that then retries is kept, and the shared
 counts keep the 64-byte start decision.
@@ -1608,17 +1569,15 @@ minimum, also shares one sampling among its own searches when the caller
 carries no sampling across calls. Each search starts at a match end, so
 sampling at every one read windows spread over the rest of the text once per
 match, which was 36-55% of the time of the case-insensitive literal count rows.
-Each later search of a call starts just past a match near the position
-sampled, so the call holds only the outcomes that stay valid past those
-matches: a fixed-distance rejection, a productive start-byte result, and the
-scalar scan choice hold for the next 64 KiB, and a productive fixed-distance
-result and a start-byte rejection are sampled again at each search. A held
+Each later search of a call starts just past a match near the position sampled,
+so the call holds only the outcomes that stay valid past those matches: a
+productive start-byte result and the scalar scan choice hold for the next 64
+KiB, and a start-byte rejection is sampled again at each search. A held
 start-byte rejection taken among a cluster of matches sent the search after the
-cluster walking the plain DFA to a far match, and on the bounded-repeat context
-row a held productive fixed-distance result sent a search into a 670 KB gap
-where the fixed-distance scan stopped densely. The bounded-repeat context row
-counts `[A-Za-z]{10}\s+[\s\S]{0,100}Result[\s\S]{0,100}\s+[A-Za-z]{10}`. Ratios
-are to sampling at every match end, on r8i / r9g (lower is faster).
+cluster walking the plain DFA to a far match. The bounded-repeat context row
+counts `[A-Za-z]{10}\s+[\s\S]{0,100}Result[\s\S]{0,100}\s+[A-Za-z]{10}`; its
+figures were measured while the fixed-distance scan existed. Ratios are to
+sampling at every match end, on r8i / r9g (lower is faster).
 
 Alternatives rejected:
 
@@ -1631,10 +1590,6 @@ Alternatives rejected:
   context row, 1.005x / 0.999x on the `\p{Sm}` count, and 1.00x / 0.90x on the
   IPv4 count, and gave up part of the case-insensitive win, with
   `02-literal-alternate sherlock-casei-en` at 0.52x / 0.60x.
-- Holding fixed-distance results either way, the scalar choice, and productive
-  start-byte results took 1.065x / 1.052x on the bounded-repeat context row and
-  1.010x / 1.013x on the `\p{Sm}` count, and 1.00x on r8i on the IPv4 count,
-  unchanged on r9g, while keeping the case-insensitive literal count win.
 
 The shipped rule takes 0.994x / 0.998x on the `\p{Sm}` count, 0.995x / 0.995x
 on the bounded-repeat context row, and 0.994x on r8i on the IPv4 count,
@@ -1642,24 +1597,6 @@ unchanged on r9g, where that row is bimodal across forks. It keeps the
 case-insensitive literal count win: `02-literal-alternate sherlock-casei-en`
 takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
 `tom-sawyer-huckle-fin-insensitive` 0.481x / 0.656x.
-
-A single find, a count search, or a group-zero cursor search with less than
-64 KiB left, a whole search under 64 KiB or the end of a longer count, does not
-sample the fixed-distance scan. It took that scan by default, and when the
-scan's first skip was short it handed the search to the plain DFA, which
-walked to the match end one byte at a time. On `sherlock-casei-en` in Rust
-bytes mode the names' fifth bytes, a space, `l`, or `e` in either case, fill
-the text, so the searches of the last 64 KiB stepped 58,791 of the count's
-73,333 DFA bytes. Such a search therefore takes the start literal or class
-filter instead when English text holds the fixed-distance bytes more often
-than the filter's estimate accepts a position; a sampled search keeps its
-sample's outcome. Before folded literals took this count, it then stepped
-13,086 DFA bytes for the same 725 matches. On r9g / r8i the count takes
-0.56x / 0.47x of main's time, and a single find in 4 or 16 KiB of English text
-0.12x / 0.09x. Holding the count's last sampled fixed-distance outcome into the
-tail instead would not reach a count under 64 KiB, and a held rejection without
-a filter would leave a dense tail on the start-byte scan rather than the
-fixed-distance scan's handoff to the plain DFA.
 
 ## Bounded DFA Pointer Transition Table
 
@@ -1768,7 +1705,7 @@ A state the budget cannot hold weighs the table, whether the state tables or
 the pointer table would have to grow for it or the state alone does not fit.
 This budget rule compares the bytes of the pointer rows in use, reserved row
 zero included, with a quarter of the generation's retained Java state memory,
-which leaves out the pointer, paired-row and fixed-distance charges. When the
+which leaves out the pointer and paired-row charges. When the
 rows reach that cutoff and the table's refunded charge can hold the state, the
 DFA gives the table back instead of resetting: it publishes the tables without
 the table, as a withheld growth does, refunds its charge, keeps every state,
@@ -1982,9 +1919,7 @@ Decided (Dain, 2026-11-06): without native access, the DFA uses the same
 tagged pointer table on the Java heap, reversing the earlier decision that kept
 the table native-only. The AWS r9g and r8i comparison against object rows, in
 both memory modes, passed the project's performance gate with the one accepted
-loss below. With a table in both modes, a pattern counted by the compact
-character-class counter may also keep its optional count DFA without native
-access, which it previously kept only with it.
+loss below.
 
 A/B result (AWS r9g and r8i, JDK 25, two hosts per platform and two rounds, JMH
 average time; each figure is the time with this change divided by the time
@@ -2018,8 +1953,7 @@ too often, by the rules of
 A public count whose DFA count gives up falls back for that call: it counts its
 text with a matcher whose finds skip the forward DFA, the inner-literal search,
 the end-anchored reverse DFA, the candidate start cursor, and the group-zero
-forward cursor, so its fallback adds no resets. The retained-class counter
-falls back to its compact counter instead. Either way, the answer is the
+forward cursor, so its fallback adds no resets. Either way, the answer is the
 fallback's, so a count that gives up or skips the DFA is exact.
 
 Each upstream RE2 search judges its own DFA work, and gives up on a thrashing
@@ -2052,9 +1986,7 @@ boolean searches' own. Only unanchored boolean searches of a forward program
 with the [position
 automaton](#bit-parallel-position-automaton-after-dfa-failure) that bounded,
 assertion-free matches compile to take part, including a full-Slice `find` that
-runs its [inner literal search first](#minimum-inner-literal-search-window), or
-[hands it a long window's required literal
-hit](#required-literal-absence-on-long-windows),
+runs its [inner literal search first](#minimum-inner-literal-search-window),
 once that search falls back. A pattern without the automaton keeps upstream's
 rule, because its searches would fall back on BitState or the Pike NFA, which
 were not measured against a DFA that thrashes. Such a search reads the reset
@@ -2274,9 +2206,8 @@ the literal-alternation shape of a pattern that compiled no program, a class of
 its own because it routes `matchInternal` to the set and so leaves the
 program-bearing class untouched. Each override makes one call to a final
 route method of `CompiledPattern`, so a call site that sees one class can
-inline one route. The class selects the routes; within them, the class-run
-shape holds one immutable per-instance fact, whether it counts on the retained
-count DFA, and the scan-plan shape three: whether `find` keeps its literal
+inline one route. The class selects the routes; within them, the scan-plan
+shape holds three immutable per-instance facts: whether `find` keeps its literal
 kernel, whether a start-anchored plan counts with one attempt, and whether
 short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
@@ -2382,7 +2313,7 @@ ordinary engine: a match from the call's start cannot cross the first line feed,
 past which the matcher would search on for the literal. An unanchored call makes
 no long-window check, which for such a pattern would never shorten the search:
 its find plan is the contains plan, only a pattern that finds on the general
-engine or a lowered program checks long windows for a required literal, and the
+engine checks long windows for a required literal, and the
 matcher scans for the literal itself and stops at the region's end. The matcher
 calls the contains search itself, and `matchInto` calls the matcher. C2 limits
 inline depth below the method it compiles, and forwarding frames spend that
@@ -2441,8 +2372,8 @@ malformed input unspecified, keeps its engine's answer as its scan plans do. The
 plan does not check a gap's bytes. A leading or trailing gap can match empty, so
 it does not decide whether a match exists. The matcher's memory comes from the
 forward DFA budget, as Trino's ordered-literal subtype's does, so a pattern with
-a lowered boolean or tagged alternation program, or without room for the
-matcher, keeps the engine. Release 2.0 had no such plan outside Trino, and the
+a tagged alternation program, or without room for the matcher, keeps the
+engine. Release 2.0 had no such plan outside Trino, and the
 matcher [yields to the forward DFAs](#memory-budgets-and-dfa-caching). Trino's
 contains keeps its own ordered-literal subtype, which checks each `(?s:.)` gap
 against the characters the engine's dot accepts and asks the engine when one
@@ -2451,103 +2382,12 @@ describes; no Trino pattern takes the plan, since Trino reads only UTF-8 and has
 no dot that matches any byte.
 
 Full-Slice boolean `find` of a class run, a literal, and a class run, such as
-lh3lh3's email `([^ @]+)@([^ @]+)`, decides from the byte on each side of each
-hit of the literal, in every language. A match exists exactly where some hit
-has a character of the first class just before it and one of the second just
-after it, since one character of each completes a match; spans, captures, and
-leftmost-first or leftmost-longest rules do not change whether one exists, so
-the plan serves this `find` alone. Every other operation runs the engine as
-without the plan, and a pattern on the plan keeps any long-window check for its
-required literal, with two effects on the other operations. The matcher's
-memory is reserved before the required bytes, so at a tight `maxMemory` it can
-leave no room for them where they fit without it: `[a-z]+ing[a-z]+` under RE2's
-POSIX options keeps no long-window check at 3,184 bytes. And the plan makes the
-pattern's shape a literal kernel's, so a capturing matcher search clears its
-group array once more before matching.
-
-The plan steps aside where the required literal's
-[long-window handoff](#required-literal-absence-on-long-windows) applies: a
-`find` of at least the required bytes' 256-byte window limit whose required
-literal hands its first hit to the inner literal search takes that handoff, as
-without the plan, and the matcher does not run. So `[a-z]+aa[a-z]+` keeps the
-handoff on long windows and the matcher on shorter ones. The handoff was there
-first, and no benchmark row measures a pattern that has both: the email and
-`[a-z]+e[a-z]+` rows keep no handoff, and nearly every line of a line-by-line
-search over leipzig or lh3lh3 is shorter than 256 bytes. Which of the two is
-faster on long records is unmeasured.
-
-The plan's analysis reads the normalized expression the pattern compiles, which
-must be exactly three elements, with captures looked through: a class repeated
-by `+`, a literal, and another such repeat. The simplifier leaves `{1,}` as `+`
-and expands a counted repeat such as `{1,3}` into nested optional copies, which
-keep the general engine, as do a side that can match empty, an assertion or any
-other element, and a required prefix. A class's ranges list every rune it
-matches, so a Java or Rust case-insensitive class, whose parser adds the case
-variants to its ranges and clears its fold flag, takes the plan, as
-`(?i)[a-z]+@[a-z]+` does in Java; a class or literal that keeps `FOLD_CASE` or
-`FULL_CASE_FOLD`, as an RE2 case-insensitive one does, keeps the engine. The
-literal must be ASCII, or any Latin-1 characters in a Latin-1 pattern, so each
-of its characters is one byte. The literal must also be at most 64 bytes long:
-the scan restarts one byte past each hit, so a longer literal that overlaps
-itself would be compared again in full at each of its positions, as the inner
-literal search's limit records.
-
-A neighbor byte decides alone when it is a whole character: any byte in Latin-1
-mode, under RE2's Latin-1 option or in Rust's bytes API with Unicode off, and an
-ASCII byte beside a UTF-8 class, in RE2, Java, Rust, and Trino. An ASCII byte is
-never part of another character, even in malformed input, since the compiled
-UTF-8 ranges take only continuation bytes after a lead byte, so a hit with an
-ASCII member on each side is a match, and one with an ASCII non-member on either
-side is not. A UTF-8 class with only ASCII members compiles to no range that
-matches a byte at or above 0x80, so such a byte rejects the hit too. Beside a
-UTF-8 class with non-ASCII members, that byte can end or begin one of its
-characters, or be malformed, so the first hit with such a byte beside it and no
-rejecting byte on either side ends the scan, and the general engine decides from
-the input's start, doing no more than without the plan beyond the scan up to
-that hit. A hit at either edge of the input has no byte on that side and is no
-match. The matcher holds the literal's search kernel, a 256-byte table of each
-byte's state on both sides, and for a one-byte literal a 256-entry candidate
-table marking the literal's byte for the density sample below, reserved from the
-forward DFA budget as the ordered-literal matcher's is, and
-[yields to the forward DFAs](#memory-budgets-and-dfa-caching). On lh3lh3's
-1,086,077 lines no email find reaches a DFA in any language, where 15,128 lines
-did. Under JMH, lh3lh3 email finds take 0.96 of their earlier time in
-RE2 and Rust on Graviton and tie on Intel, and finds of `[a-z]+e[a-z]+` over
-rebar's leipzig text take 0.49 of their earlier time on Graviton and 0.55 on
-Intel.
-
-The scan restarts one byte past each hit, so a frequent one-byte literal makes
-it stop often. Over digit-free prose joined into one line of 897,635 bytes,
-`[a-z]+ [0-9]+` stopped at all 169,755 spaces, one every 5.3 bytes, each
-rejected by the letter after it, where the general engine reads the line in one
-DFA pass; the find took 1.95 to 1.96 times its time without the plan on
-Graviton and 2.11 on Intel, in all four languages. So on an input of at least
-4 KiB a one-byte literal is first sampled as the DFA samples a small start-byte
-set, four 16-byte windows spread over the input that give up at four hits across
-the sample, and when the sample finds the byte dense the matcher leaves the find
-to the general engine before any scan, which decides from the input's start as
-without the plan. It is the rule by which the DFA's start-byte scan yields to
-stepping the DFA. The matcher samples whatever the vector width, where the DFA
-samples a set of up to three bytes only on vectors wider than 128 bits, since
-the matcher's scan is a word scan that stops at every hit on any hardware. A
-sparse literal, such as
-email's `@`, keeps the scan, and a longer literal is not sampled. Below 4 KiB
-the matcher scans without sampling, as the DFA does, so a shorter line of
-densely repeated literal bytes still restarts at each hit.
-
-That 4 KiB threshold is the DFA's own sampling threshold, kept after the one
-alternative measured against it, sampling from 256 bytes, did worse; the best
-cutoff is not located. The same prose was cut into lines at nominal 300, 1024
-and 4096-byte cuts; the 4096 cut spans the threshold, with 91 of its 220 lines
-at 4,096 bytes or more. On each cut the find without the plan itself runs about
-3.0 to 3.2 times slower than on the one line. On the 300-byte cut, in RE2 on
-Graviton, its IPC falls from 6.31 to 2.46, with about 105,000 branch misses per
-pass over the same 897,635 bytes, about 35 for each line, against about 300 on
-the one line, while restarting at each space takes about 61,000 misses per pass
-at an IPC of 3.96. On every cut the matcher beats the find without the plan by
-24 to 36%, in all four languages on both platforms. Sampling from 256 bytes
-instead hands those lines to the slower engine and takes 1.05 to 1.08 times the
-time without the plan on the 300-byte cut.
+lh3lh3's email `([^ @]+)@([^ @]+)`, once decided from the byte on each side of
+each hit of the literal, with a matcher of its own, a density sample for a
+frequent one-byte literal, and a share of the forward DFA budget. Without it,
+lh3lh3 email finds take 1.04 to 1.06 of their time on Graviton and 1.00 to 1.05
+on Intel, so it was removed. Such a pattern runs the ordinary engine, which
+runs the gated inner literal search first where the pattern qualifies.
 
 The literal-alternation matcher's root-table route restarts its trie at every
 input byte, and a filter stop compares the literals that begin with its byte,
@@ -2562,30 +2402,14 @@ The fixed-width matcher checks every occurrence of its candidate's first bytes,
 such as the `s` of `[a-z]shing`, which English text holds far more often than
 `shing`. Every language, Trino included, therefore keeps the DFA's inner literal
 search when its literal, or every literal of its set or class pair, has two or
-more bytes. Where the pattern keeps the second, short-search matcher described
-below, after its yield to the engine's own scans and its DFA budget check, the
-search runs in windows of at least 64 bytes, whatever its literal kind's
-[minimum](#minimum-inner-literal-search-window); otherwise that minimum applies.
-There a find whose input lacks the literal reports no match without running the
-DFA, and one whose literal first appears within the input's first 64 bytes runs
-the plain DFA. Shorter counts, and matcher finds with fewer than 64 bytes left,
-run a second fixed-width matcher that answers only those short searches, since
-on rows shorter than 64 bytes the plain DFA measured Trino count 1.72-1.79x
-slower than the matcher on r9g and 1.36-1.40x on r8i, and iteration 1.12-1.16x
-on r9g. From 64 bytes the matcher measured slower than the search on counts of
-`[a-z]shing`, a single literal, as [Minimum Inner Literal Search
-Window](#minimum-inner-literal-search-window) records; for a fixed-width class
-pair that is unmeasured. The pattern keeps that matcher when it fits the forward
-DFA budget beside the search. Full-Slice find stays on the DFA, whose quick
-reject of a row without the literal beat the matcher on short rows too; in a
-window shorter than 64 bytes that reject is now the [required bytes
-check](#short-window-required-bytes-reject), where the pattern keeps one. A
-Trino pattern on its fixed-width subtype otherwise keeps no program, and the
-search needs one, so a pattern whose `maxMemory` leaves no room for its program
-keeps the matcher and compiles wherever the matcher fits. Where the program fits
-but neither the search nor the matcher fits beside it, as for `[a-z]shing` from
-2567 to 2821 bytes, the pattern also keeps the matcher on the route without a
-program.
+more bytes, and keeps no fixed-width matcher beside it. A second fixed-width
+matcher once answered that pattern's counts and matcher finds shorter than 64
+bytes; without it every row read 0.94 to 1.05 of its time, so it was removed.
+The literal kind's [minimum](#minimum-inner-literal-search-window) applies,
+and shorter searches run the ordinary engine. A Trino pattern on its
+fixed-width subtype keeps no program, and the search needs one, so a pattern
+whose `maxMemory` leaves no room for the program and its search keeps the
+matcher on the route without a program and compiles wherever the matcher fits.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -2635,18 +2459,14 @@ fixed cost independent of input size, allocation-free, and within the
 protected-path gate on Intel and Graviton.
 
 Every case-sensitive `Prog.prefixAccel` scan of a prefix of two or more bytes
-but one (the fused vector and SWAR pair scans, the first-byte scan with its
-last-byte check, and the moved-probe scan) charges its failed candidates to the
+(the fused vector and SWAR pair scans, the first-byte scan with its last-byte
+check, and the moved-probe scan) charges its failed candidates to the
 contains search's comparison budget and continues with KMP once they pass it. A
 prefix with long partial matches, such as `a`×500 `b` `a`×500 in a run of `a`,
 then costs time linear in the input instead of the input times the prefix. The
-exception, the literal set scan of
-[Literal Prefix Vector Scan](#literal-prefix-vector-scan), compares each
-candidate with at most eight literals of at most six bytes and never continues
-with KMP. The KMP
-shifts are built when the prefix is configured and charged to the program's DFA
-allowance, and a compile whose shift table does not fit what remains fails; a
-prefix under 64 bytes whose first byte does not recur shares the contains
+KMP shifts are built when the prefix is configured and charged to the program's
+DFA allowance, and a compile whose shift table does not fit what remains fails;
+a prefix under 64 bytes whose first byte does not recur shares the contains
 search's read-only table and is charged nothing.
 Case-insensitive prefixes stop at nine bytes and keep their scan.
 Because `Slice.indexOf` puts no limit on the bytes its failed candidates
@@ -2731,41 +2551,17 @@ Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
 keeps that pattern as fast as the engine on Russian text; scanning the letter
 took 1.3-2.1x the time.
 
-When neither an ASCII singleton scan nor a rare candidate applies, a pattern
-such as `\w{5}\s\w{6}\s\w{7}`, whose positions all read one byte, tests every
-start of a 64-byte block at once instead, the Shift-And idea turned so that a
-word's bits are text positions, as Hyperscan's Teddy shifts the classified
-block for each of a literal's first one to four bytes by that byte's offset.
-The Vector API builds one word per distinct class, a bit for each byte of the
-block the class holds, from at most four byte ranges or the complement of at
-most four; each position's word is shifted down by the position's offset, the
-next block's word supplying the bits past the block, and the AND of them holds
-the block's match starts, which a count takes from the lowest, skipping each
-start inside the match before it. The search needs the Vector API, a pattern
-at most 64 positions wide, and two to four distinct classes, and takes a
-pattern only when the product of its positions' English byte probabilities
-estimates a start probability of at most 1/64: the block costs its words and
-one shift and AND for each position whatever the text holds. In UTF-8 it takes
-only ASCII classes, which no byte above ASCII joins, so a search needs no
-fallback on such bytes or on malformed input. Rust's Unicode `\w` and `\s`
-hold characters above ASCII, so that form of the pattern keeps the engine. It
-yields to the engine scans below, as a rare candidate does. Counts and rebar's
-count-spans (sums of matched lengths) of that pattern take 0.21-0.26 of their
-earlier time on r8i and 0.27-0.39 on r9g, and rebar's
-`hyperscan/fixed-length-words-nosom` and `hyperscan/fixed-length-words-som`
-rows go from 0.66-0.69 of the Rust regex crate's time to 0.17-0.22.
-
-A pattern the matcher takes, its short-search matcher included, yields to the
-engine where the engine has its own scan: when the program skips to a literal
-prefix, when a forward DFA would search a start literal filter that groups of
-one bit also give, or, for a candidate with bytes above ASCII, when the
-class-run counter takes the pattern. Without the first two, `(?i)Шерлок Холмс`
-on Russian text took 89-234x the engine's time, since its filter's three bytes
-stop far less often than every Cyrillic lead byte; without the third, `[а-я]{5}`
-on Russian took 2.9-3.1x and `[一-龥]{3}` on Chinese 1.32-1.34x the counter's
-time. Trino compiles its program to decide the order, as every language does,
-and keeps none only on its fixed-width subtype, for a pattern whose search never
-bails; every operation of a pattern that keeps none runs the matcher.
+A pattern the matcher takes yields to the engine where the engine has its own
+scan: when the program skips to a literal prefix, when a forward DFA would
+search a start literal filter that groups of one bit also give, or, for a
+candidate with bytes above ASCII, when the class-run counter takes the pattern.
+Without the first two, `(?i)Шерлок Холмс` on Russian text took 89-234x the
+engine's time, since its filter's three bytes stop far less often than every
+Cyrillic lead byte; without the third, `[а-я]{5}` on Russian took 2.9-3.1x and
+`[一-龥]{3}` on Chinese 1.32-1.34x the counter's time. Trino compiles its program
+to decide the order, as every language does, and keeps none only on its
+fixed-width subtype, for a pattern whose search never bails; every operation of
+a pattern that keeps none runs the matcher.
 
 A candidate with bytes above ASCII can be dense in text of another script, so a
 search, one find or one whole count, that has failed on at least 64 candidates
@@ -2790,46 +2586,44 @@ and run once.
 
 ## Minimum Inner Literal Search Window
 
-A line-by-line search calls the matcher once per line, and most lines are short.
-A matcher's or full-Slice find whose search window is shorter than the inner
-literal search's minimum runs the ordinary engine or a fixed-width pattern's
-short-search matcher, except that a gated one-byte search first rejects windows
-without a gate-passing hit. A whole-text count of a shorter text does not run
-the search either, except for a literal set as below. A matcher's find or a
-full-Slice boolean find first takes the
+A line-by-line search calls the matcher once per line, and most lines are
+short. A matcher's or full-Slice find whose search window is shorter than the
+inner literal search's minimum runs the ordinary engine, except that a gated
+one-byte search first rejects windows without a gate-passing hit. A whole-text
+count of a shorter text does not run the search either, except for a literal
+set as below. A matcher's find or a full-Slice boolean find first takes the
 [short-window required bytes reject](#short-window-required-bytes-reject) where
 the pattern keeps required bytes, which a ranged find and `findInto` do not;
-`.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks them.
-The search owns each window from its minimum. A one-of set of two or three
-distinct bytes checks only the windows below both that minimum and 256 bytes,
-except where only the class-run proof admits the search: an otherwise eligible
-pattern also checks windows of 256 bytes or more for the bytes, as
-[long windows](#required-literal-absence-on-long-windows) describes. A
-single required byte and a literal of two or more bytes keep their check of
-every window below 256 bytes, the byte with a scan as cheap as the search's
+`.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks
+them. The search owns each window from its minimum. A one-of set of two or
+three distinct bytes checks only the windows below both that minimum and 256
+bytes, except where only the class-run proof admits the search: an otherwise
+eligible pattern also checks windows of 256 bytes or more for the bytes, as
+[long windows](#required-literal-absence-on-long-windows) describes. A single
+required byte and a literal of two or more bytes keep their check of every
+window below 256 bytes, the byte with a scan as cheap as the search's
 single-byte scan: a check that changed with line length cost 4–6% on naturally
 mixed line lengths, 1.06x the time without required bytes on r9g and 1.04–1.06x
 on r8i for lh3lh3 lines under 128 bytes, although each length range alone tied.
-Where the pattern qualifies under `CompiledPattern.runsInnerLiteralSearchFirst`,
-a gated one-byte search, which checks every window, replaces the check of its
-own byte: it runs first in the ordinary engine's full-Slice boolean find, which,
-for a pattern on the [literal-neighbor
-plan](#boolean-partial-match-specializations), runs only when that matcher
-leaves the find undecided, and the pattern keeps no single required byte for it.
-A check that passes never decides the line and costs about 100 instructions per
-line, so with it lh3lh3's date lines of 64 to 127 bytes, which hold `/`, took
-1.08–1.12x their time without the check, while the search's scan decides the
-line itself. The search falls back where its first gate-passing hit lies within
-64 bytes of the line's start, too close to repay its reverse search and anchored
-confirmation; where a later hit lies in text a confirmation read; where its
-bounded reverse search would read back past the previous candidate; and where a
-DFA fails, as on a byte it cannot decode or past its memory. A fallback runs the
-ordinary engine's forward DFA and, where that DFA fails, its submatch engines,
-without searching again, or, while boolean searches skip a DFA that
+Where the pattern qualifies under
+`CompiledPattern.runsInnerLiteralSearchFirst`, a gated one-byte search, which
+checks every window, replaces the check of its own byte: it runs first in the
+ordinary engine's full-Slice boolean find, and the pattern keeps no single
+required byte for it. A check that passes never decides the line and costs
+about 100 instructions per line, so with it lh3lh3's date lines of 64 to 127
+bytes, which hold `/`, took 1.08–1.12x their time without the check, while the
+search's scan decides the line itself. The search falls back where its first
+gate-passing hit lies within 64 bytes of the line's start, too close to repay
+its reverse search and anchored confirmation; where a later hit lies in text a
+confirmation read; where its bounded reverse search would read back past the
+previous candidate; and where a DFA fails, as on a byte it cannot decode or
+past its memory. A fallback runs the ordinary engine's forward DFA and, where
+that DFA fails, its submatch engines, without searching again, or, while
+boolean searches skip a DFA that
 [thrashed](#count-fallback-after-repeated-bails), answers from the position
-automaton without the DFA. Entering the ordinary engine there instead, which ran
-the search a second time, took 1.08–1.11x the time without the search first on
-lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
+automaton without the DFA. Entering the ordinary engine there instead, which
+ran the search a second time, took 1.08–1.11x the time without the search first
+on lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
 lies near the start; running those steps directly takes 0.97–0.99x.
 
 A matcher's find of such a pattern enters the ordinary engine with no
@@ -2837,9 +2631,7 @@ required-bytes check; ranged find, `findInto`, and count never checked. Where
 the required bytes differ from the inner literal, as `\w+:[a-z]+@` searches for
 `:` but requires `@`, the pattern keeps them and never runs the search first,
 and a window too long for the check runs the search when it holds the literal
-but none of the bytes, as it did before such a pattern kept one-of bytes. The
-short-search matcher is described in
-[Boolean Partial-Match Specializations](#boolean-partial-match-specializations).
+but none of the bytes, as it did before such a pattern kept one-of bytes.
 A literal kind's minimum is where its scan measured faster than the DFA. The
 minimums were measured in A/B rounds on r9g and r8i Spot hosts, rebar on one
 host of each and JMH average time on one or two, in chunks of English text cut
@@ -2850,12 +2642,11 @@ to each window length.
   64 to 1023 bytes took 2.0 to 3.0x the pair scan's time on r9g and 1.4 to 2.4x
   on r8i, and lh3lh3's date lines of 64 to 127 bytes, searched for `/`, took
   1.37x on r9g and 1.43x on r8i, its email lines, for `@`, 1.15x and 1.30x.
-- A single literal of two or more bytes searches from 96 bytes, also a
-  case-insensitive literal searched by its exact head. Its word-at-a-time scan
-  took 5 to 15% longer than the DFA in 63- to 65-byte windows for `ing` in
-  `[a-zA-Z]+ing`, about the same at 96 to 100 bytes, and 5 to 13% less at 127. A
-  128-byte minimum left `\w+\s+Holmes` up to 7% slower than the search in 112-
-  and 127-byte windows on r9g.
+- A single literal of two or more bytes searches from 96 bytes. Its
+  word-at-a-time scan took 5 to 15% longer than the DFA in 63- to 65-byte
+  windows for `ing` in `[a-zA-Z]+ing`, about the same at 96 to 100 bytes, and 5
+  to 13% less at 127. A 128-byte minimum left `\w+\s+Holmes` up to 7% slower
+  than the search in 112- and 127-byte windows on r9g.
 - A literal set searches from 256 bytes, where its scan takes the scalar filter
   below the vector byte-set scan's cutoff,
   `Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES`, 1024 bytes. The crossover
@@ -2878,21 +2669,6 @@ to each window length.
   single literal or class pair behind such a run keeps its kind's minimum:
   `[a-zA-Z]+ing` and `\w+[?!.]["']` ran in 0.19 to 0.32x the DFA's time from 300
   bytes.
-- A case-insensitive literal with no exact head, or with a head of one common
-  byte, searches from the vector cutoff, 1024 bytes, where vector support is
-  available, and takes no search otherwise. Only the folded pair kernel
-  searches such a literal; below its cutoff the pattern runs the DFA. This
-  minimum reuses the folded prefix scan's vector cutoff and is unmeasured for
-  this search. Such a literal gives way to a later element's search, judged by
-  that element's own literal as without vector support, where that search
-  starts from a shorter window: `[a-z](?i: noqa)@x` searches `@x` from 96
-  bytes.
-- A pattern with a short-search fixed-width matcher runs the search from 64
-  bytes, whatever its literal kind, because a shorter window runs that matcher,
-  not the DFA. The matcher took 2.7 to 5.8x the search's time on 64- to 127-byte
-  counts of `[a-z]shing` on r9g and r8i, so such a pattern keeps the 64-byte
-  handoff it had before these minimums. That was measured on a single literal;
-  for a fixed-width class pair the handoff is unmeasured.
 
 Short windows were once checked for the literal, a window without it having no
 match. On short lines that cost more than it saved: a matcher's find loop
@@ -2924,20 +2700,8 @@ A single literal's scan over at least 1024 bytes, where vector support
 is available, uses the prefix scans' kernels and cutoff: the vector byte-set
 scan for a one-byte literal and the fused pair scan for a longer one. A shorter
 scan, including the find loop's probe, uses the word-at-a-time scan. A
-case-insensitive literal, such as `# noqa` in `\s*# (?i:noqa)`, takes the
-prefix scans' folded pair kernel over its first nine bytes from the same cutoff,
-and checks the rest of each hit with ASCII case folding. The kernel accepts
-either case of every letter, so each hit is checked again from the first exact
-letter among the kernel's bytes, or from their end when they hold none. A
-shorter scan keeps the word-at-a-time scan for the exact head, `# `, and the
-same check. A literal with no exact head, such as `holmes` in
-`\w+\s(?i)holmes\b`, which RE2 and Rust search as `holme` because `s` also
-folds to the long s, or with only one common byte before its first folded
-letter, is searched only by the kernel. With no exact head, the no-earlier-match
-proofs count both cases of every letter, exact ones included; a one-byte head
-is proven by that byte. The prefix of `(?:QHO)?(?i:ho)` cannot consume the
-lowered `ho`, but its match `QHOho` spans the occurrence `HO`, so the search
-would report `HO`; such a pattern takes no search.
+case-insensitive literal is not an inner literal; a pattern searches another
+exact literal, if any.
 
 The earlier check of short windows was accepted with costs measured before RE2,
 Java, and Rust shared the fixed-width matchers, 3 hosts a side. The Rust
@@ -3049,17 +2813,12 @@ A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
 setup. An exact literal, or one-of bytes, of a pattern with no other literal
 route checks long windows too. A route that starts where a match starts, or a
-scan plan, keeps a pattern from that check, and such a pattern checks long
-windows instead for its rarest exact literal that the route does not already
-search for; the literal-neighbor find plan is no such route, since the
-pattern's other operations keep the ordinary engine. Both checks are
-described in
+scan plan, keeps a pattern from that check. The check is described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
 the long-window check is chosen, the pattern keeps its literal for that check
-alone, with the [search-end bound](#required-suffix-bound-on-long-windows) where
-it has one, and otherwise it keeps no fact. The matcher's general find and the
+alone, and otherwise it keeps no fact. The matcher's general find and the
 engine shape's full-Slice `find` reject a window shorter than a match on its
 length first. For a one-of set of two or three distinct bytes beside an inner
 literal search, the short-window check covers only windows shorter than that
@@ -3098,21 +2857,21 @@ they reject allocates no engine matcher or group storage. Other patterns, such
 as `(.)` and `^(a)$`, build it at once, and so does a match-result accessor
 called before a find.
 
-An earlier check of short windows, recorded under
-[Minimum Inner Literal Search Window](#minimum-inner-literal-search-window),
-found that a separate short-window literal scan cost more on short lines than
-sharing the inner literal search's own. Windows shorter than the search's
-minimum no longer run that search, except that a gated one-byte search still
-checks them for a gate-passing hit, so any other find window shorter than both
-256 bytes and that minimum gets no literal check but this one, where the pattern
-keeps it. A literal set behind a class run, whose minimum is 1 KiB, gets none in
-windows of 256 to 1023 bytes, unless the pattern keeps a short-search
-fixed-width matcher. It rejects a window before the engine starts, and a window
+An earlier check of short windows, recorded under [Minimum Inner Literal Search
+Window](#minimum-inner-literal-search-window), found that a separate
+short-window literal scan cost more on short lines than sharing the inner
+literal search's own. Windows shorter than the search's minimum no longer run
+that search, except that a gated one-byte search still checks them for a
+gate-passing hit, so any other find window shorter than both 256 bytes and that
+minimum gets no literal check but this one, where the pattern keeps it. A
+literal set behind a class run, whose minimum is 1 KiB, gets no inner literal
+search in windows of 256 to 1023 bytes, only the long-window check where it
+keeps one. It rejects a window before the engine starts, and a window
 that holds the literal still runs the engine, which scans for it again. That
 second scan is the cost to watch, on the rows that decision names: Holmes
 `around-holmes-english` on r9g, Rust `reallyreallyhard0-32`, and Everyday email
-reused contains on r8i. lh3lh3 date, which it also names, keeps no fact now that
-its gated one-byte search runs first.
+reused contains on r8i. lh3lh3 date, which it also names, keeps no fact now
+that its gated one-byte search runs first.
 
 The fact only saves work, so its memory gives way. It is reserved after
 compilation's routes, after the OnePass tables of a program with a final-line
@@ -3121,10 +2880,9 @@ end anchor (see
 and after the position automaton, which is charged to the forward program itself
 (see
 [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)),
-from the program that holds the forward DFA allowance (the lowered boolean
-program where there is one). It is kept only if every first-match and
-longest-match DFA that could initialize before the charge, start-byte tables
-included, still can. Trino's ordered-literal matcher, which
+from the program that holds the forward DFA allowance. It is kept only if every
+first-match and longest-match DFA that could initialize before the charge,
+start-byte tables included, still can. Trino's ordered-literal matcher, which
 its frontend reserves later, takes its memory first, with the fact's memory
 handed back, and the fact stays only where the same rule holds after both
 charges. The charge follows the
@@ -3344,8 +3102,7 @@ needs three things.
   `Holmes` has no word starting at or after the first match's end.
 
 Five proofs give `x* <= L`. Others admit a search, but not this. Each compares
-the prefix with the literal's exact bytes, so a case-insensitive literal, whose
-other cases they do not see, takes the full confirmation.
+the prefix with the literal's exact bytes.
 
 - A single literal the prefix cannot consume every byte of, the crate's first
   proof: a prefix that covers the hit at `L` either holds the whole occurrence
@@ -3501,45 +3258,39 @@ no match when it is absent. So does a pattern whose required bytes are one of up
 to three bytes, such as the `/` or `@` of `[a-z]+://\S+|[^ @]+@[^ @]+`: a window
 without any of them holds no match. Its search is the vector byte-set scan from
 1 KiB, and a word search for the first matching byte below that or without
-vectors. A one-of fact carries no exact suffix, so it never takes the
-[search-end bound](#required-suffix-bound-on-long-windows), and a check beside
-another route, below, searches only for an exact literal.
+vectors.
 
 The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
 must have no other route that already searches for a literal at least as fast.
 So it has no required prefix, exact literal, literal kernel or literal search,
-scan plan, class counter, literal set or alternation, span, byte-run, word-run,
-or disjoint suffix-repeat matcher, or whole-input capture plan, and no inner
-literal search but one that only the
-[class-run proof](#inner-literal-class-run-prefix) admits. Such a pattern
-decides as it would without that search, so the proof neither adds the check nor
-takes it away. Nor does the
-[literal-neighbor find plan](#boolean-partial-match-specializations) take the
-check away: it answers full-Slice boolean find alone, and the pattern's other
-operations keep the ordinary engine. Nor does the
-[window literal search](#window-literal-search): BitState's capture of groups
-and a find that skips the DFA never run it, and without the check
-`((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz` that the check
-rejects with one scan. On the window search's own route the check scans the
-stretch before the next occurrence once more, which costs no more than the check
-and the DFA without the search. Every other search runs on every window the
-check would cover: only a literal set behind a class run has a
-[minimum window](#minimum-inner-literal-search-window) over 256 bytes. Taking
-the check away let a 16 KiB chunk without the literal enter the engine and run
-the search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
+scan plan, class counter, literal set or alternation, span, byte-run, or
+word-run matcher, or whole-input capture plan, and no inner literal search but
+one that only the [class-run proof](#inner-literal-class-run-prefix) admits.
+Such a pattern decides as it would without that search, so the proof neither
+adds the check nor takes it away. Nor does the [window literal
+search](#window-literal-search): BitState's capture of groups and a find that
+skips the DFA never run it, and without the check `((?:xy|z){0,2})xyz` ran
+BitState over 8 KiB without `xyz` that the check rejects with one scan. On the
+window search's own route the check scans the stretch before the next
+occurrence once more, which costs no more than the check and the DFA without
+the search. Every other search runs on every window the check would cover: only
+a literal set behind a class run has a [minimum
+window](#minimum-inner-literal-search-window) over 256 bytes. Taking the check
+away let a 16 KiB chunk without the literal enter the engine and run the
+search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
 adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
 `,z`, scanned a 16 KiB chunk that ends in `,z` twice, 1.19 to 1.29 times as
 long. Where an inner literal search stands in for the check, the routes that
 skip it, BitState's capture of groups and a search that skips the DFA, scan the
-window for its literal when that is one exact literal. Neither its forward nor
-its lowered program has a prefix scan, a transparent start literal, or a
+window for its literal when that is one exact literal. Its forward program has
+no prefix scan, transparent start literal, or
 [start literal filter](#start-literal-filter) that its first-match DFA can run
 and that groups of one bit also give. As with the [fixed-width yield
 rule](#fixed-width-rare-class-candidates), the check was measured against
 filters of one-bit groups, so a filter that only wider groups give, such as
-that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check
-in place: it runs first, and the DFA keeps the wider filter inside the windows
+that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check in
+place: it runs first, and the DFA keeps the wider filter inside the windows
 that pass. A program whose assertions the DFA cannot run, or whose first-match
 DFA does not fit its budget, never scans for its filter, so the filter does not
 count there. A search that skips the DFA in a pattern whose filter counts, such
@@ -3550,111 +3301,18 @@ cannot continue, and an end-anchored one runs the reverse DFA from the end, so
 either can stop long before a scan of the whole window would. A pattern with a
 single-byte table keeps no required bytes at all.
 
-A pattern left out of the check only for a route that starts where a match
-starts (a prefix scan, a transparent start literal, an inner literal search for
-a literal that begins every match, or a start literal filter) or for a scan
-plan, and that meets every other condition, checks long windows beside that
-route instead, for the rarest exact literal every match consumes that the route
-does not already search for, and without the
-[search-end bound](#required-suffix-bound-on-long-windows). The route already
-searches for a literal inside the exact bytes every match starts with, which a
-prefix scan, a transparent start literal, or an inner literal search for a
-leading literal finds, or inside the scan plan's literal or the inner literal
-search's single literal. A route literal rules out a literal only where its
-exact bytes hold it byte for byte: a search for `foobar` does not rule out `FOO`
-in `\Bfoobar.*?FOO`, and a case-insensitive inner literal matches its folded
-letters in either case, so a search for `foo[Bb][Aa][Rr]` does not rule out
-`bar`. A start literal filter, or an inner literal search for a leading literal
-set, searches for alternatives, none of which every match holds, so it rules out
-no literal. So `the.*?,z`, whose prefix scan stops at every `the`, checks long
-windows for `,z`, and so does `\bthe\b.*?,z`, whose inner literal search finds
-the `the` every match begins with. The pattern keeps its required bytes for
-short windows either way.
+The long-window scan for a second literal beside another literal route, and its
+handoff to the inner literal search, were removed: the scan rejected no
+published row and slowed name-whitespace by 11–18% and both-slashes by 27–30%,
+and the handoff's wins were on unpublished rows only.
 
-Compilation looks for the literal only where such a check is possible, and
-compares only the first 64 of the exact start bytes, all that a joined literal
-keeps: a later literal that repeats start bytes past them may be checked
-although the route makes the check redundant, which costs a scan but never
-rejects a window with a match. A pattern whose literals compare more than
-1,048,576 bytes in all with the start bytes and the route's literals checks for
-none, since the check is optional.
-
-The check beside a route costs a scan where every window holds its literal.
-On 4 KiB lines that each end in `,z`, `\bthe\b.*?,z` took about 3% longer on
-Graviton (1.00 to 1.04 times main's time by language), and `the.*?,z` took 1.10
-to 1.12 times main's time on x86. The x86 cause is inferred, not measured: the
-beside scan of each whole line runs before the DFA, so it leaves Vector API
-boxing garbage just ahead of the DFA's lazily built states, and the warm-up
-garbage collections then repack them. The cost is accepted because lines
-without `,z` are rejected in about 0.02 of main's time.
-
-An inner literal search for a literal inside the match, as for the `,` of
-`\w+,\bz`, still keeps a pattern from the check. The search already scans every
-window for its literal, so where nearly every line holds the other literal near
-its end, a check beside it doubles the scan and never rejects: on 1 KiB lines
-that each end in `,z`, unlike the 16 KiB chunks above, `\w+,\bz` took 1.33 to
-1.48 times as long on Graviton with the check. That gives up the same pattern on
-lines without `,z`, which the check took to 0.59x on Graviton and 0.35x on x86.
-A search for a literal that begins every match lands where a match would start,
-as a prefix scan does, and keeps the check.
-
-Full-Slice `find` of a long window hands the check's first hit to the inner
-literal search, which starts there rather than at the window start, so the
-search does not scan again the text before the handed hit. Two forms of search
-qualify, each for one exact literal. The first searches for the checked literal
-itself, as for `(\w+)foobar(\d)`, so the check's scan has found the search's
-first hit. The second searches for the required literal less its last byte,
-where the search's gate after its literal admits that byte alone, as the `,` of
-`\w+,\bz` is followed only by `z`. A hit of that search then passes the gate
-exactly where `,z` starts, and none before the first `,z` does.
-
-That form finds the first `,z` with the search's own one-byte scan for `,`
-first, then the scan for `,z` from that `,`. Every occurrence of `,z` starts
-with an occurrence of `,`, so the first `,z` at or after the first `,` is the
-first `,z` in the window, and a window without `,` has no `,z`, where the gated
-search for `,` answers no match too. The one-byte scan goes first because, on
-text without `,`, the scan for `,z` costs more for each vector than the one-byte
-scan does. The window's length, not the length left after the `,`, chooses the
-scan for `,z`, so a window of at least 1 KiB keeps the vector pair scan however
-early its first `,` lies. On 1 KiB lines, scanning the rest after an early `,`
-with the call-free word scan, as the length left chose, made the handoff take
-2.1 times as long on Graviton and 2.5 times as long on x86 as a vector scan for
-`,z` from the line start. The vector scan takes a rest of any length, whole
-vectors of candidates and then the remainder one at a time, and its comparison
-budget counts from where it starts, as a scan of the rest alone would.
-
-The handoff is sound because the ordinary engine's `find` reaches the inner
-literal search after its length reject and before any other deciding step: the
-pattern has no lowered program, pre-engine matcher, required prefix, anchor at
-either end, assertion the DFA cannot run, or empty match, and the search's
-minimum window is at most 256 bytes. A hit before the handed one either does not
-exist or fails a gate, and a hit that fails a gate changes none of the search's
-state, so the search reaches the handed hit as it would have from the window
-start, falling back where it would. A window without the literal has no hit that
-passes, so the search would have answered no match there too.
-
-The second form gives `\w+,\bz` back the reject of lines without `,z` in `find`,
-with a scan of its own that serves the handoff alone. The required bytes' charge
-takes in that scan, as it would a long-window search. Each smaller step gives up
-the handoff, in either form, and the last, the short-window check alone, also
-gives up the second form's own scan. Matcher finds, count, the one-shot range
-searches, and `replaceAll` keep that pattern out of the check, as above, so
-lines that each end in `,z` cost them no second scan. In RE2 and Java, the
-handoff took `\w+,\bz` on 1 to 16 KiB chunks of text with commas to 0.24 to
-0.32 of main's time on Graviton and 0.08 to 0.15 on x86 without `,z`, and to
-0.31 to 0.46 and 0.09 to 0.26 with it; comma-dense CSV without `,z` to 0.035 and
-0.022; text without a comma to 0.97 and 0.93; and 256-byte windows to 0.70 to
-0.86 and 0.43 to 0.67. It took `(\w+)foobar(\d)` grep on 16 KiB chunks to 0.53
-and 0.58 to 0.61.
-
-Compilation decides this once, and the literal's search takes its memory in the
-required bytes' charge, with the search-end bound's search where the pattern has
-one; the one-of bytes' search keeps nothing beyond the bytes and adds nothing to
-it. That charge may not fit at compile time, or once a frontend route such as
-Trino's ordered-literal matcher is charged ahead of it. If the full charge does
-not fit, the bound is removed and the charge retried. If that fails, the pattern
-keeps only the short-window check, when its matches can fit a short window and
-that smaller charge fits, and otherwise keeps no check.
+Compilation decides this once, and the literal's search takes its memory in
+the required bytes' charge; the one-of bytes' search keeps nothing beyond the
+bytes and adds nothing to it. That charge may not fit at compile time, or once
+a frontend route such as Trino's ordered-literal matcher is charged ahead of
+it. If the full charge does not fit, the pattern keeps only the short-window
+check, when its matches can fit a short window and that smaller charge fits,
+and otherwise keeps no check.
 
 Five hooks run the check before any engine setup:
 
@@ -3678,9 +3336,7 @@ Five hooks run the check before any engine setup:
   `extract`; and each retry of a Rust search after an empty match that splits a
   character.
 - RE2's `replaceAll`, before each of its searches, on the rest of the text,
-  with the matcher's back-off within one call. A pattern with the search-end
-  bound skips this check where its suffix holds the literal, since the bound of
-  the whole text already stands in for it.
+  with the matcher's back-off within one call.
 
 A matcher's searches and `replaceAll`'s searches take another entry after their
 own check, so no search scans twice.
@@ -3785,71 +3441,6 @@ Measured with rebar on one r9g and one r8i Spot host, `leipzig/word-ending-nn`
 took 0.11x the base's time on r9g and 0.12x on r8i,
 `tom-sawyer-huckle-fin-prefix-short` 0.078x and 0.056x, and `leipzig/ing` about
 0.5x on both.
-
-## Required Suffix Bound On Long Windows
-
-The [long-window check](#required-literal-absence-on-long-windows) stops at the
-literal's first occurrence. When that occurrence is early and the rest of a long
-window holds no match, the engine still reads the whole tail: on rebar's
-`leipzig/bounded-strings-ending-z` with one `,z` in its first kilobyte, every
-language ran the forward DFA over all 16 MB. Hyperscan bounds such a scan by the
-last occurrence of the literal every match ends with. Regulator does the same
-with the search-end bound: a pattern that checks long windows for its own exact
-literal also bounds a long search's end by the last occurrence of its required
-suffix. A pattern that checks long windows beside another literal route takes
-no bound.
-
-The required suffix is exact ASCII bytes, at least two and at most the last 64,
-that every match ends with, with no zero-width op after its last byte at any
-depth. It is read from the end of the pattern's top-level concatenation, groups
-looked through: exact literals join it, a repetition of at least one copy gives
-its child's suffix and ends it, and an assertion between its bytes ends it
-there. It need not be the required literal: `(.*?;){3}abcdefgh` checks long
-windows for `abcdefgh` and bounds them by `;abcdefgh`.
-
-Every match in a window ends at the end of an occurrence of the suffix, so no
-later than the end of the last one, and a window without one holds no match.
-Ending the window there leaves the set of matches unchanged, so leftmost-first
-and longest-match spans and captures stay the same, provided no assertion of a
-match reads past the new end. No assertion of a match runs at its end, since
-none follows the suffix, and the assertions the DFA runs read at most one byte
-ahead. Java's final-terminator `$` and `\Z` and Trino's final line end read
-further, so a program with assertions the DFA cannot run takes no bound. Nor
-does a pattern with a lowered boolean program: it comes only from a final line
-end, which leaves no suffix, and its matches can end past the suffix after a
-final LF. Rust's Unicode word boundary is sound because the suffix is ASCII.
-
-The bound's search is a reverse scan for the last occurrence, the forward
-literal scan mirrored: a vector pair scan from 1 KiB and a word scan below it,
-both handing off to a reverse KMP once their comparisons pass the scan's
-budget, so the scan stays linear. Its memory joins the required bytes' charge.
-If the full charge does not fit, the bound is removed and the charge retried. If
-that fails, the pattern keeps only the short-window check, when its matches can
-fit a short window and that smaller charge fits, and otherwise keeps no check.
-
-Count and the one-shot unanchored searches take the bound in place of the
-forward check: no occurrence counts or finds nothing, and otherwise the DFA
-count, or the engine, reads only up to the end of the last occurrence. Where the
-suffix does not hold the literal, as `zz` does not hold `abcdefgh` in
-`(.*?;){3}abcdefgh.*zz`, the window up to that end is still checked for the
-literal, and one without it holds no match. A pattern that only the [class-run
-proof](#inner-literal-class-run-prefix) gives an inner literal search keeps the
-check and so the bound, and its count through that search reads only up to the
-same end, as the DFA count does. A one-shot search keeps the whole text as its
-context. RE2's `replaceAll` bounds the whole text once and ends each of its
-searches there. Where the suffix holds the literal, that bound stands in for its
-loop's check, so no search scans back from the text end once per match.
-
-With one `,z` placed about 600 bytes into the `bounded-strings-ending-z` text,
-where the forward check stops, a count took about 0.014 of main's time on x86
-and 0.040 on Graviton over the text's first megabyte, and 0.025 to 0.026 and
-0.040 over all 16 MB, in all four languages.
-
-The cost is the reverse scan over the window's tail when the last occurrence is
-early, where the forward check stopped at the first one. A window whose suffix
-ends it is found at once, where the forward check scanned up to it. A user loop
-over one-shot range finds on one long text pays a reverse scan over the tail
-after each match.
 
 ## Trino LIKE Frontend
 
@@ -4370,47 +3961,15 @@ rebar's `folly/literal-never-match-frequent` to 0.69x to 0.71x its earlier time
 on r9g and 0.68x to 0.70x on r8i, in RE2 and Rust. The contains search of
 `LiteralSearchKernel` and the vector filter of the scan plan's required-literal
 check still pair the first and last bytes; neither the continuation byte nor
-the adjacent pair has been measured there. The reverse scan for the last
-occurrence of a required suffix still pairs the suffix's first and last bytes,
-periodic or not: the adjacent pair is chosen only for the forward scans, and
-choosing it there too would change the reverse scan of a periodic required
-suffix, which has not been measured.
+the adjacent pair has been measured there.
 
-When the literals every match begins with run past a prefix shorter than six
-bytes and share a byte at the same offset past it, the vector scan pairs the
-prefix's paired byte with the last byte those literals share and compares each
-candidate with every literal. Rebar's `rust-functions` row,
-`fn is_(\w+)|fn as_(\w+)`, factors to the prefix `fn `, which its Rust source
-holds 12,151 times against 482 occurrences of either alternative. The prefix's
-pair, `f` and the space, stopped at 18,686 candidates per search, failed 6,535
-of them, and returned each prefix occurrence to the forward DFA, which stepped
-past it and called the scan again, 12,147 times per search. Pairing `f` with
-the `_` both alternatives share stops at 3,735 candidates and fails 3,253 of
-them in the scan, and the DFA calls it 483 times. Against the prefix's scan
-with JDK 25, `opt/prefilter/rust-functions` took 0.545x to 0.570x its earlier
-time on r9g and 0.519x to 0.524x on r8i, in RE2 and Rust.
-
-The literals are the program's paths through its first six bytes, as the
-[start literal filter](#start-literal-filter) reads them for its six-byte
-filter, each cut at its first position that accepts more than one byte, so a
-folded letter or a class ends a literal, and literals that share no byte past
-the prefix keep the prefix's scan. A candidate is compared with at most eight literals of at most six bytes,
-so this scan keeps no comparison budget and never hands off to KMP. Shorter
-searches, searches without the Vector API, and prefixes of six or more bytes
-keep the prefix's scans.
-
-The literal set only saves work, so, as
-[Memory Budgets And DFA Caching](#memory-budgets-and-dfa-caching) requires of
-an optional plan, a compile with a `maxMemory` decides it after OnePass and
-every plan and route, and keeps it only where the rest of the allowance holds
-it and still leaves the forward DFAs their minimum; otherwise the prefix keeps
-its scan. The set never takes memory OnePass or a route would use, so a budget
-gives the same OnePass decision, routes, and DFA minimum with the Vector API as
-without the set.
+The prefix literal set, which compared each candidate with every literal past a
+shared prefix byte, was removed: it ran on no report row, and rebar's
+unpublished rust-functions takes about 1.8x as long without it.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
-and use the engine without resolving the incubating module. Outside the literal
-set scan, every surviving candidate is compared with the complete prefix until
+and use the engine without resolving the incubating module. Every surviving
+candidate is compared with the complete prefix until
 failed candidates spend the contains search's comparison budget, after which
 KMP finishes the search.
 Pair byte selection keeps preprocessing bounded and the integrated scanner
@@ -4446,19 +4005,19 @@ prefix scan's case-mapped pair bytes, the scan plan's contains search, the two
 three-byte groups of the [start literal filter](#start-literal-filter)'s
 two-literal check, and the two sides of an
 [inner literal class pair](#inner-literal-class-pairs); a later paragraph
-covers scans that stop at any of several bytes. The folded inner literal search
-shares the folded prefix scan's kernels. Where C2 compiles vector code with SVE
-and a 16-byte preferred byte vector, as on r9g (Graviton5), each loaded vector
-is XORed with its probe byte, the differences are ORed, and one compare with
-zero gives the mask; the start literal filter first takes the unsigned minimum
-of its two groups' differences, and the class-pair scan the unsigned minimum of
-each side's differences from its up to three bytes. Everywhere else these five
-compare each byte and AND the masks, except that on x86 with 64-byte vectors
-the literal prefix scan of a single literal compares its second byte under the
-first byte's mask, as a later paragraph records, and the start literal filter's
-check of two literals without masks takes the XOR form, as that section
-records. The JVM's `UseSVE` flag is read once, through the HotSpot diagnostic
-MXBean, on aarch64 only; if the flag cannot be read, the scans compare and AND.
+covers scans that stop at any of several bytes. Where C2 compiles vector code
+with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5), each
+loaded vector is XORed with its probe byte, the differences are ORed, and one
+compare with zero gives the mask; the start literal filter first takes the
+unsigned minimum of its two groups' differences, and the class-pair scan the
+unsigned minimum of each side's differences from its up to three bytes.
+Everywhere else these five compare each byte and AND the masks, except that on
+x86 with 64-byte vectors the literal prefix scan of a single literal compares
+its second byte under the first byte's mask, as a later paragraph records, and
+the start literal filter's check of two literals without masks takes the XOR
+form, as that section records. The JVM's `UseSVE` flag is read once, through
+the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be read,
+the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -4493,30 +4052,21 @@ until the scan compares it with zero. A form that returned the mask from a
 helper had that helper left out of line at one of its two call sites, boxed a
 mask on every search, and took 1.62x for `zqj` on r9g with JDK 25. A vector
 returned from a helper left out of line is boxed the same way, so the scan's
-helper keeps a single call site. The reverse scan for a required suffix's last
-occurrence tests the at most three vectors below its last block of four with
-compare and AND on every platform. The XOR form written in line there allocates
-nothing either, but it made the scan about 1,072 bytecode bytes against compare
-and AND's 1,029, past the size `TestHotMethodSize` caps it at. A helper there
-that takes the probe vectors is left out of line when C2 compiles the scan
-before the profile of the branch into the tail has matured, and it then boxes
-both vectors once per call, as it did in a fresh JVM on a 1 MiB row with SVE and
-16-byte vectors.
+helper keeps a single call site.
 
 On x86 with 64-byte vectors, as with AVX-512 on r8i, the literal prefix scan of
-a single literal compares its second byte under the mask of the first; the
-literal set scan and the reverse scan for a required suffix's last occurrence,
-which was not measured in the masked form, keep compare and AND. C2 emits the masked compare as one
-compare that writes a mask register under the first compare's mask, in place of
-a second compare and a `kandq`. Over the counted loop on r8i with JDK 25 it took
-0.94x the compare-and-AND form's time for English sherlock, 0.82x to 0.83x for
-`no-match-common`, and 0.81x to 0.82x for rsc's `easy0` and `reallyhard0` over
-1 MB, and tied for 1 KiB `USER` probes; the mixed result above was measured
-before the counted loop. Forced on r9g's SVE, the masked form tested each
-16-byte vector with its own predicated compare and branch and took 1.54x to
-1.76x the XOR form's time for sherlock, `no-match-common`, and `easy0`. NEON
-and AVX2, whose compares take no mask, keep the platform choice. The two forms
-are separate methods, so each compiles only its own candidate test.
+a single literal compares its second byte under the mask of the first. C2 emits
+the masked compare as one compare that writes a mask register under the first
+compare's mask, in place of a second compare and a `kandq`. Over the counted
+loop on r8i with JDK 25 it took 0.94x the compare-and-AND form's time for
+English sherlock, 0.82x to 0.83x for `no-match-common`, and 0.81x to 0.82x for
+rsc's `easy0` and `reallyhard0` over 1 MB, and tied for 1 KiB `USER` probes;
+the mixed result above was measured before the counted loop. Forced on r9g's
+SVE, the masked form tested each 16-byte vector with its own predicated compare
+and branch and took 1.54x to 1.76x the XOR form's time for sherlock,
+`no-match-common`, and `easy0`. NEON and AVX2, whose compares take no mask,
+keep the platform choice. The two forms are separate methods, so each compiles
+only its own candidate test.
 
 The masked compare's gate, `VectorSupport.X86_WITH_64_BYTE_VECTORS`, is x86
 with a 64-byte preferred byte vector. It also gates the XOR form of the check of
@@ -4529,8 +4079,8 @@ literal filter's other scan changes, which did not separate them. SVE wider than
 16 bytes, including 512-bit SVE, as on A64FX, and any other architecture with
 64-byte vectors keep the platform choice, since the gate tests for x86.
 
-The folded pair kernels, the counted and dense forms that the folded prefix
-scan and the folded inner literal search share, take the XOR form under the
+The folded pair kernels, the counted and dense forms of the folded prefix
+scan, take the XOR form under the
 same key, through one selector for each kernel. Their loaded bytes are ORed with
 `0x20` first at letter probes, and the XOR form then XORs each probe's bytes
 with its lower-case byte. On r9g with JDK 25 it took 0.84x to 0.89x the
@@ -4569,12 +4119,6 @@ probe: the SVE form raises each offset's distance above its low bound to at
 least the bounds' difference by unsigned maximum, subtracts that difference,
 ORs the offsets, and compares once with zero, where the other form compares
 each offset's distance unsigned and ANDs the masks.
-
-The block class words of the
-[fixed-width block search](#fixed-width-rare-class-candidates) take the same
-key, `membersSve` in place of `members`, and the r9g counts that put the whole
-search at 0.27-0.39 of its earlier time ran the SVE form, as perfasm showed in
-`membersSve`, but the two forms were never measured against each other.
 
 The RE2 [validating run skip](docs/reference/OPTIMIZATION_CATALOG.md#validating-run-skip)
 takes the same key. In the SVE form, unsigned saturating subtraction leaves the
@@ -4707,7 +4251,7 @@ continuation byte.
 
 ## Small Candidate-Byte Vector Scan
 
-Forward DFA start-byte and fixed-distance candidate sets containing exactly two
+Forward DFA start-byte candidate sets containing exactly two
 or three bytes use a packed, allocation-free Vector scanner for searches of at
 least 1 KiB when `jdk.incubator.vector` is resolved and the preferred byte
 vector holds 16 to 64 bytes. Other candidate counts, short searches, and JVMs
@@ -4720,8 +4264,7 @@ Vector scanning on inputs of at least 4 KiB. Four sampled candidates demote
 only the Vector primitive; the existing candidate-scan route remains active.
 Preferred 128-bit species do not sample because the sample would duplicate most
 of the vector work. Scalar and Vector scanning remain separate call targets so
-a fixed-distance fallback cannot add Vector eligibility work to the scalar hot
-loop.
+the scalar loop carries no Vector eligibility work.
 
 This is a performance-only deviation. Every candidate is still processed in
 input order by the existing DFA, and randomized tests compare the scanner with
@@ -5127,15 +4670,15 @@ then a dot or a third digit. On English text with numbers, the digit scan
 handed control to the DFA at nearly every number, which failed after about 2.4
 steps on average.
 
-The filter is sound by construction. The walk from the program's start, the one
-the fixed-distance byte candidates use, takes at each offset the union of the
-bytes every path reads there, and it keeps only the offsets before the shortest
-match ends, so every match holds a byte of each offset's set. Each set is
-stored as the smallest unsigned range that covers it, which can only accept
-more. A match therefore starts only where every byte of the span lies in its
-range and before the search's end. The walk gives up at any assertion, and no
-filter is built for a reversed, start-anchored, prefix-accelerated, or
-nullable program, or where the shortest match is a single byte.
+The filter is sound by construction. The walk from the program's start takes at
+each offset the union of the bytes every path reads there, and it keeps only
+the offsets before the shortest match ends, so every match holds a byte of each
+offset's set. Each set is stored as the smallest unsigned range that covers it,
+which can only accept more. A match therefore starts only where every byte of
+the span lies in its range and before the search's end. The walk gives up at
+any assertion, and no filter is built for a reversed, start-anchored,
+prefix-accelerated, or nullable program, or where the shortest match is a
+single byte.
 
 The filter is built only when the Vector API is available, there is no start
 literal filter, and the start set has a vector scan of its own: a contiguous
@@ -5162,15 +4705,12 @@ start literal filter taken for rare start bytes does. On long inputs the
 start-scan productivity check samples the filter's own stops.
 
 A start literal filter of one-bit groups takes precedence, and one that only
-wider groups give yields to the class filter. Fixed-distance byte candidates
-still run first on the searches long enough for them, except where an unsampled
-search yields to a filter, as
-[Once-Per-Count Start-Byte Scan Selection](#once-per-count-start-byte-scan-selection)
-describes; the class filter replaces only the start set's own scan. A
+wider groups give yields to the class filter. The class filter replaces only
+the start set's own scan. A
 fixed-width pattern does not yield to it: unlike the start literal filter, it
 is not among the engine routes the
 [fixed-width matcher](#fixed-width-rare-class-candidates) yields to, since the
-matcher's rare candidate or block search already replaces the plain start scan.
+matcher's rare candidate already replaces the plain start scan.
 
 On rebar mariomka/ip the filter counts 3.2-3.5 times faster than the start set's
 own scan on r9g and 4.3-4.6 times on r8i. Checking only a pair gives 3.0-3.4 and
@@ -5246,7 +4786,10 @@ times, or repeated without a fixed count, and an
 [alternation of groups around runs of such a class](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures),
 whose captures its count decides; it is charged against the forward budget, and
 a budget too small for it compiles the pattern's program instead, as for any
-other pattern. Compact count and boolean find can use it. The matcher counter
+other pattern. Compact count and boolean find can use it. A compact pattern
+once also kept a count DFA for sparse counts of 1 MiB or more; it was removed,
+since it bought only synthetic Greek code-point counts, which take 2.0 times as
+long without it on Graviton and 1.5 times on Intel. The matcher counter
 serves a pattern that is one large Unicode class, such as `\pL` or `\p{Greek}`,
 or a greedy repeat of any class with a minimum of at least one, such as `\w+` or
 `[0-9]{2,3}`, except a repeat that RE2 or Trino case-folds; Java and Rust fold a
@@ -5265,23 +4808,19 @@ or Unicode `\w`, needs a bitset past them; such a class keeps the DFA on the
 matcher route rather than retain up to 136 KiB. A class with a tail stays
 eligible when the range before its tail ends below U+40000, since its bitset
 ends at that range, as for `\PL`, Rust's `\D`, or a class of every non-ASCII
-character. A counter's span search skips bytes
-that cannot begin a member before decoding, with one table load per byte or, for
-a sparse class, a vector scan after a short scalar prefix. A Latin-1 or
-byte-mode class, or a UTF-8 class of only ASCII members, marks exactly its
-members as start bytes, so the search reads its run on that table, one load per
-byte, cut at the repeat's maximum. When the Vector API is available, the class
-fits in four ranges of at most 128 bytes each, and the maximum allows a longer
-run, a run still going after 128 bytes, or 64 with 64-byte vectors, is finished
-by the self-loop exit byte scan over whole vectors and the table after them. In an unbounded repeat of a UTF-8
-class of every character, such as `(?s:.)+`, only a byte that begins no
-character under the lenient read ends a run, so once the run reaches the minimum
-the search skips to that byte without decoding. A class of every scalar value,
-as in Rust's `(?s:.)+` in bytes mode, reads strictly instead, so its run skip
-checks each character's UTF-8 form, ASCII eight bytes at a time, and stops at a
-malformed or truncated sequence or an encoded surrogate. A dot that matches
-newline counts as a class of every character, so count and Trino's class-span
-functions also take its repeats.
+character. A counter's span search skips bytes that cannot begin a member before
+decoding, with one table load per byte or, for a sparse class, a vector scan
+after a short scalar prefix. A Latin-1 or byte-mode class, or a UTF-8 class of
+only ASCII members, marks exactly its members as start bytes, so the search
+reads its run on that table, one load per byte, cut at the repeat's maximum. In
+an unbounded repeat of a UTF-8 class of every character, such as `(?s:.)+`, only
+a byte that begins no character under the lenient read ends a run, so once the
+run reaches the minimum the search skips to that byte without decoding. A class
+of every scalar value, as in Rust's `(?s:.)+` in bytes mode, reads strictly
+instead, so its run skip checks each character's UTF-8 form, ASCII eight bytes
+at a time, and stops at a malformed or truncated sequence or an encoded
+surrogate. A dot that matches newline counts as a class of every character, so
+count and Trino's class-span functions also take its repeats.
 
 Count also takes a pattern of one member, a class, any character, or any byte,
 such as `(?s:.)`, `.`, `[^\n]`, `\w`, or `\pL`, as a repeat of exactly one, in
@@ -5295,11 +4834,11 @@ from 0x80 up as the most common ASCII byte, which would admit rare non-ASCII
 classes such as `\p{Greek}` on their lead bytes alone. A dense member can still
 be sparse in the text, as ASCII `\w` is in Russian, where the counter took 4.8
 to 6.4 times the DFA count's time, so a count of at least 4 KiB samples four
-256-byte windows, as the compact counter's count DFA does, and takes the DFA
-count when they hold at most 64 members. The sample decodes at most a quarter of
-the text and stops at its 65th member, and a DFA count that bails counts on the
-counter. Each language's class carries its own reading of malformed UTF-8 and of
-line terminators, as for a repeat. When no matcher counter was retained, a
+256-byte windows and takes the DFA count when they hold at most 64 members. The
+sample decodes at most a quarter of the text and stops at its 65th member, and
+a DFA count that bails counts on the counter. Each language's class carries its
+own reading of malformed UTF-8 and of line terminators, as for a repeat. When
+no matcher counter was retained, a
 single-member count builds its counter on first use, so the exemption from
 `maxMemory` above covers the counter and the class's ranges the pattern retains
 for it. The ranges add to the counter's size: Rust `\w` retains 112 KiB of
@@ -5317,20 +4856,11 @@ decoding method, the decoding method being the search as it was before the byte
 runs, cleared Intel position but made Intel Trino replace 12% slower; do not
 repeat it without an Intel profile of replace.
 
-The vector handoff of a long byte run is chosen per vector width at class
-initialization. Handing off costs more than the table steps it saves on a run
-that ends soon after: on Graviton's 16-byte vectors a 64-byte handoff made
-subtitle lines 3% slower, and at 128 bytes the line rows are 1-1.3% slower,
-where long runs such as rebar's `i1095-word-repetition` take 0.81x the time. On
-Intel's 64-byte vectors the 64-byte handoff keeps long runs fastest (0.55x for
-`i1095-word-repetition`, 0.40x for 256-byte word runs), but 13.5% of Rust source
-lines and 7.2% of subtitle lines pass it, so those rows are 5-10% slower: the
-handoff adds 2-4% instructions, and on subtitles the run loop, which returns at
-a nonmember from inside the loop, takes about 2.5x main's branch misses. Testing
-each run's end against the limit after the loop instead won the Intel line rows
-but made Graviton word rows 3-4% slower, and Intel's 4-6%. Graviton is weighted
-over Intel, so the Intel line rows are accepted. 32-byte vectors keep the
-128-byte handoff unmeasured.
+A byte run still going after 64 or 128 bytes, by vector width, once handed off
+to a vector scan for its first nonmember. It was removed: it bought only
+rebar's constructed `i1095-word-repetition` ASCII search, which takes 1.25
+times as long without it on Graviton and 2.4 times on Intel, and it cost Intel
+line-heavy text 5 to 10%.
 
 `countUtf8`'s two-byte chunk check reads the SWAR constant `0x0101010101010101`
 from a field on aarch64, where C2 cannot encode its subtraction as an immediate
@@ -5684,19 +5214,19 @@ protected non-capture controls.
 
 ## Reusable Group-Zero Forward Cursor
 
-Eligible group-zero matchers lazily retain the forward first-match DFA and its
-fixed-distance byte candidates after the bounded candidate-start route declines
-the search. Repeated `find()` calls then use the existing count-search traversal
-to return one forward boundary without rediscovering the DFA, match mode, and
-acceleration state for every match. Fixed-length expressions derive the start
-from that boundary. Expressions that match empty at every position, with no
-assertion that could refuse one, start where the search did. One-character
-expressions such as `\pL` start at the lead byte of a valid UTF-8 character
-that ends at the boundary. Other matches retain the existing reverse DFA
-boundary recovery. A search the inner literal search takes skips the cursor: a
-window of at least the search's [minimum](#minimum-inner-literal-search-window),
-or any window for a gated one-byte search, whose first gate-passing candidate
-lies at least 64 bytes past its start or that holds none.
+Eligible group-zero matchers lazily retain the forward first-match DFA after
+the bounded candidate-start route declines the search. Repeated `find()` calls
+then use the existing count-search traversal to return one forward boundary
+without rediscovering the DFA, match mode, and acceleration state for every
+match. Fixed-length expressions derive the start from that boundary.
+Expressions that match empty at every position, with no assertion that could
+refuse one, start where the search did. One-character expressions such as `\pL`
+start at the lead byte of a valid UTF-8 character that ends at the boundary.
+Other matches retain the existing reverse DFA boundary recovery. A search the
+inner literal search takes skips the cursor: a window of at least the search's
+[minimum](#minimum-inner-literal-search-window), or any window for a gated
+one-byte search, whose first gate-passing candidate lies at least 64 bytes past
+its start or that holds none.
 
 The one-character rule takes 0.55x to 0.61x the base's time on the dense letter
 rows. Its first shape, measured on 97dd595b with 2 hosts a side, made r8i
@@ -5806,13 +5336,12 @@ A pattern qualifies only when its finds run both searches and its scans read
 every byte anyway: no fixed length, one-character, or empty-at-every-position
 start rule, and no inner, window, prefix, or transparent start literal. Two
 gates, both checked at the switch, keep the reverse pass off text a forward
-byte scan would skip. First, a start-byte or fixed-distance byte scan
-estimated to stop at fewer than one English position in eight rules the
-pattern out; that is an estimate, not a property of the input. Then the
-forward DFA's own density sample checks each 64 KiB piece of the rest of the
-region, and if a search would turn either scan on in any piece, the operation
-stays on its find-by-find search, since a dense head can end in a tail that
-scan skips. An
+byte scan would skip. First, a start-byte scan estimated to stop at fewer than
+one English position in eight rules the pattern out; that is an estimate, not a
+property of the input. Then the forward DFA's own density sample checks each 64
+KiB piece of the rest of the region, and if a search would turn that scan on in
+any piece, the operation stays on its find-by-find search, since a dense head
+can end in a tail that scan skips. An
 end-anchored pattern has no unanchored reverse start and does not qualify.
 Each language's iteration rules, the advance past an empty match, Rust's
 skipped empty matches, and the retry after a failed find, stay in the callers
@@ -6075,11 +5604,9 @@ same context, and a one-pass program has a single path, so Java's priority
 rules cannot select a different match. Java's multiline anchors and Trino's
 multiline `^` and `$` keep a program off OnePass. Release 2.0 built no OnePass
 tables for a program with one of these end anchors, so such a program's tables
-[yield to the forward DFAs](#memory-budgets-and-dfa-caching) of the lowered
-boolean program when there is one; the program's own DFAs never run, since they
-cannot evaluate those anchors. The tables take their memory after every plan and
-route has reserved its own, so they never change which plans, routes, and lowered
-programs a maxMemory builds, and ahead of the
+[yield to the forward DFAs](#memory-budgets-and-dfa-caching). The tables take
+their memory after every plan and route has reserved its own, so they never
+change which plans and routes a maxMemory builds, and ahead of the
 [short-window required bytes](#short-window-required-bytes-reject), which give
 way to them. A program that drops them runs on BitState or the NFA. A program
 release 2.0 also made one-pass keeps its charge.
@@ -6138,9 +5665,7 @@ position after a terminal LF.
 
 Final-line, multiline begin-line, and Unicode-boundary assertions require
 surrounding input context that is not represented by the ordinary RE2
-empty-width flags. The semantic program retains these assertions and remains
-authoritative whenever explicit captures are observable or the lowered form
-cannot preserve group-zero boundaries.
+empty-width flags. The semantic program retains these assertions.
 
 Trino multiline begin-line uses the two spare DFA empty-width bits. A forward
 state after LF keeps the ordinary begin-line bit pending; transition
@@ -6165,30 +5690,16 @@ uses a count-only plan that returns one for the input start plus the number of
 LF bytes before the final byte. Other operations retain the semantic program,
 and other nullable expressions retain ordinary matcher iteration.
 
-Boolean `find` and `lookingAt` operations use operation-specific plans:
-
-- exact terminal-literal shapes such as `literal$` and `\Aliteral$` compare the
-  literal at the absolute end or immediately before one final LF
-- eligible compound terminal expressions compile a second program in which a
-  terminal final-line assertion is lowered to `(?:\n)?\z`
-- expressions that retain another text-dependent assertion or full case folding
-  after lowering remain on the semantic program
-
-The consuming lowering generally changes match boundaries. For group-zero-only
-matching, the reverse lowered result is also boundary-equivalent when analysis
-proves that the semantic expression is nonempty and cannot consume LF. The
-semantic end is then the region end, excluding one final LF when present.
-Nullable expressions, LF-consuming expressions, stripped required prefixes,
-start-anchored expressions, and explicit capture requests retain the semantic
-program. Boolean `matches` never uses the lowered boundary route, although exact
-shapes may retain their pre-existing direct complete-match plan.
-
-Count, group-zero extraction, position, split, and replacement without capture
-references use the direct boundary route when eligible. A matcher reads the
-eligibility once, when it is created, and the pattern stores no field for it.
-The two forward programs and the lowered program's DFA share the original
-forward memory budget. No warm DFA search loop contains a frontend-specific
-branch; the Trino check runs only while an uncached transition is constructed.
+Boolean `find` and `lookingAt` of exact terminal-literal shapes such as
+`literal$` and `\Aliteral$` compare the literal at the absolute end or
+immediately before one final LF. Other expressions with a terminal final-line
+`$` run on the semantic program. A second program that lowered the terminal
+assertion to `(?:\n)?\z` for boolean and group-zero calls was removed: most
+rows it served ran faster without it, Trino's rust-src-tools rows in about a
+fifth of their time, and its one loss was a bimodal Trino host-and-port
+extraction on Graviton, 1.23 times as long on two of three forks. No warm DFA
+search loop contains a frontend-specific branch; the Trino check runs only
+while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call
@@ -6220,7 +5731,7 @@ to retain Joni's old table contents.
 Literals that require full folding compile to a shared-suffix graph whose size
 is linear in the folded literal length, and the reverse program that finds
 match starts mirrors it. Patterns that need only simple folding retain the
-ordinary compiler and lowered-program routes.
+ordinary compiler.
 
 Case-insensitive character classes fold in Joni's order. A bracket class's
 members, nested classes, and set operations are evaluated without folding, and
@@ -6234,8 +5745,7 @@ of a member's multi-character fold, as Joni's class string alternatives do:
 `(?i)[ﬃ]` matches `ffi`, `ﬀi`, and `fﬁ`. The spelling is matched inside the
 class and never merges with adjacent pattern literals, so `(?i)[ß]s` does not
 match `sß`. A negated class consumes one character. Each spelling is built
-from plain classes rather than a full-fold literal, so a class such as
-`(?i)[ß]` keeps the lowered program that full folding would disable.
+from plain classes rather than a full-fold literal.
 
 A run of literal characters written next to each other under the same
 case-insensitivity folds as one sequence: its Unicode 18.0 full case folding
@@ -6302,8 +5812,8 @@ language rule; Oniguruma
 [b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092)
 fixed it ([Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
 `TrinoRegexp` follows the Java semantics and has a direct regression test for
-this case. The final benchmark matrix must cover direct, lowered, short
-OnePass, allocation, and ordinary-route final-line cases.
+this case. The final benchmark matrix must cover direct, short OnePass,
+allocation, and ordinary-route final-line cases.
 
 ## Trino Specialized Byte Scans
 
@@ -6330,9 +5840,8 @@ one-byte ASCII set, or an unbounded run of every byte except the one-byte
 case-sensitive literal that follows it, and must contain a capture and a
 variable run. A capture-free plan must contain a character run or a variable
 literal repeat. These rules keep capture-free, fixed-width, and literal-only
-patterns on their direct routes. A lowered final-line plan takes precedence
-over a run-leading scan. A plan may also be led by a set of some non-ASCII
-characters, as [RE2 Scan Plans](#re2-scan-plans) records.
+patterns on their direct routes. A plan may also be led by a set of some
+non-ASCII characters, as [RE2 Scan Plans](#re2-scan-plans) records.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
@@ -6435,14 +5944,14 @@ and keep each search linear in its input:
   plan. Its attempts start from the same candidates and reach the same run
   ends, so resume positions after failures and the work budget are unchanged.
   When an unanchored plan starts with a run of exactly one character that
-  writes no group and is not a boolean tail, the interpreter's case-sensitive
-  executor starts an attempt at an ASCII candidate after that character,
-  because the candidate scan finds exactly the run's member bytes; a lead-byte
-  candidate still runs the run, and the ASCII-folded executor and generated
-  kernels run every operation. In `BenchmarkLanguageComparison`, `keyValue`
-  `reusedContains` takes 0.715 times its earlier time on R9g and 0.634 times on
-  R8i. The one control that moved, `quotedField` `reusedCount` on R8i, took
-  1.025 times, an accepted marginal cost of about 0.75 ns per call.
+  writes no group and is not a boolean tail, the interpreter's executor starts
+  an attempt at an ASCII candidate after that character, because the candidate
+  scan finds exactly the run's member bytes; a lead-byte candidate still runs
+  the run, and generated kernels run every operation. In
+  `BenchmarkLanguageComparison`, `keyValue` `reusedContains` takes 0.715 times
+  its earlier time on R9g and 0.634 times on R8i. The one control that moved,
+  `quotedField` `reusedCount` on R8i, took 1.025 times, an accepted marginal
+  cost of about 0.75 ns per call.
 
 A handoff preserves the match sequence on every input, including malformed
 UTF-8. Every operation applies the same budget from the
@@ -6451,19 +5960,30 @@ ranged boolean `find` use the ordinary engine only where both engines agree, so
 `find`, `count`, `extract`, `position`, `extractAll`, replacement, and split
 report one match sequence.
 
-Retain restricted ASCII case folding when every Unicode fold cycle remains in
-ASCII and requires no full multi-character fold. An ASCII letter pair, such as
-`[Kk]` or a Java letter folded without `UNICODE_CASE`, matches only its two
-letters, as [Pinned Unicode Case Folding](#pinned-unicode-case-folding) states,
-so a plan folds it as that pair even for `k` and `s`, whose cycles leave ASCII.
-The pair is the same tree in every language, so this holds for each of them.
-Folded plans use separate executors. On R9g, folded anchored, optional,
-unanchored, run, and mixed workloads take 0.20 to 1.10 times the ordinary
-engine's time for `contains`, extraction, and replacement, with a geometric mean
-of 0.38. The accepted costs are folded optional boolean matching, at about 1.10
-times the ordinary engine's time, and unanchored folded compilation, at about
-1.19 times. Ordinary URL and mixed operations remain faster than the ordinary
-engine on R8i and R9g.
+Retain restricted ASCII case folding in runs when every Unicode fold cycle
+remains in ASCII and requires no full multi-character fold. An ASCII letter
+pair, such as `[Kk]` or a Java letter folded without `UNICODE_CASE`, matches
+only its two letters, as
+[Pinned Unicode Case Folding](#pinned-unicode-case-folding) states, so a run
+folds it as that pair even for `k` and `s`, whose cycles leave ASCII. The pair
+is the same tree in every language, so this holds for each of them.
+
+A pattern with an ASCII-folded literal, such as `(?i)abc` or an ASCII letter
+pair like `[Kk]`, declines its plan and runs the ordinary engine. Such plans
+needed separate folded executors, about 800 lines, and no benchmark report row
+ran on them. The ordinary engine gives the same answers, on malformed Trino
+input too, since Trino plans read characters as the engine does.
+
+That gives up what earlier R9g measurements in `BenchmarkTrinoScanPlan` showed
+for the folded plans. Matching on the folded anchored, optional, unanchored,
+run, and mixed workloads took 0.20 to 1.10 times the ordinary engine's time for
+`contains`, extraction, and replacement, with a geometric mean of 0.38; the
+accepted matching cost was folded optional boolean matching, at about 1.10
+times. Compiling an unanchored folded pattern took about 1.19 times the ordinary
+engine's time, an accepted compilation cost. `FOLDED_RUN` folds only a character
+class, which becomes an ordinary set, so it keeps its plan. The removal's effect
+on the other folded workloads was not measured, since no benchmark report row
+runs them.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
@@ -6529,14 +6049,14 @@ development campaign evidence is in the private archive; see the
 ## RE2 Scan Plans
 
 RE2 patterns select the same scan plans as Trino patterns: the same eligible
-shapes, ASCII-folded ones included, reached by the same operations with the
-same memory charge, and on by default. They admit runs of sets of some
-non-ASCII characters in every language. Trino captures and extraction
-run about eight times faster on a plan than on the ordinary engine, and nothing
-in those shapes is specific to Trino. The frontend chooses explicitly whether to
-build a plan, so `Re2.compileParsed` builds none. Java and Rust patterns select
-the same plans under these decisions; the last bullets record the rules and
-measurements specific to each language.
+shapes, reached by the same operations with the same memory charge, and on by
+default. They admit runs of sets of some non-ASCII characters in every
+language. Trino captures and extraction run about eight times faster on a plan
+than on the ordinary engine, and nothing in those shapes is specific to Trino.
+The frontend chooses explicitly whether to build a plan, so `Re2.compileParsed`
+builds none. Java and Rust patterns select the same plans under these
+decisions; the last bullets record the rules and measurements specific to each
+language.
 
 - A plan reports exactly what the ordinary engine reports on every input,
   including malformed UTF-8. Only operations that can consume a byte at or
@@ -6567,8 +6087,8 @@ measurements specific to each language.
   do.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
-- An option compiles a case-sensitive RE2 plan into its own class, as described
-  in [Generated RE2 Scan Kernels](#generated-re2-scan-kernels).
+- An option compiles an RE2 plan into its own class, as described in [Generated
+  RE2 Scan Kernels](#generated-re2-scan-kernels).
 - A plan must not be slower than the same pattern without it. On R9g, R8g, and
   R8i, RE2 `BenchmarkClickBenchRegexp` `contains` takes 0.09 to 0.84 times the
   time of a build without RE2 plans on every `HTTP`, `WWW`, `LONG_HOST`, and
@@ -6661,7 +6181,8 @@ measurements specific to each language.
   member, such as `(?iu)k`, each as a set of some non-ASCII characters.
   Multiline anchors, Java word boundaries, and reluctant runs keep the ordinary
   engine, as they do in Trino. Java's `(?i)` without `UNICODE_CASE` folds each
-  letter as its ASCII pair, so `(?i)s` and `(?i)k` reach a plan.
+  letter as its ASCII pair, so a literal under it, such as `(?i)s` or `(?i)k`,
+  is ASCII-folded and declines the plan.
 - A Java plan must not be slower than the same pattern without it. On R9g and
   R8i, the 95 rows of `BenchmarkJavaScanPlan` without dotAll, five matching
   methods over the 19 workloads `URL`, `URL_SHORT`, `ANCHORED_HOST`,
@@ -6711,7 +6232,8 @@ measurements specific to each language.
   reads input by the RE2 rule and reports what the ordinary engine reports on
   every input, which on valid UTF-8 is the pinned crate's result, as it is on
   any input in byte mode. Without multi-line mode Rust's `$` is the strict end,
-  and Rust's dot and `(?i)` match as RE2's do, so those reach a plan unchanged.
+  and Rust's dot and `(?i)` match as RE2's do, so its dot reaches a plan
+  unchanged and an ASCII-folded literal declines one, as in RE2.
   Byte mode keeps its plans, unlike RE2's Latin-1 patterns: a plan never matches
   empty, so byte mode's one-byte advance past an empty match never applies, and
   the analysis rejects every byte construct that can match a byte above 0x7F,
@@ -6771,8 +6293,9 @@ measurements specific to each language.
   with the trie walk, took slightly longer than the ordinary engine, and both
   are accepted: Java `OPTIONALS` `count` with `javaLineTerminators=true` took
   1.046 times the ordinary engine's time, 68.3 ns against 65.3 ns, and RE2
-  `DEEP_REJECTIONS` `extractAll` 1.08 times, 300 ns against 278 ns, within the
-  error of either measurement.
+  `DEEP_REJECTIONS` `extractAll`, whose first pattern was then wholly
+  case-insensitive, 1.08 times, 300 ns against 278 ns, within the error of
+  either measurement.
 - Taking the width from the lead byte rather than the table slows two R8i
   workloads relative to full lead entries alone; these losses are accepted
   because both remain faster than the ordinary engine. Java
@@ -6805,34 +6328,33 @@ measurements specific to each language.
 
 ## Generated Trino Scan Kernels
 
-`TrinoRegexp.Options.setGenerateBytecode` is an opt-in, disabled
-by default, that compiles the case-sensitive scan plan of an eligible pattern
-into its own hidden class. The class holds the plan's attempt loop as
-straight-line code, with literals, their lengths, and branch targets as
-constants; a run step passes its run to a copied run scanner that reads the
-run's bounds and members. The class also holds the candidate search of an
-unanchored plan, with its limits as constants, and a public entry for each
-Trino operation that reaches the plan. A hot pattern therefore shares neither
-the interpreter's operation dispatch nor its profiles with other plans. Its
-results, retries, captures, and search handoffs are those of the interpreter,
-which differential tests check operation by operation.
+`TrinoRegexp.Options.setGenerateBytecode` is an opt-in, disabled by default,
+that compiles the scan plan of an eligible pattern into its own hidden class.
+The class holds the plan's attempt loop as straight-line code, with literals,
+their lengths, and branch targets as constants; a run step passes its run to a
+copied run scanner that reads the run's bounds and members. The class also
+holds the candidate search of an unanchored plan, with its limits as constants,
+and a public entry for each Trino operation that reaches the plan. A hot
+pattern therefore shares neither the interpreter's operation dispatch nor its
+profiles with other plans. Its results, retries, captures, and search handoffs
+are those of the interpreter, which differential tests check operation by
+operation.
 
 - An eligible pattern compiles to its generated class, which extends a
   package-private non-sealed `TrinoRegexp` subclass, as the RE2 class extends
-  `CompiledScanRe2`, a subclass of its
-  [scan-plan shape](#generated-re2-scan-kernels). Each operation keeps the
-  route it has without the option, fixed when the class is generated: an
-  operation that would run the case-sensitive plan runs the generated class,
-  and one that would run other Java, such as a retained literal kernel for
-  `contains`, still runs that Java. Short boolean calls that the interpreter
-  hands to the ordinary engine still run the generated class, which has no
-  operation dispatch for that route to avoid.
+  `CompiledScanRe2`, a subclass of its [scan-plan
+  shape](#generated-re2-scan-kernels). Each operation keeps the route it has
+  without the option, fixed when the class is generated: an operation that
+  would run the plan runs the generated class, and one that would run other
+  Java, such as a retained literal kernel for `contains`, still runs that Java.
+  Short boolean calls that the interpreter hands to the ordinary engine still
+  run the generated class, which has no operation dispatch for that route to
+  avoid.
 - A pattern is eligible when it would compile to the base `TrinoRegexp` class
-  with a case-sensitive plan that every operation but `contains` reaches, and
-  cannot match empty, which no pattern with a plan can: each generated match
-  loop resumes its search at the previous match end. Any other pattern,
-  including one with an ASCII-folded plan, compiles exactly as it does without
-  the option.
+  with a plan that every operation but `contains` reaches, and cannot match
+  empty, which no pattern with a plan can: each generated match loop resumes
+  its search at the previous match end. Any other pattern compiles exactly as
+  it does without the option.
 - Generation happens once, when the pattern is compiled, never on first match.
   A pattern whose class cannot be generated or defined is silently
   interpreted; generation never makes compilation fail and has no mandatory
@@ -6886,19 +6408,18 @@ which differential tests check operation by operation.
 
 ## Generated RE2 Scan Kernels
 
-`Re2.Options.setGenerateBytecode` is an opt-in, disabled by
-default, that compiles the case-sensitive scan plan of an RE2 pattern with the
-generator of [Generated Trino Scan Kernels](#generated-trino-scan-kernels),
-under its rules: generation happens once at compilation, a pattern whose class
-cannot be generated or defined is silently interpreted, nothing generated
-loads without the option, generated code calls its own copies of the
-interpreter's helpers, per-pattern state on an entry's hot path is class data,
-each public entry stays within HotSpot's inline size, and the class is defined
-in Regulator's package and is not charged to the memory budget. RE2 runs and delimited captures call copies
+`Re2.Options.setGenerateBytecode` is an opt-in, disabled by default, that
+compiles the scan plan of an RE2 pattern with the generator of [Generated Trino
+Scan Kernels](#generated-trino-scan-kernels), under its rules: generation
+happens once at compilation, a pattern whose class cannot be generated or
+defined is silently interpreted, nothing generated loads without the option,
+generated code calls its own copies of the interpreter's helpers, per-pattern
+state on an entry's hot path is class data, each public entry stays within
+HotSpot's inline size, and the class is defined in Regulator's package and is
+not charged to the memory budget. RE2 runs and delimited captures call copies
 of the RE2 run reader and its vector stop scan, and runs of some non-ASCII
-characters also call a copy of their member reader, so a generated plan
-reports what the ordinary engine reports on every input, malformed UTF-8
-included.
+characters also call a copy of their member reader, so a generated plan reports
+what the ordinary engine reports on every input, malformed UTF-8 included.
 `JavaRegexp.Options.setGenerateBytecode` and
 `RustRegexp.Options.setGenerateBytecode` apply these decisions to Java and Rust
 plans; the last bullets record the rules and measurements specific to each.
@@ -6927,9 +6448,8 @@ plans; the last bullets record the rules and measurements specific to each.
   its entries directly; callers still cannot extend the pattern classes. The
   generated class adds no fields, so it keeps the scan-plan shape's 120-byte
   layout.
-- Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino. Unlike Trino, a count that skips the plan
-  does not exclude a pattern, because only the calls that reach the plan
+- Any pattern with a plan is eligible. Unlike Trino, a count that skips the
+  plan does not exclude a pattern, because only the calls that reach the plan
   change. Route selection gives no pattern with a plan a single-byte table.
 - Short boolean calls that the interpreter hands to the DFA stay on the
   generated class, as in Trino. Boolean calls of a plan run its full plan

@@ -23,8 +23,6 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -58,14 +56,10 @@ final class Prog
         REPEATED_BYTE,
         FUSED_SWAR,
         FUSED_VECTOR,
-        // The vector pair scan of FUSED_VECTOR over the literals every match begins with, which
-        // run past the prefix; see buildPrefixLiteralSet.
-        FUSED_LITERAL_SET,
     }
 
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
-    private static final int MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET = 16;
     // The results of walkByteOffset other than an instruction count.
     private static final int BYTE_OFFSET_ASSERTION = -1;
     private static final int BYTE_OFFSET_MATCH = -2;
@@ -78,13 +72,6 @@ final class Prog
 
     private static final int[] WORD_RANGES = {48, 57, 65, 90, 95, 95, 97, 122};
     private static final int[] NON_WORD_RANGES = {0, 47, 58, 64, 91, 94, 96, 96, 123, 255};
-
-    @SuppressFBWarnings(
-            value = "EI_EXPOSE_REP",
-            justification = "Slice values are deliberate zero-copy result views")
-    public record PossibleMatchRangeResult(Slice min, Slice max) {}
-
-    record FixedDistanceByteCandidates(byte[] candidates, int offset) {}
 
     // The probe pair a folded pair kernel tests and whether the dense kernel scans it; see
     // foldedPairScan.
@@ -557,18 +544,8 @@ final class Prog
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
-    // The literals every match begins with, when they run past a non-folded prefix and hold one
-    // exact byte at the same offset past it, prefixLiteralSetBackOffset. The vector pair scan
-    // tests that byte with the one at prefixPairOffset, in place of the one at
-    // prefixPairSecondaryOffset; see buildPrefixLiteralSet. Sorted by length, shortest first.
-    // Null otherwise.
-    private byte[][] prefixLiteralSet;
-    private int prefixLiteralSetBackOffset;
-    // The part of the shift table's and literal set's size charged to dfaMemory, returned when the
-    // prefix changes.
+    // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
     private long prefixScanCharge;
-    // Whether the decision on the literal set, and its charge, wait for decidePrefixLiteralSet.
-    private boolean prefixLiteralSetDeferred;
     // 0x0101010101010101, read from a field so the SWAR word loops of the prefix scans hold it in
     // a register: on aarch64 C2 cannot encode its negation as an immediate, and rebuilt it with
     // four instructions every word, even from a local holding the constant. The constructor
@@ -578,9 +555,6 @@ final class Prog
     // The predicted share of vectors holding a folded pair candidate at and above which the
     // folded vector scan verifies candidates inside its vector loop; see usesDenseFoldCaseScan.
     static final double DENSE_FOLD_CASE_VECTOR_SHARE = 0.15;
-    // The most literals a prefix literal set compares at each candidate, the same limit as the
-    // start literal filter's eight groups.
-    private static final int MAXIMUM_PREFIX_LITERALS = 8;
 
     // The literal every match begins with behind a leading assertion, and its search; see
     // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
@@ -604,12 +578,6 @@ final class Prog
 
     // DFA caching with memory budgets (like upstream RE2).
     private long dfaMemory;  // Total DFA memory budget
-    // Whether dfaMemory is what a positive maxMemory left the DFAs, rather than an unbudgeted
-    // compile's default allowance; see configurePrefixAccelBytes. The prefix literal set is the
-    // one optional plan kept or dropped by it: an explicit maxMemory must leave the forward DFAs
-    // the memory they need to initialize, while an unbudgeted compile keeps the set under its
-    // default allowance.
-    private boolean dfaMemoryBudgeted;
     private final AtomicReference<Dfa.DfaInstance> dfaFirstMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaLongestMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaManyMatch = new AtomicReference<>();
@@ -823,7 +791,7 @@ final class Prog
         return textDependentAssertions;
     }
 
-    public boolean hasFullCaseFold()
+    public boolean hasFullCaseFoldForDiagnostics()
     {
         return hasFullCaseFold;
     }
@@ -915,24 +883,10 @@ final class Prog
         return onePassStep;
     }
 
-    /// The retained bytes of the prefix scan's tables: the KMP shifts and the literal set, which
-    /// counts only once it is decided; see [#deferPrefixLiteralSet()].
+    /// The retained bytes of the prefix scan's KMP shifts.
     long prefixScanMemory()
     {
-        long shiftsMemory = prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
-        return prefixLiteralSetDeferred ? shiftsMemory : shiftsMemory + prefixLiteralSetMemory();
-    }
-
-    private long prefixLiteralSetMemory()
-    {
-        if (prefixLiteralSet == null) {
-            return 0;
-        }
-        long memory = SizeOf.sizeOfObjectArray(prefixLiteralSet.length);
-        for (byte[] literal : prefixLiteralSet) {
-            memory += SizeOf.sizeOf(literal);
-        }
-        return memory;
+        return prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
     }
 
     /// The heap bytes this program retains now, plus the native memory of its live DFA pointer
@@ -957,7 +911,6 @@ final class Prog
                 SizeOf.sizeOf(anchoredStartBytes) +
                 SizeOf.sizeOf(prefix) +
                 LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts) +
-                prefixLiteralSetMemory() +
                 SizeOf.sizeOf(transparentStartLiteral) +
                 (transparentStartLiteralSearch == null ? 0 : transparentStartLiteralSearch.estimatedRetainedSize()) +
                 (positionNfa == null ? 0 : positionNfa.estimatedRetainedSize()) +
@@ -1400,17 +1353,7 @@ final class Prog
     /// and past [#MAXIMUM_START_POSITION_PATHS] paths.
     long[][] buildStartPositionByteSets(int[] stack, int positionCount)
     {
-        if (prefixAccelReplacesStartBytes()) {
-            return null;
-        }
-        return walkStartPositionByteSets(stack, positionCount);
-    }
-
-    // The start-position walk that buildStartPositionByteSets and buildPrefixLiteralSet share. The
-    // literal set reads it even where prefix acceleration replaces the start bytes.
-    private long[][] walkStartPositionByteSets(int[] stack, int positionCount)
-    {
-        if (reversed || anchorStart || canMatchEmpty || start() == 0) {
+        if (prefixAccelReplacesStartBytes() || reversed || anchorStart || canMatchEmpty || start() == 0) {
             return null;
         }
 
@@ -1686,25 +1629,11 @@ final class Prog
     /// candidates pass the comparison budget, and shorter ones take `literalSearch`, the
     /// literal's call-free search. The vector scan recomputes the pair, from [#adjacentPairOffset]
     /// or [#pairOffset], on each call: at most four bytes for the pair offset and, for a periodic
-    /// literal, at most one period past it, against a range, or with the overload below a window,
-    /// of at least 1 KiB, so the literal needs no stored offsets.
+    /// literal, at most one period past it, against a range of at least 1 KiB, so the literal
+    /// needs no stored offsets.
     static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
     {
-        return findLiteral(data, offset, length, literal, literalSearch, length);
-    }
-
-    /// Returns what [#findLiteral(byte\[\],int,int,byte\[\],LiteralSearchKernel)] returns for the
-    /// range, with the scan chosen by `windowLength`, the length of the window whose end the range
-    /// shares, in place of the range's own length. `RequiredBytes.handoffIndexIn` resumes a
-    /// window's scan at the first hit of a shorter literal, and after an early hit the rest of a
-    /// long window is often shorter than the vector scan's minimum. The vector scan takes a range
-    /// of any length, testing whole vectors of candidates and then the rest one at a time. Scanning
-    /// such rests with the call-free search, which reads a word at a time, made the handoff take
-    /// 2.1 times as long on Graviton and 2.5 times as long on x86 as a vector scan from the line
-    /// start, on 1 KiB lines; see REGULATOR_DECISIONS.md, Required Literal Absence On Long Windows.
-    static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch, int windowLength)
-    {
-        if (VectorSupport.isAvailable() && windowLength >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
             int adjacentPairOffset = adjacentPairOffset(literal, literalSearch.smallestPeriod());
             int primaryOffset = adjacentPairOffset >= 0 ? adjacentPairOffset : pairOffset(literal);
             int secondaryOffset = adjacentPairOffset >= 0 ? adjacentPairOffset + 1 : literal.length - 1;
@@ -1715,24 +1644,6 @@ final class Prog
             return found;
         }
         return literalSearch.findContains(data, offset, length);
-    }
-
-    /// Returns the absolute index in `data` of the last occurrence of `literal`, of at least two
-    /// bytes, that lies wholly in the range, or `-1`, as [#findLiteral] finds the first: ranges of
-    /// at least the fused vector scan's minimum take the vector scan from the range end, finished
-    /// with the reverse KMP of `literalSearch` once its failed candidates pass the comparison
-    /// budget, and shorter ones take `literalSearch`'s call-free search from the end, which a
-    /// kernel from [LiteralSearchKernel#sharingWithLastOccurrence] provides.
-    static int findLastLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
-    {
-        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
-            int found = VectorPrefixScanner.findLast(data, offset, length, literal, pairOffset(literal), literal.length - 1);
-            if (found < -1) {
-                return literalSearch.findLastKmp(data, offset, -2 - found);
-            }
-            return found;
-        }
-        return literalSearch.findLastContains(data, offset, length);
     }
 
     /// Returns the offset of the byte that the fused pair scans test together with the last byte
@@ -1786,47 +1697,6 @@ final class Prog
         skipsToStartCandidate = canPrefixAccel() || (transparentStartLiteral != null && hasDfaUnsupportedAssertions());
     }
 
-    /// Finds a selective byte set at one fixed offset from every possible match start.
-    /// The bounded walk deliberately rejects assertions and variable-distance candidates.
-    FixedDistanceByteCandidates buildFixedDistanceByteCandidates(int[] stack, byte[] startByteCandidates)
-    {
-        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || startByteCandidates == null || start() == 0) {
-            return null;
-        }
-
-        int bestCandidateCount = countCandidates(startByteCandidates);
-        byte[] bestCandidates = null;
-        int bestOffset = -1;
-
-        int[] currentInstructions = new int[size()];
-        int currentInstructionCount = 1;
-        currentInstructions[0] = start();
-        int[] byteInstructions = new int[size()];
-        boolean[] visited = new boolean[size()];
-
-        for (int offset = 0; offset <= MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET && currentInstructionCount > 0; offset++) {
-            byte[] candidates = new byte[256];
-            currentInstructionCount = walkByteOffset(stack, currentInstructions, currentInstructionCount, byteInstructions, visited, candidates);
-            if (currentInstructionCount == BYTE_OFFSET_ASSERTION) {
-                return null;
-            }
-            if (currentInstructionCount == BYTE_OFFSET_MATCH) {
-                break;
-            }
-            int candidateCount = countCandidates(candidates);
-            if (offset > 0 && candidateCount > 0 && candidateCount < bestCandidateCount) {
-                bestCandidateCount = candidateCount;
-                bestCandidates = candidates;
-                bestOffset = offset;
-            }
-        }
-
-        if (bestCandidates == null || bestCandidateCount > 64) {
-            return null;
-        }
-        return new FixedDistanceByteCandidates(bestCandidates, bestOffset);
-    }
-
     /// Returns the bytes at each of the first offsets of every match, for the start class filter
     /// of a forward DFA: one 256-entry membership table per offset; entry `b` of table `k` is
     /// nonzero when some path from [#start()] reads `b` there, the union over all paths. The
@@ -1834,8 +1704,7 @@ final class Prog
     /// every match holds a byte of each table at its offset. Returns null when fewer than two
     /// offsets lie before every match end, when an offset reads no byte, when the bounded walk
     /// reaches an assertion, and for a reversed, start-anchored, or empty-matching program, one
-    /// with prefix acceleration, or one with no start instruction. The walk is the one
-    /// [#buildFixedDistanceByteCandidates] takes.
+    /// with prefix acceleration, or one with no start instruction.
     byte[][] buildStartOffsetByteSets(int[] stack, int maximumSpan)
     {
         if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0) {
@@ -1937,20 +1806,6 @@ final class Prog
         return byteInstructionCount;
     }
 
-    private static int countCandidates(byte[] candidates)
-    {
-        if (candidates == null) {
-            return Integer.MAX_VALUE;
-        }
-        int count = 0;
-        for (byte candidate : candidates) {
-            if (candidate != 0) {
-                count++;
-            }
-        }
-        return count;
-    }
-
     private static int addStartByteRange(byte[] candidates, long instruction)
     {
         int added = 0;
@@ -2004,7 +1859,7 @@ final class Prog
             return PrefixAccelStrategy.REPEATED_BYTE;
         }
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
-            return prefixLiteralSet != null ? PrefixAccelStrategy.FUSED_LITERAL_SET : PrefixAccelStrategy.FUSED_VECTOR;
+            return PrefixAccelStrategy.FUSED_VECTOR;
         }
         // Short ASCII-led searches, and long ones without the Vector API, keep the repeated
         // first-byte scan, whose single load per word costs less than the fused SWAR pair's two.
@@ -2057,8 +1912,7 @@ final class Prog
     /// `bytes`, which [ByteFrequencies#foldedProbePair] chooses under the caller's
     /// `byteFrequencies`, or under English text in place of the default uniform one, and whether
     /// the dense kernel scans it, as [#usesDenseFoldCaseScan] decides from how many vectors the
-    /// same distribution predicts hold a candidate. The folded prefix scan and the folded inner
-    /// literal search both choose here.
+    /// same distribution predicts hold a candidate. The folded prefix scan chooses here.
     static FoldedPairScan foldedPairScan(byte[] bytes, int size, ByteFrequencies byteFrequencies)
     {
         ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
@@ -2099,10 +1953,9 @@ final class Prog
 
     /// Returns whether the prefix scan searches for a folded run that stands in for no prefix,
     /// configured because the program has no folded prefix or an empty one. The long-window
-    /// required-literal check, which a program with a prefix scan takes only for a literal beside
-    /// that scan, decides for such a program as for the program without the run: on a window
-    /// without the literal, its one literal scan returns where the run's scan and the DFA would
-    /// read the window.
+    /// required-literal check, which a program with a prefix scan does not take, decides for such
+    /// a program as for the program without the run: on a window without the literal, its one
+    /// literal scan returns where the run's scan and the DFA would read the window.
     boolean prefixRunAddsPrefixScan()
     {
         return prefixRunAddsPrefixScan;
@@ -2229,8 +2082,6 @@ final class Prog
         this.prefixRunAddsPrefixScan = false;
         this.prefixRunHidesOneBitStartLiteralFilter = false;
         this.prefixShifts = null;
-        this.prefixLiteralSet = null;
-        this.prefixLiteralSetBackOffset = 0;
         this.dfaMemory += prefixScanCharge;
         this.prefixScanCharge = 0;
         if (bytes == null || bytes.length == 0) {
@@ -2289,12 +2140,6 @@ final class Prog
             // program's default allowance from going negative.
             this.prefixScanCharge = Math.min(dfaMemory, prefixScanMemory());
             this.dfaMemory -= prefixScanCharge;
-            if (probeOffset == 0 && VectorSupport.isAvailable()) {
-                buildPrefixLiteralSet(bytes);
-                if (!prefixLiteralSetDeferred) {
-                    chargePrefixLiteralSet(this);
-                }
-            }
         }
         else {
             // For single-byte non-foldCase, use simple memchr-style search
@@ -2304,144 +2149,9 @@ final class Prog
         updateStartCandidateSkip();
     }
 
-    /// Returns a budgeted program's literal set charge to its DFA allowance and leaves the set
-    /// undecided until [#decidePrefixLiteralSet(Prog)], so that neither OnePass nor any plan or
-    /// route judges its memory with the set's bytes taken. The set is still built for any prefix
-    /// configured meanwhile, but not charged. An unbudgeted program keeps its charge.
-    void deferPrefixLiteralSet()
-    {
-        if (!dfaMemoryBudgeted || prefixLiteralSetDeferred) {
-            return;
-        }
-        this.prefixLiteralSetDeferred = true;
-        // A budgeted program keeps the set only where its whole size was charged.
-        long setMemory = prefixLiteralSetMemory();
-        this.prefixScanCharge -= setMemory;
-        this.dfaMemory += setMemory;
-    }
-
-    /// Decides the literal set [#deferPrefixLiteralSet()] left undecided against the DFA allowance
-    /// of `allowance`, this program or the one that holds its forward DFA budget, after every
-    /// other charge to that allowance.
-    void decidePrefixLiteralSet(Prog allowance)
-    {
-        if (!prefixLiteralSetDeferred) {
-            return;
-        }
-        this.prefixLiteralSetDeferred = false;
-        chargePrefixLiteralSet(allowance);
-    }
-
-    /// Whether the literal set waits for [#decidePrefixLiteralSet(Prog)].
-    boolean defersPrefixLiteralSet()
-    {
-        return prefixLiteralSetDeferred;
-    }
-
-    /// Charges the literal set to the DFA allowance of `allowance`. The set only saves work, so it
-    /// is decided after every other charge and a budgeted allowance keeps it only where the rest
-    /// still leaves the forward DFAs the memory they need to initialize, which for them is their
-    /// minimum: the set exists only beside a prefix scan, which replaces their start-byte tables,
-    /// and a lowered program that holds the allowance begins with the same prefix. A budget then
-    /// gives the same OnePass decision, routes, and DFA minimum with the set as without it.
-    private void chargePrefixLiteralSet(Prog allowance)
-    {
-        long setMemory = prefixLiteralSetMemory();
-        if (setMemory == 0) {
-            return;
-        }
-        if (allowance.dfaMemoryBudgeted && !allowance.leavesDfaMinimum(setMemory)) {
-            this.prefixLiteralSet = null;
-            this.prefixLiteralSetBackOffset = 0;
-            return;
-        }
-        long charge = Math.min(allowance.dfaMemory, setMemory);
-        allowance.dfaMemory -= charge;
-        if (allowance == this) {
-            this.prefixScanCharge += charge;
-        }
-    }
-
-    /// Sets [#prefixLiteralSet] for `prefix`, a non-folded prefix of two or more bytes whose probe
-    /// stays at its first byte, so that its long searches take the fused pair scan, when the
-    /// literals every match begins with run past it and share an exact byte at the same offset
-    /// there. A short prefix such as `fn ` in `fn is_\w+|fn as_\w+` is common in text and is
-    /// mostly followed by neither alternative, so the pair scan stops at most of its occurrences
-    /// and the search resumes past each one. Testing the last byte the literals share, `_` here,
-    /// with the prefix's paired byte, and comparing the literals at each candidate, stops only
-    /// where an alternative can begin.
-    ///
-    /// The literals are read from [#walkStartPositionByteSets] over
-    /// [StartLiteralFilter#SHALLOW_PATH_POSITIONS] bytes: each path's bytes up to its first position
-    /// that accepts more than one byte, so every match begins with one of them. A folded letter
-    /// accepts two bytes and ends its path's literal there. The set is kept only when the walk
-    /// succeeds and its distinct literals number at most [#MAXIMUM_PREFIX_LITERALS], each starts
-    /// with the prefix and runs past it, and some position past the prefix and before the end
-    /// of the shortest literal holds one byte in all of them; the last such position is the back
-    /// offset. Each literal is no longer than the walk, so the comparisons at a candidate are
-    /// bounded, and the scan needs no comparison budget.
-    private void buildPrefixLiteralSet(byte[] prefix)
-    {
-        if (prefix.length >= StartLiteralFilter.SHALLOW_PATH_POSITIONS) {
-            return;
-        }
-        long[][] paths = walkStartPositionByteSets(new int[3 * size() + 1], StartLiteralFilter.SHALLOW_PATH_POSITIONS);
-        if (paths == null) {
-            return;
-        }
-        List<byte[]> literals = new ArrayList<>();
-        for (long[] path : paths) {
-            byte[] literal = pathLiteral(path);
-            if (literal.length <= prefix.length || !Arrays.equals(literal, 0, prefix.length, prefix, 0, prefix.length)) {
-                return;
-            }
-            if (literals.stream().noneMatch(existing -> Arrays.equals(existing, literal))) {
-                if (literals.size() == MAXIMUM_PREFIX_LITERALS) {
-                    return;
-                }
-                literals.add(literal);
-            }
-        }
-        literals.sort(Comparator.comparingInt(literal -> literal.length));
-        byte[] shortest = literals.getFirst();
-        for (int offset = shortest.length - 1; offset >= prefix.length; offset--) {
-            byte value = shortest[offset];
-            int position = offset;
-            if (literals.stream().allMatch(literal -> literal[position] == value)) {
-                this.prefixLiteralSet = literals.toArray(byte[][]::new);
-                this.prefixLiteralSetBackOffset = offset;
-                return;
-            }
-        }
-    }
-
-    // The bytes of a path from walkStartPositionByteSets before its first position that accepts
-    // other than exactly one byte.
-    private static byte[] pathLiteral(long[] path)
-    {
-        int positionCount = path.length / 4;
-        byte[] literal = new byte[positionCount];
-        int length = 0;
-        while (length < positionCount) {
-            int base = length * 4;
-            int count = Long.bitCount(path[base]) + Long.bitCount(path[base + 1]) + Long.bitCount(path[base + 2]) + Long.bitCount(path[base + 3]);
-            if (count != 1) {
-                break;
-            }
-            int index = 0;
-            while (path[base + index] == 0) {
-                index++;
-            }
-            literal[length++] = (byte) (index * 64 + Long.numberOfTrailingZeros(path[base + index]));
-        }
-        return Arrays.copyOf(literal, length);
-    }
-
     /// Returns an absolute index `p` in `data` such that no match starts in `[offset, p)`, or `-1`
     /// if no match starts at or after `offset`. For a prefix, `p` is the first place the prefix
-    /// matches, except under the literal set scan, where it is the first place one of the
-    /// literals every match begins with matches, past occurrences of the prefix that begin none
-    /// of them. For a folded run behind a lead, it is the first run found less the widest lead,
+    /// matches. For a folded run behind a lead, it is the first run found less the widest lead,
     /// never before `offset`, and can precede the match: `(?i)Sherlock Holmes` under Unicode
     /// folding scans for ` holme` 8 to 11 bytes in, so on `xxxxxxxxxxSherlock Holmes` it returns
     /// 7, while the match starts at 10. When `p` is past `offset`, a call from any position from
@@ -2460,11 +2170,6 @@ final class Prog
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
-    /// - On long searches with the Vector API, when the literals every match begins with run
-    ///   past the prefix and share a byte at the same offset there, fused pair masks of the
-    ///   prefix's paired byte and the last shared byte, with each candidate compared with every
-    ///   literal; see [#buildPrefixLiteralSet]. Each returned position begins one of the
-    ///   literals, and so the prefix.
     ///
     /// The other non-folded multi-byte scans charge their failed candidates to
     /// [LiteralSearchKernel]'s comparison budget and finish with KMP once they pass it, so
@@ -2496,9 +2201,6 @@ final class Prog
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
         if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
             return prefixAccelFusedVector(data, offset, length);
-        }
-        if (strategy == PrefixAccelStrategy.FUSED_LITERAL_SET) {
-            return prefixAccelLiteralSet(data, offset, length);
         }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
             return finishWithKmp(data, end, prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length));
@@ -2550,17 +2252,11 @@ final class Prog
         return finishWithKmp(data, offset + length, VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixPairSecondaryOffset));
     }
 
-    private int prefixAccelLiteralSet(byte[] data, int offset, int length)
-    {
-        return VectorPrefixScanner.findLiteralSet(data, offset, length, prefixLiteralSet, prefixPairOffset, prefixLiteralSetBackOffset);
-    }
-
     /// Returns the absolute index where [#prefixAccel] continues with KMP; only tests call it.
     /// Returns -1 when the search ends, with or without a match, before it switches to KMP, for a
-    /// folded or one-byte prefix, and for the literal set scan, which never switches. It runs the
-    /// scans [#prefixAccel] runs, except that the first-byte scan starts in
-    /// [#continueFrontAndBack], whose handoff is the same because the scan charges nothing before
-    /// its first failed candidate.
+    /// folded or one-byte prefix. It runs the scans [#prefixAccel] runs, except that the first-byte
+    /// scan starts in [#continueFrontAndBack], whose handoff is the same because the scan charges
+    /// nothing before its first failed candidate.
     int prefixAccelKmpHandoffForDiagnostics(byte[] data, int offset, int length)
     {
         if (prefixFoldCase || prefixSize <= 1 || length < prefixSize) {
@@ -2568,7 +2264,6 @@ final class Prog
         }
         int found = switch (prefixAccelStrategy(length)) {
             case FUSED_VECTOR -> VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixPairSecondaryOffset);
-            case FUSED_LITERAL_SET -> -1;
             case FUSED_SWAR -> prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
             case REPEATED_BYTE -> prefixProbeOffset != 0 ? prefixAccelProbe(data, offset, length) : continueFrontAndBack(data, offset, offset, offset + length);
         };
@@ -3130,13 +2825,6 @@ final class Prog
     public void setDfaMemory(long dfaMemory)
     {
         this.dfaMemory = dfaMemory;
-    }
-
-    /// Marks the DFA memory budget as what a positive `maxMemory` left, which the optional prefix
-    /// literal set yields to.
-    void setDfaMemoryBudgeted()
-    {
-        this.dfaMemoryBudgeted = true;
     }
 
     /// Get the DFA memory budget.
@@ -3800,525 +3488,6 @@ final class Prog
         bytemapRange = outRange[0];
 
         anchoredStartBytes = anchorStart && !reversed ? boundaryBytes() : null;
-    }
-
-    /// Computes a lexicographic range `[min, max]` such that any string `s` that is a
-    /// full (anchored) match for this program satisfies `min <= s && s <= max`.
-    ///
-    /// The returned `min`/`max` are truncated to at most `maxLength` bytes. When the
-    /// underlying language has no maximum element (e.g., matches all non-empty strings in Latin-1),
-    /// this method returns `null`.
-    ///
-    /// Note: Like upstream, this only considers the first copy of an infinitely repeated element.
-    public PossibleMatchRangeResult possibleMatchRange(int maxLength)
-    {
-        if (maxLength < 0) {
-            throw new IllegalArgumentException("maxLength must be >= 0");
-        }
-
-        // Start "before" the first byte: no previous byte (-1).
-        int[] startInstructionIds = normalizeStartInstructions(start(), EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE);
-        DfaState startState = new DfaState(startInstructionIds, -1, false, stateNeedsContext(startInstructionIds));
-
-        // Build minimum string.
-        StateVisitMap seen = new StateVisitMap();
-        byte[] minimumBuffer = new byte[maxLength];
-        int minimumLength = 0;
-        DfaState state = startState;
-        for (int i = 0; i < maxLength; i++) {
-            if (seen.get(state) > 0) {
-                break;
-            }
-            seen.increment(state);
-
-            if (endTextIsMatch(state)) {
-                break;
-            }
-
-            boolean extended = false;
-            for (int byteValue = 0; byteValue < 256; byteValue++) {
-                NextStep step = runOnByte(state, byteValue);
-                if (step != null) {
-                    DfaState nextState = new DfaState(
-                            step.instructionIds(),
-                            step.previousByte(),
-                            step.match(),
-                            stateNeedsContext(step.instructionIds()));
-                    minimumBuffer[minimumLength++] = (byte) byteValue;
-                    state = nextState;
-                    extended = true;
-                    break;
-                }
-            }
-            if (!extended) {
-                break;
-            }
-        }
-
-        // Build maximum string.
-        seen.clear();
-        byte[] maximumBuffer = new byte[maxLength];
-        int maximumLength = 0;
-        state = startState;
-        for (int i = 0; i < maxLength; i++) {
-            if (seen.get(state) > 0) {
-                break;
-            }
-            seen.increment(state);
-
-            boolean extended = false;
-            for (int byteValue = 255; byteValue >= 0; byteValue--) {
-                NextStep step = runOnByte(state, byteValue);
-                if (step != null) {
-                    DfaState nextState = new DfaState(
-                            step.instructionIds(),
-                            step.previousByte(),
-                            step.match(),
-                            stateNeedsContext(step.instructionIds()));
-                    maximumBuffer[maximumLength++] = (byte) byteValue;
-                    state = nextState;
-                    extended = true;
-                    break;
-                }
-            }
-            if (!extended) {
-                return new PossibleMatchRangeResult(
-                        Slices.wrappedBuffer(copyOfBytes(minimumBuffer, minimumLength)),
-                        Slices.wrappedBuffer(copyOfBytes(maximumBuffer, maximumLength)));
-            }
-        }
-
-        // Stopped while still adding to max - round up to the next prefix successor.
-        maximumLength = prefixSuccessor(maximumBuffer, maximumLength);
-        if (maximumLength == 0) {
-            return null;
-        }
-
-        return new PossibleMatchRangeResult(
-                Slices.wrappedBuffer(copyOfBytes(minimumBuffer, minimumLength)),
-                Slices.wrappedBuffer(copyOfBytes(maximumBuffer, maximumLength)));
-    }
-
-    private static byte[] copyOfBytes(byte[] buffer, int length)
-    {
-        if (length == 0) {
-            return new byte[0];
-        }
-        byte[] result = new byte[length];
-        System.arraycopy(buffer, 0, result, 0, length);
-        return result;
-    }
-
-    private static int[] copyOfInts(int[] buffer, int length)
-    {
-        if (length == 0) {
-            return new int[0];
-        }
-        int[] result = new int[length];
-        System.arraycopy(buffer, 0, result, 0, length);
-        return result;
-    }
-
-    private boolean endTextIsMatch(DfaState state)
-    {
-        EpsilonClosure closure = epsilonClosure(state, -1);
-        return closure.match;
-    }
-
-    private NextStep runOnByte(DfaState state, int byteValue)
-    {
-        EpsilonClosure closure = epsilonClosure(state, byteValue);
-        if (closure.byteRangeInstructionIds.length == 0) {
-            return null;
-        }
-
-        int[] nextInstructionIds = new int[closure.byteRangeInstructionIds.length];
-        int nextInstructionCount = 0;
-        for (int instructionId : closure.byteRangeInstructionIds) {
-            long instruction = words[instructionId];
-            if (instMatches(instruction, byteValue)) {
-                nextInstructionIds[nextInstructionCount++] = instOut(instruction);
-            }
-        }
-        if (nextInstructionCount == 0) {
-            return null;
-        }
-
-        nextInstructionIds = uniqueSorted(nextInstructionIds, nextInstructionCount);
-        // Match is delayed by one byte, so this flag represents a match ending immediately
-        // before the byte currently being processed.
-        return new NextStep(nextInstructionIds, byteValue & 0xFF, closure.match);
-    }
-
-    private EpsilonClosure epsilonClosure(DfaState state, int nextByte)
-    {
-        // Evaluate empty-width operations at the boundary around nextByte.
-        int emptyFlags = state.needsContext ? emptyFlags(state.previousByte, nextByte) : 0;
-
-        boolean[] visited = new boolean[size()];
-        int[] stack = new int[Math.max(16, state.instructionIds.length)];
-        int stackPointer = 0;
-        for (int instructionId : state.instructionIds) {
-            if (instructionId <= 0 || instructionId >= size()) {
-                // Instruction zero is FAIL; out-of-range values are treated as failures.
-                continue;
-            }
-            stack = ensureCapacity(stack, stackPointer + 1);
-            stack[stackPointer++] = instructionId;
-        }
-
-        int[] byteRangeInstructionIds = new int[16];
-        int byteRangeCount = 0;
-        boolean match = false;
-
-        while (stackPointer != 0) {
-            int instructionId = stack[--stackPointer];
-            if (instructionId <= 0 || instructionId >= size()) {
-                continue;
-            }
-            if (visited[instructionId]) {
-                continue;
-            }
-            visited[instructionId] = true;
-
-            long instruction = words[instructionId];
-            switch (instOpcode(instruction)) {
-                case ALT, ALT_MATCH -> {
-                    stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instOut(instruction);
-                    stack[stackPointer++] = instOut1(instruction);
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case NOP, CAPTURE -> {
-                    stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instOut(instruction);
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case EMPTY_WIDTH -> {
-                    if ((instEmpty(instruction) & emptyFlags) == instEmpty(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instOut(instruction);
-                    }
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case BYTE_RANGE -> {
-                    if (byteRangeCount == byteRangeInstructionIds.length) {
-                        int[] expandedInstructionIds = new int[byteRangeInstructionIds.length * 2];
-                        System.arraycopy(byteRangeInstructionIds, 0, expandedInstructionIds, 0, byteRangeInstructionIds.length);
-                        byteRangeInstructionIds = expandedInstructionIds;
-                    }
-                    byteRangeInstructionIds[byteRangeCount++] = instructionId;
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case MATCH -> {
-                    match = true;
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case FAIL -> {
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-            }
-        }
-
-        return new EpsilonClosure(copyOfInts(byteRangeInstructionIds, byteRangeCount), match);
-    }
-
-    private static int[] ensureCapacity(int[] stack, int requiredCapacity)
-    {
-        if (requiredCapacity <= stack.length) {
-            return stack;
-        }
-        int newLength = stack.length;
-        while (newLength < requiredCapacity) {
-            newLength *= 2;
-        }
-        int[] expandedStack = new int[newLength];
-        System.arraycopy(stack, 0, expandedStack, 0, stack.length);
-        return expandedStack;
-    }
-
-    private static int[] uniqueSorted(int[] values, int count)
-    {
-        Arrays.sort(values, 0, count);
-        int writeIndex = 0;
-        int lastValue = Integer.MIN_VALUE;
-        for (int i = 0; i < count; i++) {
-            int value = values[i];
-            if (value != lastValue) {
-                values[writeIndex++] = value;
-                lastValue = value;
-            }
-        }
-        if (writeIndex == count) {
-            int[] result = new int[count];
-            System.arraycopy(values, 0, result, 0, count);
-            return result;
-        }
-        int[] result = new int[writeIndex];
-        System.arraycopy(values, 0, result, 0, writeIndex);
-        return result;
-    }
-
-    private static int emptyFlags(int previousByte, int nextByte)
-    {
-        boolean atBeginText = previousByte < 0;
-        boolean atEndText = nextByte < 0;
-
-        boolean atBeginLine = atBeginText || previousByte == '\n';
-        boolean atEndLine = atEndText || nextByte == '\n';
-
-        boolean previousIsWord = !atBeginText && isWordChar(previousByte);
-        boolean nextIsWord = !atEndText && isWordChar(nextByte);
-        boolean boundary = previousIsWord != nextIsWord;
-
-        int flags = 0;
-        if (atBeginText) {
-            flags |= EmptyOp.EMPTY_BEGIN_TEXT;
-        }
-        if (atEndText) {
-            flags |= EmptyOp.EMPTY_END_TEXT;
-        }
-        if (atBeginLine) {
-            flags |= EmptyOp.EMPTY_BEGIN_LINE;
-        }
-        if (atEndLine) {
-            flags |= EmptyOp.EMPTY_END_LINE;
-        }
-        if (boundary) {
-            flags |= EmptyOp.EMPTY_WORD_BOUNDARY;
-        }
-        else {
-            flags |= EmptyOp.EMPTY_NO_WORD_BOUNDARY;
-        }
-        return flags;
-    }
-
-    private static int prefixSuccessor(byte[] buffer, int length)
-    {
-        int i = length - 1;
-        while (i >= 0 && (buffer[i] & 0xFF) == 0xFF) {
-            i--;
-        }
-        if (i < 0) {
-            return 0;
-        }
-        buffer[i] = (byte) ((buffer[i] & 0xFF) + 1);
-        return i + 1;
-    }
-
-    private record EpsilonClosure(int[] byteRangeInstructionIds, boolean match) {}
-
-    private record NextStep(int[] instructionIds, int previousByte, boolean match) {}
-
-    private static final class DfaState
-    {
-        final int[] instructionIds;
-        final int previousByte; // -1 means beginning-of-text
-        final boolean match;
-        final boolean needsContext;
-
-        DfaState(int[] instructionIds, int previousByte, boolean match, boolean needsContext)
-        {
-            this.instructionIds = requireNonNull(instructionIds, "instructionIds is null");
-            this.previousByte = previousByte;
-            this.match = match;
-            this.needsContext = needsContext;
-        }
-
-        @Override
-        public boolean equals(Object object)
-        {
-            if (this == object) {
-                return true;
-            }
-            if (!(object instanceof DfaState other)) {
-                return false;
-            }
-            if (!needsContext && !other.needsContext) {
-                return match == other.match && Arrays.equals(instructionIds, other.instructionIds);
-            }
-            return needsContext == other.needsContext &&
-                    previousByte == other.previousByte &&
-                    match == other.match &&
-                    Arrays.equals(instructionIds, other.instructionIds);
-        }
-
-        @Override
-        public int hashCode()
-        {
-            int hash = Arrays.hashCode(instructionIds);
-            hash = 31 * hash + (match ? 1 : 0);
-            if (needsContext) {
-                hash = 31 * hash + previousByte;
-                hash = 31 * hash + 1;
-            }
-            return hash;
-        }
-    }
-
-    private boolean stateNeedsContext(int[] instructionIds)
-    {
-        // Context flags matter when the state has an empty-width instruction waiting to execute.
-        boolean[] visited = new boolean[size()];
-        int[] stack = new int[Math.max(16, instructionIds.length)];
-        int stackPointer = 0;
-        for (int instructionId : instructionIds) {
-            if (instructionId <= 0 || instructionId >= size()) {
-                continue;
-            }
-            stack = ensureCapacity(stack, stackPointer + 1);
-            stack[stackPointer++] = instructionId;
-        }
-
-        while (stackPointer != 0) {
-            int instructionId = stack[--stackPointer];
-            if (instructionId <= 0 || instructionId >= size()) {
-                continue;
-            }
-            if (visited[instructionId]) {
-                continue;
-            }
-            visited[instructionId] = true;
-
-            long instruction = words[instructionId];
-            if (instOpcode(instruction) == InstOp.EMPTY_WIDTH) {
-                return true;
-            }
-
-            // Follow epsilon transitions irrespective of whether EMPTY_WIDTH would pass;
-            // we're only interested in whether the instruction is present.
-            switch (instOpcode(instruction)) {
-                case ALT, ALT_MATCH -> {
-                    stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instOut(instruction);
-                    stack[stackPointer++] = instOut1(instruction);
-                }
-                case NOP, CAPTURE -> {
-                    stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instOut(instruction);
-                }
-                case BYTE_RANGE, MATCH, FAIL, EMPTY_WIDTH -> {
-                    // no-op
-                }
-            }
-
-            if (!instLast(instruction)) {
-                stack = ensureCapacity(stack, stackPointer + 1);
-                stack[stackPointer++] = instructionId + 1;
-            }
-        }
-        return false;
-    }
-
-    private int[] normalizeStartInstructions(int startInstructionId, int initialFlags)
-    {
-        // Build the initial work queue by following epsilon edges that are valid under the
-        // initial begin-text and begin-line flags. This consumes anchors such as \A at the
-        // starting position, matching AnalyzeSearchHelper/AddToQueue.
-        if (startInstructionId <= 0 || startInstructionId >= size()) {
-            return new int[] {startInstructionId};
-        }
-
-        boolean[] visited = new boolean[size()];
-        int[] stack = new int[32];
-        int stackPointer = 0;
-        stack[stackPointer++] = startInstructionId;
-
-        int[] normalizedInstructionIds = new int[32];
-        int normalizedInstructionCount = 0;
-
-        while (stackPointer != 0) {
-            int instructionId = stack[--stackPointer];
-            if (instructionId <= 0 || instructionId >= size()) {
-                continue;
-            }
-            if (visited[instructionId]) {
-                continue;
-            }
-            visited[instructionId] = true;
-
-            long instruction = words[instructionId];
-
-            switch (instOpcode(instruction)) {
-                case ALT, ALT_MATCH -> {
-                    stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instOut(instruction);
-                    stack[stackPointer++] = instOut1(instruction);
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case NOP, CAPTURE -> {
-                    stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instOut(instruction);
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case EMPTY_WIDTH -> {
-                    // Only "consume" EMPTY_WIDTH if it is satisfied by the initial flags.
-                    if ((instEmpty(instruction) & ~initialFlags) == 0) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instOut(instruction);
-                    }
-                    else {
-                        normalizedInstructionIds = ensureCapacity(normalizedInstructionIds, normalizedInstructionCount + 1);
-                        normalizedInstructionIds[normalizedInstructionCount++] = instructionId;
-                    }
-                    if (!instLast(instruction)) {
-                        stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instructionId + 1;
-                    }
-                }
-                case BYTE_RANGE, MATCH, FAIL -> {
-                    normalizedInstructionIds = ensureCapacity(normalizedInstructionIds, normalizedInstructionCount + 1);
-                    normalizedInstructionIds[normalizedInstructionCount++] = instructionId;
-                }
-            }
-        }
-
-        return uniqueSorted(normalizedInstructionIds, normalizedInstructionCount);
-    }
-
-    private static final class StateVisitMap
-    {
-        private final HashMap<DfaState, Integer> visitCounts = new HashMap<>();
-
-        int get(DfaState key)
-        {
-            Integer count = visitCounts.get(key);
-            return count == null ? 0 : count;
-        }
-
-        void increment(DfaState key)
-        {
-            visitCounts.put(key, get(key) + 1);
-        }
-
-        void clear()
-        {
-            visitCounts.clear();
-        }
     }
 
     /// Drops the end-of-input check from each Java `UNIX_LINES` multiline caret after which every
@@ -5065,15 +4234,6 @@ final class Prog
         }
         queue.insertNew(id);
         return true;
-    }
-
-    private static boolean isWordChar(int c)
-    {
-        int b = c & 0xFF;
-        return ('A' <= b && b <= 'Z') ||
-                ('a' <= b && b <= 'z') ||
-                ('0' <= b && b <= '9') ||
-                b == '_';
     }
 
     private static void markRanges(ByteMapBuilder builder, int[] ranges)

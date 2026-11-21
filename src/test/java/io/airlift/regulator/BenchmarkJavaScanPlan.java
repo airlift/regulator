@@ -61,10 +61,10 @@ import static io.airlift.slice.Slices.utf8Slice;
 /// nothing.
 ///
 /// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
-/// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
-/// `-p scanPlan=true` this source also times a build without Java scan plans. With
-/// `generateBytecode=true`, each pattern with a case-sensitive plan runs a class generated for
-/// it; that option is also set reflectively, and only then.
+/// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with `-p
+/// scanPlan=true` this source also times a build without Java scan plans. With
+/// `generateBytecode=true`, each pattern with a plan runs a class generated for it; that option is
+/// also set reflectively, and only then.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)

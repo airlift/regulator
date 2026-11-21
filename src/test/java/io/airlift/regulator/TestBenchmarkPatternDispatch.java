@@ -342,7 +342,9 @@ public class TestBenchmarkPatternDispatch
     private static void assertRoute(String target, CompiledPattern compiled, RegexpMatcher matcher, String description)
     {
         Shape expected = switch (target) {
-            case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
+            case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET" -> SCAN_PLAN;
+            // An ASCII-folded literal declines the plan.
+            case "FOLDED_PLAN" -> ENGINE;
             case "EXACT_LITERAL", "SINGLE_BYTE" -> EXACT_LITERAL;
             case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES", "DOT_STAR_LITERAL" -> LITERAL_KERNEL;
             case "CHARACTER_CLASS" -> CLASS_RUN;
@@ -360,8 +362,8 @@ public class TestBenchmarkPatternDispatch
             // `(?s:.)` matches no malformed UTF-8 in RE2, Java, or Rust, so these gaps keep the
             // general engine; ORDERED_LITERALS_BYTES reaches the plan.
             case "ORDERED_LITERALS" -> ENGINE;
-            // An inner literal of two or more bytes keeps the DFA's inner literal search instead
-            // of the fixed-width matcher, which answers only short counts and matcher finds.
+            // An inner literal of two or more bytes keeps the DFA's inner literal search, and the
+            // pattern has no fixed-width matcher; short counts and finds run the ordinary engine.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;
             default -> throw new IllegalArgumentException("unknown target: " + target);
         };
@@ -371,7 +373,6 @@ public class TestBenchmarkPatternDispatch
             assertThat(compiled.usesScanPlanForFindForDiagnostics()).as(description).isTrue();
         }
         switch (target) {
-            case "FOLDED_PLAN" -> assertThat(compiled.usesAsciiFoldedScanExecutorForDiagnostics()).as(description).isTrue();
             case "CONTAINS" -> {
                 assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
                 assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();
@@ -412,7 +413,7 @@ public class TestBenchmarkPatternDispatch
             case "ORDERED_LITERALS_BYTES" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(ORDERED_LITERALS);
             case "INNER_LITERAL_FIXED_WIDTH" -> {
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
-                assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
+                assertThat(compiled.fixedWidthByteSpanMatcherForDiagnostics()).as(description).isNull();
             }
             case "GENERAL" -> {
                 assertThat(compiled.sharedSingleByteMatcher()).as(description).isNull();

@@ -78,16 +78,15 @@ public class BenchmarkSharedPatternThreads
     // Enough passes to build the states, paired rows, and pointer tables the measured searches use.
     private static final int WARM_UP_PASSES = 4;
 
-    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would answer
-    // it without the DFA.
+    // Case folding keeps the pattern off the fixed-width matcher, which would answer it without
+    // the DFA.
     static final String COLD_PATTERN = "(?i)[a-q][^u-z]{80}x";
     private static final int COLD_ROW_SIZE = 16 << 10;
     private static final long COLD_ROW_SEED = 42;
 
     // At a 16 MiB pattern budget, a count of this pattern over the 1 MiB state-growth row resets
     // the DFA too often and bails, while a count over its first 1 KiB is healthy. An outer
-    // capture keeps it on the general route rather than the capture-free suffix scanner or the
-    // fixed-width matcher.
+    // capture keeps it off the fixed-width matcher.
     static final String THRASHING_COUNT = "([a-q][^u-z]{23}x)";
     private static final long THRASHING_COUNT_MEMORY = 16L << 20;
     private static final int THRASHING_COUNT_ROW_SIZE = 1 << 20;

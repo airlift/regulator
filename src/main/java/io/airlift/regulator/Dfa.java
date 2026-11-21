@@ -49,27 +49,10 @@ import static java.util.Objects.requireNonNull;
 /// object rows remain authoritative for every fallback.
 final class Dfa
 {
-    // Whether paired rows live in one flat int table of pre-scaled byte offsets, read through a heap
-    // memory segment, rather than as an object row per state. Only on aarch64: the flat step ran
-    // 9-21% faster on r9g (Graviton 4) paired rows, while on r8i C2 carried the row offset through
-    // a vector register and the same rows ran 3-72% slower. Only those two hosts were measured:
-    // Graviton 2 and 3, Apple, and other aarch64 hosts get the flat form by `os.arch` without
-    // measurement, and every x86 host keeps the object rows, as do other platforms. "Bounded Paired
-    // DFA Transitions" in REGULATOR_DECISIONS.md records the measurements. The
-    // `io.airlift.regulator.dfa.flat-paired-rows` property overrides the form for a run; it is a
-    // testing and diagnostic switch, not supported configuration. Tests run both forms on every
-    // host by forcing it in child JVMs. C2 folds this constant, so each search compiles one form.
-    static final boolean FLAT_PAIRED_ROWS = selectFlatPairedRows();
-    // The flat table's charge counts four-byte slots and no row header, where the object rows'
-    // charge counts eight-byte references and a header for each row, so the flat caps are half the
-    // object caps and still hold complete tables of more states. The DFA's free state budget, which
-    // limits the table when it is smaller, is not halved, so under a tight budget the flat table
-    // fits about twice the rows.
-    static final long MAX_PAIRED_TRANSITION_MEMORY = FLAT_PAIRED_ROWS ? 32 * 1024 : 64 * 1024;
-    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = FLAT_PAIRED_ROWS ? 8 * 1024 : 16 * 1024;
+    static final long MAX_PAIRED_TRANSITION_MEMORY = 64 * 1024;
+    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = 16 * 1024;
     private static final int CONSERVATIVE_REFERENCE_BYTES = Long.BYTES;
     private static final int MIN_PAIRED_SEARCH_BYTES = 256;
-    private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
     static final int MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES = 1024;
     static final int MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES = 4 * 1024;
     static final int MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES = 64 * 1024;
@@ -84,7 +67,6 @@ final class Dfa
     private static final int COUNT_START_SAMPLE_SIZE = 256;
     private static final int COUNT_START_SAMPLE_WINDOWS = 16;
     private static final int COUNT_START_SAMPLE_CANDIDATE_LIMIT = SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT * COUNT_START_SAMPLE_SIZE / BYTE_SCAN_SAMPLE_SIZE;
-    private static final boolean BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED = true;
     private static final int MIN_SELF_LOOP_SAMPLE_SEARCH_BYTES = 64 * 1024;
     private static final int SELF_LOOP_SAMPLE_SIZE = 64;
     private static final int SELF_LOOP_SAMPLE_PERCENTAGE = 90;
@@ -119,6 +101,8 @@ final class Dfa
     static final int MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES = 64;
     private static final int CANDIDATE_NO_MATCH = -1;
     private static final int CANDIDATE_FALLBACK = -2;
+    // The scan kinds of searchForwardScanAcceleration: a start-byte scan or a prefix scan.
+    private static final int START_BYTE_SCAN = 0;
     private static final int PREFIX_SCAN = -1;
     // A prefix scan for a folded run behind a lead of varying width; see searchForwardScanAcceleration.
     private static final int PREFIX_RUN_SCAN = -2;
@@ -136,7 +120,6 @@ final class Dfa
     // The filter checks three bytes per position, so it replaces the start byte scan only when
     // it is estimated to stop this many times less often.
     private static final int START_LITERAL_FILTER_NARROWING_FACTOR = 4;
-    private static final int MINIMUM_PRODUCTIVE_FIXED_DISTANCE_SKIP = 16;
     private static final long REFERENCE_BYTES = (sizeOfObjectArray(8) - sizeOfObjectArray(0)) / 8;
     private static final long STATE_DATA_BYTES = instanceSize(StateData.class);
     private static final long STATE_KEY_BYTES = instanceSize(StateKey.class);
@@ -153,12 +136,6 @@ final class Dfa
     private static final long ABSOLUTE_POINTER_TRANSITIONS_BYTES = instanceSize(AbsolutePointerTransitions.class);
     private static final long SUPERSEDED_REFERENCE_BYTES = instanceSize(SupersededMemoryReference.class);
     private static final long MATCH_START_SET_INSTANCE_BYTES = instanceSize(MatchStartSet.class);
-    // One conservatively aligned plan record and its 256-byte membership array.
-    private static final long FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY = 32L + 16 + 256;
-    private static final Prog.FixedDistanceByteCandidates NO_FIXED_DISTANCE_BYTE_CANDIDATES =
-            new Prog.FixedDistanceByteCandidates(null, -1);
-    private static final Prog.FixedDistanceByteCandidates RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET =
-            new Prog.FixedDistanceByteCandidates(null, -2);
     @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final RetrySearchException RETRY_SEARCH = new RetrySearchException();
     @SuppressWarnings("StaticAssignmentOfThrowable")
@@ -196,19 +173,12 @@ final class Dfa
     private static final int MATCHING_SELF_LOOP_SCAN_ROUTE = 12;
     private static final int MATCHING_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE = 13;
     private static final int REVERSE_SELF_LOOP_EXIT_BYTE_SCAN_ROUTE = 14;
-    private static final int FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE = 15;
     private static final int PREFIX_RUN_SCAN_ROUTE = 16;
     private static final int ABSOLUTE_POINTER_BACKWARD_SEARCH_ROUTE = 17;
     private static final int MATCH_START_SET_PASS_ROUTE = 18;
     private static final int COUNTED_ROUTES = 19;
 
     private Dfa() {}
-
-    private static boolean selectFlatPairedRows()
-    {
-        String override = System.getProperty("io.airlift.regulator.dfa.flat-paired-rows");
-        return override == null ? "aarch64".equals(System.getProperty("os.arch")) : Boolean.parseBoolean(override);
-    }
 
     static boolean nativeAccessEnabled()
     {
@@ -759,11 +729,6 @@ final class Dfa
         }
 
         boolean anchoredEffective = anchored || anchorStart || fullMatch;
-        Prog.FixedDistanceByteCandidates fixedDistanceCandidates =
-                runForward &&
-                        !anchoredEffective &&
-                        textEnd - textBegin >= MIN_SELECTIVE_SCAN_SEARCH_BYTES ? dfa.fixedDistanceByteCandidates() : null;
-
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
         while (true) {
@@ -857,36 +822,6 @@ final class Dfa
                 if (canAnchoredLongPrefixIntPath) {
                     return searchForwardAnchoredLongPrefixInt(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch, ctxBegin);
                 }
-                boolean fixedDistanceScanRejected = false;
-                if (fixedDistanceCandidates != null &&
-                        canUseFixedDistanceByteAcceleration(anchoredEffective, true, startData.flag(), textEnd - textBegin)) {
-                    fixedDistanceScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !isFixedDistanceByteScanProductive(
-                            dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), textEnd);
-                    if (!fixedDistanceScanRejected) {
-                        int fixedDistanceSmallByteSet = selectByteScanSet(
-                                dfa.fixedDistanceSmallByteSet(),
-                                fixedDistanceCandidates.candidates(),
-                                bytes,
-                                textBegin + fixedDistanceCandidates.offset(),
-                                textEnd);
-                        return searchForwardScanAcceleration(
-                                dfa,
-                                tables,
-                                prog,
-                                bytes,
-                                textBegin,
-                                textEnd,
-                                ctxEnd,
-                                startOffset,
-                                startIsMatch,
-                                endMatch,
-                                wantEarliestMatch,
-                                fixedDistanceCandidates.candidates(),
-                                fixedDistanceSmallByteSet,
-                                fixedDistanceCandidates.offset(),
-                                ctxBegin);
-                    }
-                }
                 if (!startIsMatch &&
                         textEnd - textBegin < MIN_PAIRED_SEARCH_BYTES &&
                         dfa.shouldUseAbsolutePointersForShortSearch(tables)) {
@@ -896,8 +831,7 @@ final class Dfa
                     }
                 }
                 if (canUseStartByteAcceleration(dfa, anchoredEffective, true, startData.flag())) {
-                    if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                            !dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
+                    if (!dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
                         countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
                     }
                     else {
@@ -921,19 +855,14 @@ final class Dfa
                                 wantEarliestMatch,
                                 dfa.startByteCandidates,
                                 startByteScanSet,
-                                0,
+                                START_BYTE_SCAN,
                                 ctxBegin);
                     }
-                }
-                else if (fixedDistanceScanRejected) {
-                    countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
                 }
                 if (!startIsMatch && textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
                     tables = dfa.requestPairedTransitions(tables);
                     if (dfa.hasPairedTransitions(tables, startOffset)) {
-                        return FLAT_PAIRED_ROWS
-                                ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false, ctxBegin)
-                                : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false, ctxBegin);
+                        return searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch, false, ctxBegin);
                     }
                 }
                 return searchForward(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch, ctxBegin);
@@ -955,15 +884,7 @@ final class Dfa
 
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
     {
-        return countMatches(prog, context, context.length(), matchKind);
-    }
-
-    /// Counts the matches in the first `end` bytes of `context` as
-    /// [#countMatches(Prog,Slice,Prog.MatchKind)] counts all of it, with assertions seeing those
-    /// bytes as the whole context.
-    static long countMatches(Prog prog, Slice context, int end, Prog.MatchKind matchKind)
-    {
-        long result = countMatches(prog, context, 0, end, matchKind, COUNT_EVERY_MATCH, null);
+        long result = countMatches(prog, context, 0, context.length(), matchKind, COUNT_EVERY_MATCH, null);
         return result < 0 ? result : countStopCount(result);
     }
 
@@ -1052,9 +973,6 @@ final class Dfa
         int contextBegin = context.byteArrayOffset();
         int contextEnd = contextBegin + end;
         int textBegin = contextBegin + start;
-        Prog.FixedDistanceByteCandidates fixedDistanceCandidates = contextEnd - textBegin >= MIN_SELECTIVE_SCAN_SEARCH_BYTES
-                ? dfa.fixedDistanceByteCandidates()
-                : null;
         // Sample start-byte density from the count start. A vector choice is kept for the whole
         // count: samples taken at match boundaries can land on the literals of later matches and
         // fall back to the scalar scan for the long sparse span that follows. A scalar choice is
@@ -1153,7 +1071,6 @@ final class Dfa
                                 contextBegin,
                                 contextEnd,
                                 textBegin,
-                                fixedDistanceCandidates,
                                 startByteScanSet,
                                 resampleStartByteScanSet,
                                 searchSampling);
@@ -1255,7 +1172,7 @@ final class Dfa
         if (dfa == null || !dfa.ok()) {
             return null;
         }
-        return new GroupZeroForwardCursor(prog, dfa, dfa.fixedDistanceByteCandidates());
+        return new GroupZeroForwardCursor(prog, dfa);
     }
 
     @SuppressWarnings("UnusedException")
@@ -1299,8 +1216,7 @@ final class Dfa
                         context.byteArray(),
                         contextBegin,
                         contextLimit,
-                        textBegin,
-                        cursor.fixedDistanceByteCandidates);
+                        textBegin);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
@@ -2113,7 +2029,6 @@ final class Dfa
             int contextBegin,
             int contextEnd,
             int textBegin,
-            Prog.FixedDistanceByteCandidates fixedDistanceCandidates,
             int startByteScanSet,
             boolean resampleStartByteScanSet,
             CountByteScanSampling sampling)
@@ -2162,51 +2077,14 @@ final class Dfa
                     contextBegin);
         }
 
-        if (contextEnd - textBegin < MIN_SELECTIVE_SCAN_SEARCH_BYTES) {
-            fixedDistanceCandidates = null;
-        }
         boolean byteScanRejected = false;
-        if (fixedDistanceCandidates != null &&
-                canUseFixedDistanceByteAcceleration(false, true, startData.flag(), contextEnd - textBegin)) {
-            byteScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !(sampling == null
-                    ? isFixedDistanceByteScanProductive(dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd)
-                    : sampling.isFixedDistanceByteScanProductive(dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd));
-            if (!byteScanRejected) {
-                int fixedDistanceSmallByteSet = selectByteScanSet(
-                        dfa.fixedDistanceSmallByteSet(),
-                        fixedDistanceCandidates.candidates(),
-                        bytes,
-                        textBegin + fixedDistanceCandidates.offset(),
-                        contextEnd);
-                return searchForwardScanAcceleration(
-                        dfa,
-                        tables,
-                        prog,
-                        bytes,
-                        textBegin,
-                        contextEnd,
-                        contextEnd,
-                        startOffset,
-                        startIsMatch,
-                        endMatch,
-                        false,
-                        fixedDistanceCandidates.candidates(),
-                        fixedDistanceSmallByteSet,
-                        fixedDistanceCandidates.offset(),
-                        contextBegin);
-            }
-        }
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
-            if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !(sampling == null
-                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
-                            : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
+            if (!(sampling == null ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd) : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
                 byteScanRejected = true;
                 countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
             else {
-                // A scalar choice is resampled only when a search reaches this scan, so searches
-                // served by the fixed-distance scan do not pay for a density sample.
+                // A scalar choice is resampled only when a search reaches this scan.
                 boolean promoted = false;
                 if (resampleStartByteScanSet && contextEnd - textBegin >= MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES) {
                     startByteScanSet = sampling == null
@@ -2228,16 +2106,13 @@ final class Dfa
                         false,
                         dfa.startByteCandidates,
                         startByteScanSet,
-                        0,
+                        START_BYTE_SCAN,
                         contextBegin);
                 if (promoted && result > 0) {
                     return result | COUNT_START_BYTE_SCAN_PROMOTED_FLAG;
                 }
                 return result;
             }
-        }
-        else if (byteScanRejected) {
-            countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
         }
 
         if (!startIsMatch &&
@@ -2266,9 +2141,7 @@ final class Dfa
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
-                long result = FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true, contextBegin)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true, contextBegin);
+                long result = searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, true, contextBegin);
                 if (selfLoopScanNotApplicable) {
                     dfa.countSelfLoopUnproductiveCount++;
                 }
@@ -2448,9 +2321,7 @@ final class Dfa
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     // Measure from the search start so the short-search hint sees the whole search.
-                    long result = FLAT_PAIRED_ROWS
-                            ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true, contextBegin)
-                            : searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true, contextBegin);
+                    long result = searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false, true, contextBegin);
                     recordCountSelfLoopScanProductivity(dfa, productive);
                     return result;
                 }
@@ -2490,9 +2361,7 @@ final class Dfa
             if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
-                    long result = FLAT_PAIRED_ROWS
-                            ? searchForwardPairsFlatFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false, contextBegin)
-                            : searchForwardPairsFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false, contextBegin);
+                    long result = searchForwardPairsFromState(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, lastMatchBoundary, false, false, contextBegin);
                     recordCountSelfLoopScanProductivity(dfa, productive);
                     countRoute(dfa, COUNT_SELF_LOOP_MATCH_HAND_OFF_ROUTE);
                     return result;
@@ -2592,8 +2461,7 @@ final class Dfa
             byte[] bytes,
             int contextBegin,
             int contextEnd,
-            int textBegin,
-            Prog.FixedDistanceByteCandidates fixedDistanceCandidates)
+            int textBegin)
     {
         if (prog.anchorStart() && contextBegin != textBegin) {
             return SEARCH_NO_MATCH;
@@ -2639,54 +2507,8 @@ final class Dfa
                     contextBegin);
         }
 
-        if (contextEnd - textBegin < MIN_SELECTIVE_SCAN_SEARCH_BYTES) {
-            fixedDistanceCandidates = null;
-        }
-        boolean fixedDistanceScanRejected = false;
-        if (fixedDistanceCandidates != null &&
-                canUseFixedDistanceByteAcceleration(false, true, startData.flag(), contextEnd - textBegin)) {
-            fixedDistanceScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !(cursor == null
-                    ? isFixedDistanceByteScanProductive(
-                    dfa,
-                    fixedDistanceCandidates.candidates(),
-                    bytes,
-                    textBegin + fixedDistanceCandidates.offset(),
-                    contextEnd)
-                    : cursor.isFixedDistanceByteScanProductive(
-                    fixedDistanceCandidates.candidates(),
-                    bytes,
-                    textBegin + fixedDistanceCandidates.offset(),
-                    contextEnd));
-            if (!fixedDistanceScanRejected) {
-                int fixedDistanceSmallByteSet = selectByteScanSet(
-                        dfa.fixedDistanceSmallByteSet(),
-                        fixedDistanceCandidates.candidates(),
-                        bytes,
-                        textBegin + fixedDistanceCandidates.offset(),
-                        contextEnd);
-                return searchForwardScanAcceleration(
-                        dfa,
-                        tables,
-                        prog,
-                        bytes,
-                        textBegin,
-                        contextEnd,
-                        contextEnd,
-                        startOffset,
-                        startIsMatch,
-                        endMatch,
-                        false,
-                        fixedDistanceCandidates.candidates(),
-                        fixedDistanceSmallByteSet,
-                        fixedDistanceCandidates.offset(),
-                        contextBegin);
-            }
-        }
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
-            if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !(cursor == null
-                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
-                            : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
+            if (!(cursor == null ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd) : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
                 countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
             }
             else {
@@ -2710,12 +2532,9 @@ final class Dfa
                         false,
                         dfa.startByteCandidates,
                         startByteScanSet,
-                        0,
+                        START_BYTE_SCAN,
                         contextBegin);
             }
-        }
-        else if (fixedDistanceScanRejected) {
-            countRoute(dfa, BYTE_SCAN_FALLBACK_ROUTE);
         }
 
         if (!startIsMatch &&
@@ -2726,25 +2545,23 @@ final class Dfa
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
-                return FLAT_PAIRED_ROWS
-                        ? searchForwardPairsFlat(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false, contextBegin)
-                        : searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false, contextBegin);
+                return searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false, false, contextBegin);
             }
         }
         return searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false, contextBegin);
     }
 
     /// Whether a forward search may skip ahead from a start state with `startFlags`, by the prefix
-    /// scan or a start-byte or fixed-distance byte scan. Each skip lands in the same start state at
-    /// a later position, so the state must hold nothing about the position it was built for: no
-    /// assertion it still needs, no assertion that held there, and no record of the byte before it.
-    /// A start state that needs no assertion keeps only its match bit (see
-    /// `workQueueToCachedState`), so the test is that no other bit is set. A start state that
-    /// needs `\b` fails it wherever the search starts, so a skip never judges the boundary by the
-    /// byte before the search rather than the byte before the landing. The test guards routes no
-    /// current scan takes: a prefix scan is configured only for a prefix that crosses no assertion,
-    /// and a program that meets an assertion before its first byte has no start-byte candidates
-    /// (`Prog.buildStartByteCandidates`), which the fixed-distance candidates are built from.
+    /// scan or a start-byte scan. Each skip lands in the same start state at a later position, so
+    /// the state must hold nothing about the position it was built for: no assertion it still
+    /// needs, no assertion that held there, and no record of the byte before it. A start state that
+    /// needs no assertion keeps only its match bit (see `workQueueToCachedState`), so the test is
+    /// that no other bit is set. A start state that needs `\b` fails it wherever the search starts,
+    /// so a skip never judges the boundary by the byte before the search rather than the byte
+    /// before the landing. The test guards routes no current scan takes: a prefix scan is
+    /// configured only for a prefix that crosses no assertion, and a program that meets an
+    /// assertion before its first byte has no start-byte candidates
+    /// (`Prog.buildStartByteCandidates`).
     static boolean isContextFreeStart(int startFlags)
     {
         return (startFlags & ~FLAG_MATCH) == 0;
@@ -2753,14 +2570,6 @@ final class Dfa
     static boolean canUseStartByteAcceleration(DfaInstance dfa, boolean anchored, boolean runForward, int startFlags)
     {
         return runForward && !anchored && dfa.canStartByteAcceleration() && isContextFreeStart(startFlags);
-    }
-
-    static boolean canUseFixedDistanceByteAcceleration(boolean anchored, boolean runForward, int startFlags, int searchLength)
-    {
-        return searchLength >= MIN_SELECTIVE_SCAN_SEARCH_BYTES &&
-                runForward &&
-                !anchored &&
-                isContextFreeStart(startFlags);
     }
 
     static int selectByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
@@ -2825,23 +2634,6 @@ final class Dfa
             }
         }
         return candidateCount;
-    }
-
-    private static boolean isByteCandidateScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
-    {
-        return isByteCandidateScanProductive(candidates, null, null, bytes, position, textEnd, MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES, BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
-    }
-
-    // The productivity check samples the fixed-distance scan only from its minimum. Below the
-    // sampling minimum, prefer a start literal or class filter when its estimated stop density on
-    // English text is lower than the fixed-distance bytes' probability. The count sampling and the
-    // group-zero cursor apply the same rule.
-    private static boolean isFixedDistanceByteScanProductive(DfaInstance dfa, byte[] candidates, byte[] bytes, int position, int textEnd)
-    {
-        if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
-            return !dfa.fixedDistanceByteScanDenserThanStartFilter;
-        }
-        return isByteCandidateScanProductive(candidates, bytes, position, textEnd);
     }
 
     // With a start literal filter or a start class filter, a sampled position counts when the
@@ -3363,19 +3155,6 @@ final class Dfa
         return pairedStateRefArrays != null && stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
     }
 
-    private static int pairedRowOffset(int[] pairedRowOffsets, int stateIndex)
-    {
-        // As for pairedStateReferences, a state added since the table was built has no paired row,
-        // nor does any state once the table was released.
-        return pairedRowOffsets != null && stateIndex < pairedRowOffsets.length ? pairedRowOffsets[stateIndex] : NO_PAIRED_ROW;
-    }
-
-    // Reads the paired slot at `byteOffset`, a byte offset into the flat paired table.
-    private static int getPairedSlot(MemorySegment flatPairedRows, int byteOffset)
-    {
-        return flatPairedRows.get(ValueLayout.JAVA_INT_UNALIGNED, byteOffset);
-    }
-
     private static Object getStateReference(Object[] references, int index)
     {
         return references[index];
@@ -3867,9 +3646,8 @@ final class Dfa
     // uses the loop's position after a call C2 may leave out of line: the one-byte search measures
     // its result from resultBegin itself, the match path uses only its result after its calls, and
     // the decode inlines on this method's profile. On x86, a position read after such a call can
-    // keep the loop's position in a stack slot. Copied as `searchForwardPairsFlat`; keep the copy
-    // in step. This object-row form keeps its measured decoding loop for x86; the count's
-    // flag adds one branch at the paired-match exit, outside the loop.
+    // keep the loop's position in a stack slot. The count's flag adds one branch at the
+    // paired-match exit, outside the loop.
     static long searchForwardPairs(
             DfaInstance dfa,
             CacheTables tables,
@@ -3933,7 +3711,6 @@ final class Dfa
         return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
-    // Copied as `searchForwardPairsFlatAfterMiss`; keep the copy in step.
     private static long searchForwardPairsAfterMiss(
             DfaInstance dfa,
             CacheTables tables,
@@ -3976,7 +3753,6 @@ final class Dfa
         return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
     }
 
-    // Copied as `searchForwardPairsFlatAfterMatch`; keep the copy in step.
     private static long searchForwardPairsAfterMatch(
             DfaInstance dfa,
             CacheTables tables,
@@ -4008,7 +3784,6 @@ final class Dfa
 
     // Continues a first-match search from a state reached with a pending match, stepping two
     // bytes at a time through match transitions. The result is measured from resultBegin.
-    // Copied as `searchForwardPairsFlatFromState`; keep the copy in step.
     private static long searchForwardPairsFromState(
             DfaInstance dfa,
             CacheTables tables,
@@ -4131,288 +3906,6 @@ final class Dfa
                 continue;
             }
             stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-            return searchForwardContinuation(
-                    dfa,
-                    tables,
-                    bytes,
-                    resultBegin,
-                    position,
-                    textEnd,
-                    ctxEnd,
-                    stateOffset,
-                    false,
-                    lastMatchBoundary,
-                    endMatch,
-                    wantEarliestMatch,
-                    ctxBegin);
-        }
-    }
-
-    // searchForwardPairs on the flat paired table that FLAT_PAIRED_ROWS selects. Each step adds
-    // the pair's byte offset to the row's and loads, with no scaling on the chain from one load to
-    // the next. Copied as `searchForwardPairs`; keep the copy in step.
-    static long searchForwardPairsFlat(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int textBegin,
-            int textEnd,
-            int ctxEnd,
-            int startOffset,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            boolean countRecordsPairedMatch,
-            int ctxBegin)
-    {
-        MemorySegment flatPairedRows = tables.flatPairedRows;
-        byte[] byteMap = dfa.bytemap;
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        int rowOffset = tables.pairedRowOffsets[dfa.stateIndex(startOffset)];
-        int position = textBegin;
-
-        while (position + 1 < textEnd) {
-            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
-                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            int nextRowOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClass * Integer.BYTES));
-            if (nextRowOffset < 0) {
-                // Decoded here rather than in the miss method: once this method compiles, the miss
-                // method runs only inlined into it, so its own profile stops short of the maturity
-                // C2 needs to inline the decode, and the call left in the loop's exit spills the
-                // loop's position on x86.
-                int stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
-                long pairedTransition = PAIR_UNCOMPUTED;
-                if (dfa.kind == DfaInstance.Kind.FIRST_MATCH && !endMatch && !wantEarliestMatch) {
-                    pairedTransition = decodePairedTransition(
-                            tables,
-                            stateOffset,
-                            byteMap[bytes[position] & 0xFF] & 0xFF,
-                            byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-                }
-                return searchForwardPairsFlatAfterMiss(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateOffset,
-                        pairedTransition,
-                        endMatch,
-                        wantEarliestMatch,
-                        countRecordsPairedMatch,
-                        ctxBegin);
-            }
-            rowOffset = nextRowOffset;
-            position += 2;
-        }
-
-        // Paired rows are complete when published, so their state offsets need no check.
-        int stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
-        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
-    }
-
-    // Copied as `searchForwardPairsAfterMiss`; keep the copy in step.
-    private static long searchForwardPairsFlatAfterMiss(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            int stateOffset,
-            long pairedTransition,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            boolean countRecordsPairedMatch,
-            int ctxBegin)
-    {
-        int outcome = (int) pairedTransition;
-        if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
-            long result = searchForwardPairsFlatAfterMatch(
-                    dfa,
-                    tables,
-                    bytes,
-                    resultBegin,
-                    position,
-                    textEnd,
-                    ctxEnd,
-                    pairedTransition,
-                    endMatch,
-                    wantEarliestMatch,
-                    ctxBegin);
-            if (result >= 0) {
-                // A count records the match in its own streak; the flag needs a nonempty match.
-                if (countRecordsPairedMatch && result > 0) {
-                    return result | COUNT_PAIRED_MATCH_FLAG;
-                }
-                dfa.recordPairedSearch((int) result);
-            }
-            return result;
-        }
-
-        return searchForwardContinuation(dfa, tables, bytes, resultBegin, position, textEnd, ctxEnd, stateOffset, false, -1, endMatch, wantEarliestMatch, ctxBegin);
-    }
-
-    // Copied as `searchForwardPairsAfterMatch`; keep the copy in step.
-    private static long searchForwardPairsFlatAfterMatch(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            long pairedTransition,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            int ctxBegin)
-    {
-        int consumedBytes = (int) pairedTransition;
-        return searchForwardPairsFlatFromState(
-                dfa,
-                tables,
-                bytes,
-                resultBegin,
-                position + consumedBytes,
-                textEnd,
-                ctxEnd,
-                (int) (pairedTransition >>> 32),
-                position + consumedBytes - 1,
-                endMatch,
-                wantEarliestMatch,
-                ctxBegin);
-    }
-
-    // searchForwardPairsFromState on the flat paired table that FLAT_PAIRED_ROWS selects. Copied
-    // as `searchForwardPairsFromState`; keep the copy in step.
-    private static long searchForwardPairsFlatFromState(
-            DfaInstance dfa,
-            CacheTables tables,
-            byte[] bytes,
-            int resultBegin,
-            int position,
-            int textEnd,
-            int ctxEnd,
-            int stateOffset,
-            int lastMatchBoundary,
-            boolean endMatch,
-            boolean wantEarliestMatch,
-            int ctxBegin)
-    {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        long pairedTransition;
-        MemorySegment flatPairedRows;
-        int rowOffset;
-
-        while (true) {
-            int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position, textEnd, stateOffset);
-            // Computing the loop's exit bytes may have published grown tables.
-            tables = dfa.tablesAfterWrite(tables);
-            if (matchingSelfLoopEnd != position) {
-                countRoute(dfa, MATCHING_SELF_LOOP_SCAN_ROUTE);
-                position = matchingSelfLoopEnd;
-                lastMatchBoundary = position - 1;
-            }
-
-            flatPairedRows = tables.flatPairedRows;
-            rowOffset = pairedRowOffset(tables.pairedRowOffsets, dfa.stateIndex(stateOffset));
-            if (rowOffset < 0) {
-                return searchForwardContinuation(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateOffset,
-                        false,
-                        lastMatchBoundary,
-                        endMatch,
-                        wantEarliestMatch,
-                        ctxBegin);
-            }
-            pairedTransition = 0;
-
-            while (position + 1 < textEnd) {
-                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
-                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
-                int pairedClass = (firstClass * nextSize) + secondClass;
-                int nextRowOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClass * Integer.BYTES));
-                if (nextRowOffset >= 0) {
-                    rowOffset = nextRowOffset;
-                    position += 2;
-                    continue;
-                }
-
-                stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
-                pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
-                int outcome = (int) pairedTransition;
-                switch (outcome) {
-                    case PAIR_MATCH_FIRST, PAIR_MATCH_SECOND -> {}
-                    case PAIR_DEAD -> {
-                        return finalizeResult(resultBegin, textEnd, endMatch, true, lastMatchBoundary, true);
-                    }
-                    case PAIR_FULL_MATCH -> {
-                        return finalizeResult(resultBegin, textEnd, endMatch, true, textEnd, true);
-                    }
-                    case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
-                        stateOffset = (int) (pairedTransition >>> 32);
-                        position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        rowOffset = pairedRowOffset(tables.pairedRowOffsets, dfa.stateIndex(stateOffset));
-                        if (rowOffset < 0) {
-                            return searchForwardContinuation(
-                                    dfa,
-                                    tables,
-                                    bytes,
-                                    resultBegin,
-                                    position,
-                                    textEnd,
-                                    ctxEnd,
-                                    stateOffset,
-                                    false,
-                                    lastMatchBoundary,
-                                    endMatch,
-                                    wantEarliestMatch,
-                                    ctxBegin);
-                        }
-                        pairedTransition = 0;
-                        continue;
-                    }
-                    case PAIR_UNCOMPUTED -> {
-                        return searchForwardContinuation(
-                                dfa,
-                                tables,
-                                bytes,
-                                resultBegin,
-                                position,
-                                textEnd,
-                                ctxEnd,
-                                stateOffset,
-                                false,
-                                lastMatchBoundary,
-                                endMatch,
-                                wantEarliestMatch,
-                                ctxBegin);
-                    }
-                    default -> throw new AssertionError("Unexpected paired transition outcome: " + outcome);
-                }
-                break;
-            }
-
-            if (pairedTransition != 0) {
-                int consumedBytes = (int) pairedTransition;
-                stateOffset = (int) (pairedTransition >>> 32);
-                lastMatchBoundary = position + consumedBytes - 1;
-                position += consumedBytes;
-                continue;
-            }
-            stateOffset = getPairedSlot(flatPairedRows, rowOffset + (pairedClassCount * Integer.BYTES));
             return searchForwardContinuation(
                     dfa,
                     tables,
@@ -4754,7 +4247,7 @@ final class Dfa
             boolean wantEarliestMatch,
             byte[] byteCandidates,
             int byteScanSet,
-            int byteCandidateOffset,
+            int scanKind,
             int ctxBegin)
     {
         int position = textBegin;
@@ -4774,8 +4267,8 @@ final class Dfa
         // up to the lead's spread, as Prog.prefixAccel describes, so the search skips them. The
         // choice is made once here as its own scan kind, so a plain prefix scans exactly as it
         // would without the bound: no added test, and the bound is never written on its path.
-        if (byteCandidateOffset == PREFIX_SCAN && prog.prefixAccelMaximumLead() != prog.prefixAccelMinimumLead()) {
-            byteCandidateOffset = PREFIX_RUN_SCAN;
+        if (scanKind == PREFIX_SCAN && prog.prefixAccelMaximumLead() != prog.prefixAccelMinimumLead()) {
+            scanKind = PREFIX_RUN_SCAN;
         }
         int prefixScanCoversThrough = -1;
 
@@ -4797,10 +4290,10 @@ final class Dfa
             // Skip to the first byte that can begin a match.
             if (stateRefs == startRefs) {
                 int next;
-                if (byteCandidateOffset == PREFIX_SCAN) {
+                if (scanKind == PREFIX_SCAN) {
                     next = prog.prefixAccel(bytes, position, textEnd - position);
                 }
-                else if (byteCandidateOffset == PREFIX_RUN_SCAN) {
+                else if (scanKind == PREFIX_RUN_SCAN) {
                     if (position <= prefixScanCoversThrough) {
                         next = position;
                     }
@@ -4812,55 +4305,15 @@ final class Dfa
                         }
                     }
                 }
+                else if (byteScanSet == 0) {
+                    next = findByteCandidate(byteCandidates, bytes, position, textEnd - position);
+                }
                 else {
-                    if (byteCandidateOffset >= textEnd - position) {
-                        next = -1;
-                    }
-                    else {
-                        int candidatePosition = position + byteCandidateOffset;
-                        int candidateBytePosition;
-                        if (byteScanSet == 0) {
-                            candidateBytePosition = findByteCandidate(byteCandidates, bytes, candidatePosition, textEnd - candidatePosition);
-                        }
-                        else {
-                            candidateBytePosition = findByteSetCandidate(
-                                    dfa,
-                                    byteCandidates,
-                                    byteScanSet,
-                                    bytes,
-                                    candidatePosition,
-                                    textEnd - candidatePosition);
-                        }
-                        if (byteCandidateOffset == 0) {
-                            next = candidateBytePosition;
-                        }
-                        else {
-                            next = candidateBytePosition < 0 ? -1 : candidateBytePosition - byteCandidateOffset;
-                        }
-                    }
+                    next = findByteSetCandidate(dfa, byteCandidates, byteScanSet, bytes, position, textEnd - position);
                 }
                 if (next < 0) {
                     position = textEnd;
                     break;
-                }
-                if (byteCandidateOffset > 0) {
-                    if (next - position < MINIMUM_PRODUCTIVE_FIXED_DISTANCE_SKIP) {
-                        countRoute(dfa, FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE);
-                        return searchForwardContinuation(
-                                dfa,
-                                tables,
-                                bytes,
-                                textBegin,
-                                position,
-                                textEnd,
-                                ctxEnd,
-                                startOffset,
-                                false,
-                                -1,
-                                endMatch,
-                                wantEarliestMatch,
-                                ctxBegin);
-                    }
                 }
                 position = next;
             }
@@ -5925,10 +5378,6 @@ final class Dfa
     private static final int PAIR_NORMAL_FIRST = 3;
     private static final int PAIR_NORMAL_SECOND = 4;
 
-    // A flat paired row offset or slot holding no paired row, or no precomputed normal paired
-    // transition.
-    private static final int NO_PAIRED_ROW = -1;
-
     // Maximum transitions array length - ensures offsets fit below T_MATCH_BIT
     private static final int MAX_TRANSITIONS_LENGTH = 1 << 30;
 
@@ -6316,18 +5765,9 @@ final class Dfa
         // assertion that decodes the text have the second.
         final StateData[][] startAfterCarriageReturn;
         final StateData[][] startAfterNonAscii;
-        // Paired rows in the form FLAT_PAIRED_ROWS selects; the other form's fields stay null. The
-        // selected form is built whole before publication and never written after. The object rows,
-        // pairedStateRefArrays, are indexed by stateIndex and sized at the last rebuild; unselected
-        // rows are null. In the flat form, pairedRowOffsets is indexed the same way and holds the byte
-        // offset of the state's row in flatPairedRows, or NO_PAIRED_ROW for an unselected state.
-        // flatPairedRows, a segment over an int array, holds one row of `nextSize * nextSize + 1`
-        // ints for each selected state: for each pair of byte classes the byte offset of the row that
-        // pair reaches, or NO_PAIRED_ROW, then the state's offset in `transitions`. Byte offsets keep
-        // the scaling off a step's chain of dependent loads.
+        // Paired rows, built whole before publication and never written after, indexed by
+        // stateIndex and sized at the last rebuild; unselected rows are null.
         final Object[][] pairedStateRefArrays;
-        final int[] pairedRowOffsets;
-        final MemorySegment flatPairedRows;
         final AbsolutePointerTransitions absolutePointerTransitions;
 
         private CacheTables(
@@ -6343,8 +5783,6 @@ final class Dfa
                 StateData[][] startAfterCarriageReturn,
                 StateData[][] startAfterNonAscii,
                 Object[][] pairedStateRefArrays,
-                int[] pairedRowOffsets,
-                MemorySegment flatPairedRows,
                 AbsolutePointerTransitions absolutePointerTransitions)
         {
             this.transitions = transitions;
@@ -6359,14 +5797,12 @@ final class Dfa
             this.startAfterCarriageReturn = startAfterCarriageReturn;
             this.startAfterNonAscii = startAfterNonAscii;
             this.pairedStateRefArrays = pairedStateRefArrays;
-            this.pairedRowOffsets = pairedRowOffsets;
-            this.flatPairedRows = flatPairedRows;
             this.absolutePointerTransitions = absolutePointerTransitions;
         }
 
         private boolean hasPairedRows()
         {
-            return FLAT_PAIRED_ROWS ? flatPairedRows != null : pairedStateRefArrays != null;
+            return pairedStateRefArrays != null;
         }
 
         // Empty tables sized for `stateCapacity` states: no states, start states, paired rows, or
@@ -6393,8 +5829,6 @@ final class Dfa
                     carriageReturnStarts ? new StateData[2][2] : null,
                     nonAsciiStarts ? new StateData[2][2] : null,
                     null,
-                    null,
-                    null,
                     null);
         }
 
@@ -6413,12 +5847,10 @@ final class Dfa
                     startAfterCarriageReturn,
                     startAfterNonAscii,
                     pairedStateRefArrays,
-                    pairedRowOffsets,
-                    flatPairedRows,
                     absolutePointerTransitions);
         }
 
-        private CacheTables withPairedRows(Object[][] pairedStateRefArrays, int[] pairedRowOffsets, MemorySegment flatPairedRows)
+        private CacheTables withPairedRows(Object[][] pairedStateRefArrays)
         {
             return new CacheTables(
                     transitions,
@@ -6433,8 +5865,6 @@ final class Dfa
                     startAfterCarriageReturn,
                     startAfterNonAscii,
                     pairedStateRefArrays,
-                    pairedRowOffsets,
-                    flatPairedRows,
                     absolutePointerTransitions);
         }
 
@@ -6453,8 +5883,6 @@ final class Dfa
                     startAfterCarriageReturn,
                     startAfterNonAscii,
                     pairedStateRefArrays,
-                    pairedRowOffsets,
-                    flatPairedRows,
                     absolutePointerTransitions);
         }
     }
@@ -6711,7 +6139,6 @@ final class Dfa
             int populatedStartStates,
             int pairedRows,
             long pairedTransitionMemory,
-            long fixedDistanceByteCandidateMemory,
             long availableStateMemory,
             long stateBudget,
             int transitionCapacity,
@@ -7072,50 +6499,24 @@ final class Dfa
     {
         private final Prog prog;
         private final DfaInstance dfa;
-        private final Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
 
-        private int fixedDistanceByteScanProductivityRejectedUntil;
         private int startByteScanProductivityRejectedUntil;
-        private int fixedDistanceByteScanProductivityCheckCount;
         private int startByteScanProductivityCheckCount;
 
-        private GroupZeroForwardCursor(
-                Prog prog,
-                DfaInstance dfa,
-                Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates)
+        private GroupZeroForwardCursor(Prog prog, DfaInstance dfa)
         {
             this.prog = prog;
             this.dfa = dfa;
-            this.fixedDistanceByteCandidates = fixedDistanceByteCandidates;
         }
 
         int byteScanProductivityCheckCount()
         {
-            return fixedDistanceByteScanProductivityCheckCount + startByteScanProductivityCheckCount;
+            return startByteScanProductivityCheckCount;
         }
 
         void reset()
         {
-            fixedDistanceByteScanProductivityRejectedUntil = 0;
             startByteScanProductivityRejectedUntil = 0;
-        }
-
-        private boolean isFixedDistanceByteScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
-        {
-            // Below the sampling minimum, apply the same start-filter rule as
-            // Dfa.isFixedDistanceByteScanProductive.
-            if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
-                fixedDistanceByteScanProductivityRejectedUntil = 0;
-                return !dfa.fixedDistanceByteScanDenserThanStartFilter;
-            }
-            if (position < fixedDistanceByteScanProductivityRejectedUntil) {
-                return false;
-            }
-
-            fixedDistanceByteScanProductivityCheckCount++;
-            boolean productive = isByteCandidateScanProductive(candidates, bytes, position, textEnd);
-            fixedDistanceByteScanProductivityRejectedUntil = productive ? 0 : nextProductivityCheckPosition(position, textEnd);
-            return productive;
         }
 
         // A rejection holds for its whole epoch, the last 64 KiB of the text included: a dense
@@ -7177,26 +6578,23 @@ final class Dfa
     /// where the previous one stopped, a vector start-byte scan selection holds for the rest of
     /// the count, as within one call; a scalar selection and each productivity result hold for
     /// [Dfa#BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES] past the position sampled. Within one call,
-    /// [#forSingleCount()] holds the scan choices, a fixed-distance rejection, and a productive
-    /// start-byte result, and samples the others again at each search. The outcomes only choose
-    /// how candidates are found, never which candidates the DFA processes. One count owns the
-    /// object, so it is never shared between threads. It also carries the count's self-loop
-    /// cutoff, which its next call resumes.
+    /// [#forSingleCount()] holds the scan choices and a productive start-byte result, and samples
+    /// a rejection again at each search. The outcomes only choose how candidates are found, never
+    /// which candidates the DFA processes. One count owns the object, so it is never shared
+    /// between threads. It also carries the count's self-loop cutoff, which its next call resumes.
     static final class CountByteScanSampling
     {
         /// With fewer bytes remaining, every byte-scan choice is made without sampling, so a
         /// count whose first call has fewer bytes remaining makes the same byte-scan choices when
         /// passed `null`. Its self-loop cutoff differs: without a sampling, each call starts its
         /// own.
-        static final int MIN_SAMPLED_BYTES = Math.min(MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES, MIN_SELECTIVE_SCAN_SEARCH_BYTES);
+        static final int MIN_SAMPLED_BYTES = MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES;
 
         private final boolean holdsEveryOutcome;
         private boolean startByteVectorScanSelected;
         private int startByteScalarScanSelectedUntil;
         private boolean startByteScanProductive;
         private int startByteScanProductivityCheckedUntil;
-        private boolean fixedDistanceByteScanProductive;
-        private int fixedDistanceByteScanProductivityCheckedUntil;
         private int byteScanCheckCount;
         // The count's unproductive self-loop search streak after its last search, which its next
         // call resumes.
@@ -7215,10 +6613,8 @@ final class Dfa
         /// Sampling for the searches of one count call. Its searches start at match ends, so a
         /// held outcome can outlive the matches around the position sampled. A start-byte
         /// rejection taken among a cluster of matches would leave the search after the cluster
-        /// walking the plain DFA to a far match, and a productive fixed-distance sample would
-        /// send a search into a long, dense gap on that scan. Both are sampled again at each
-        /// search; a fixed-distance rejection, a productive start-byte sample, and the scalar
-        /// scan choice are held.
+        /// walking the plain DFA to a far match, so it is sampled again at each search; a
+        /// productive start-byte sample and the scalar scan choice are held.
         static CountByteScanSampling forSingleCount()
         {
             return new CountByteScanSampling(false);
@@ -7263,23 +6659,6 @@ final class Dfa
             startByteScanProductive = dfa.isStartByteScanProductive(bytes, position, textEnd);
             startByteScanProductivityCheckedUntil = startByteScanProductive || holdsEveryOutcome ? nextProductivityCheckPosition(position, textEnd) : 0;
             return startByteScanProductive;
-        }
-
-        private boolean isFixedDistanceByteScanProductive(DfaInstance dfa, byte[] candidates, byte[] bytes, int position, int textEnd)
-        {
-            // Below the sampling minimum, apply the same start-filter rule as
-            // Dfa.isFixedDistanceByteScanProductive.
-            if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
-                return !dfa.fixedDistanceByteScanDenserThanStartFilter;
-            }
-            if (position < fixedDistanceByteScanProductivityCheckedUntil) {
-                return fixedDistanceByteScanProductive;
-            }
-
-            byteScanCheckCount++;
-            fixedDistanceByteScanProductive = isByteCandidateScanProductive(candidates, bytes, position, textEnd);
-            fixedDistanceByteScanProductivityCheckedUntil = !fixedDistanceByteScanProductive || holdsEveryOutcome ? nextProductivityCheckPosition(position, textEnd) : 0;
-            return fixedDistanceByteScanProductive;
         }
     }
 
@@ -7560,13 +6939,6 @@ final class Dfa
         // depend on the next byte, so the state is a function of its frontier alone. "Many-Match
         // States Hold Their Own Matches" in REGULATOR_DECISIONS.md describes the difference.
         private final boolean statesHoldOwnMatches;
-        private volatile Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
-        private volatile int fixedDistanceSmallByteSet;
-        // Set with the fixed-distance candidates, before they are published: whether a search too
-        // short for the productivity sample takes the start literal or class filter in place of
-        // the fixed-distance scan.
-        private volatile boolean fixedDistanceByteScanDenserThanStartFilter;
-        private long fixedDistanceByteCandidateMemory;
         final int bytemapRange;
         final int nextSize;
         private final int stateIndexShift;
@@ -8320,48 +7692,42 @@ final class Dfa
                     BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
         }
 
-        /// Whether this forward DFA's start-byte or fixed-distance byte scan is selective on English
-        /// text: its filter, or its bytes, would stop at fewer than one position in eight by the
-        /// estimate the filters were admitted with, the density at which the samples begin to
-        /// accept a scan. It is an estimate made at compile time, not a property of any input;
-        /// [#byteScanSkipsPartOf] samples the input itself.
+        /// Whether this forward DFA's start-byte scan is selective on English text: its filter, or
+        /// its bytes, would stop at fewer than one position in eight by the estimate the filters
+        /// were admitted with, the density at which the samples begin to accept a scan. It is an
+        /// estimate made at compile time, not a property of any input; [#byteScanSkipsPartOf]
+        /// samples the input itself.
         boolean hasSelectiveByteScan()
         {
-            double selectiveDensity = (double) BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT / BYTE_SCAN_SAMPLE_SIZE;
-            if (canStartByteAcceleration()) {
-                double density;
-                if (startLiteralFilter != null) {
-                    density = startLiteralFilter.density();
-                }
-                else if (startClassFilter != null) {
-                    density = startClassFilter.density(ByteFrequencies.englishText());
-                }
-                else {
-                    density = englishProbability(startByteCandidates);
-                }
-                if (density < selectiveDensity) {
-                    return true;
-                }
+            if (!canStartByteAcceleration()) {
+                return false;
             }
-            Prog.FixedDistanceByteCandidates candidates = fixedDistanceByteCandidates();
-            return candidates != null && englishProbability(candidates.candidates()) < selectiveDensity;
+            double density;
+            if (startLiteralFilter != null) {
+                density = startLiteralFilter.density();
+            }
+            else if (startClassFilter != null) {
+                density = startClassFilter.density(ByteFrequencies.englishText());
+            }
+            else {
+                density = englishProbability(startByteCandidates);
+            }
+            return density < (double) BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT / BYTE_SCAN_SAMPLE_SIZE;
         }
 
-        /// Whether a search of this forward DFA would turn its start-byte or fixed-distance byte scan
-        /// on somewhere in `[position, textEnd)`: whether the density sample a search takes before it
-        /// scans accepts either scan on any [#MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES] piece of it,
-        /// the span over which a search samples again. Where it would, the search skips text that
-        /// a match start set's reverse pass would read whole.
+        /// Whether a search of this forward DFA would turn its start-byte scan on somewhere in
+        /// `[position, textEnd)`: whether the density sample a search takes before it scans accepts
+        /// the scan on any [#MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES] piece of it, the span over
+        /// which a search samples again. Where it would, the search skips text that a match start
+        /// set's reverse pass would read whole.
         boolean byteScanSkipsPartOf(byte[] bytes, int position, int textEnd)
         {
-            Prog.FixedDistanceByteCandidates fixedDistance = fixedDistanceByteCandidates();
+            if (!canStartByteAcceleration()) {
+                return false;
+            }
             for (int piece = position; textEnd - piece >= BYTE_SCAN_SAMPLE_SIZE; piece += MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
                 int pieceEnd = (int) Math.min(textEnd, (long) piece + MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES);
-                if (canStartByteAcceleration() && isStartByteScanTailProductive(bytes, piece, pieceEnd)) {
-                    return true;
-                }
-                if (fixedDistance != null &&
-                        isByteCandidateScanProductive(fixedDistance.candidates(), null, null, bytes, piece, pieceEnd, BYTE_SCAN_SAMPLE_SIZE, BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT)) {
+                if (isStartByteScanTailProductive(bytes, piece, pieceEnd)) {
                     return true;
                 }
             }
@@ -8392,77 +7758,6 @@ final class Dfa
             return statesHoldOwnMatches;
         }
 
-        boolean canFixedDistanceByteAcceleration()
-        {
-            return fixedDistanceByteCandidates() != null;
-        }
-
-        boolean fixedDistanceByteCandidatesInitialized()
-        {
-            return fixedDistanceByteCandidates != null;
-        }
-
-        private Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates()
-        {
-            Prog.FixedDistanceByteCandidates candidates = fixedDistanceByteCandidates;
-            if (candidates == null) {
-                cacheMutationLock.lock();
-                try {
-                    candidates = fixedDistanceByteCandidates;
-                    if (candidates == null) {
-                        candidates = prog.buildFixedDistanceByteCandidates(stack, startByteCandidates);
-                        if (candidates != null && availableStateMemory >= FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY) {
-                            availableStateMemory -= FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY;
-                            fixedDistanceByteCandidateMemory = FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY;
-                        }
-                        else if (candidates != null && stateBudget >= FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY) {
-                            candidates = RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET;
-                        }
-                        else {
-                            candidates = NO_FIXED_DISTANCE_BYTE_CANDIDATES;
-                        }
-                        boolean usable = candidates != NO_FIXED_DISTANCE_BYTE_CANDIDATES && candidates != RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET;
-                        fixedDistanceSmallByteSet = usable ? buildSmallByteSet(candidates.candidates()) : 0;
-                        fixedDistanceByteScanDenserThanStartFilter = usable && isDenserThanStartFilter(candidates.candidates());
-                        fixedDistanceByteCandidates = candidates;
-                    }
-                }
-                finally {
-                    cacheMutationLock.unlock();
-                }
-            }
-            return candidates == NO_FIXED_DISTANCE_BYTE_CANDIDATES ||
-                    candidates == RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET ? null : candidates;
-        }
-
-        // Whether English text holds the fixed-distance bytes more often than the start literal or
-        // class filter accepts a position, by the estimates the filters were admitted with.
-        private boolean isDenserThanStartFilter(byte[] fixedDistanceCandidates)
-        {
-            double filterDensity;
-            if (startLiteralFilter != null) {
-                filterDensity = startLiteralFilter.density();
-            }
-            else if (startClassFilter != null) {
-                filterDensity = startClassFilter.density(ByteFrequencies.englishText());
-            }
-            else {
-                return false;
-            }
-            return englishProbability(fixedDistanceCandidates) > filterDensity;
-        }
-
-        private int fixedDistanceSmallByteSet()
-        {
-            return fixedDistanceByteCandidates() == null ? 0 : fixedDistanceSmallByteSet;
-        }
-
-        int fixedDistanceByteOffset()
-        {
-            Prog.FixedDistanceByteCandidates candidates = fixedDistanceByteCandidates();
-            return candidates == null ? -1 : candidates.offset();
-        }
-
         boolean isStartByteCandidate(int value)
         {
             return startByteCandidates[value] != 0;
@@ -8474,32 +7769,6 @@ final class Dfa
                 return findByteCandidate(startByteCandidates, data, offset, length);
             }
             return findByteSetCandidate(this, startByteCandidates, startByteScanSet, data, offset, length);
-        }
-
-        int findFixedDistanceByteCandidate(byte[] data, int offset, int length)
-        {
-            Prog.FixedDistanceByteCandidates candidates = fixedDistanceByteCandidates();
-            if (candidates == null || candidates.offset() >= length) {
-                return -1;
-            }
-            int candidateBytePosition;
-            if (fixedDistanceSmallByteSet == 0) {
-                candidateBytePosition = findByteCandidate(
-                        candidates.candidates(),
-                        data,
-                        offset + candidates.offset(),
-                        length - candidates.offset());
-            }
-            else {
-                candidateBytePosition = findByteSetCandidate(
-                        this,
-                        candidates.candidates(),
-                        fixedDistanceSmallByteSet,
-                        data,
-                        offset + candidates.offset(),
-                        length - candidates.offset());
-            }
-            return candidateBytePosition < 0 ? -1 : candidateBytePosition - candidates.offset();
         }
 
         public boolean ok()
@@ -8796,11 +8065,6 @@ final class Dfa
             return startClassFilter;
         }
 
-        int fixedDistanceShortSkipFallbackCount()
-        {
-            return routeCount(FIXED_DISTANCE_SHORT_SKIP_FALLBACK_ROUTE);
-        }
-
         private long selfLoopExitByteSet(CacheTables tables, Object[] stateReferences)
         {
             int stateOffset = rowStateOffset(stateReferences, nextSize, tables.transitions);
@@ -8919,11 +8183,6 @@ final class Dfa
             return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
         }
 
-        int cacheEntryCount()
-        {
-            return cache.size();
-        }
-
         CacheSnapshot cacheSnapshot()
         {
             CacheTables tables = this.tables;
@@ -8958,7 +8217,6 @@ final class Dfa
                     populatedStartStates,
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
-                    fixedDistanceByteCandidateMemory,
                     availableStateMemory,
                     stateBudget,
                     tables.transitions.length,
@@ -9166,7 +8424,7 @@ final class Dfa
             // superseded reference) follow it, and an error in them abandons the segment uncounted.
             CacheTables newTables = tables;
             if (releasePairedTransitions) {
-                newTables = newTables.withPairedRows(null, null, null);
+                newTables = newTables.withPairedRows(null);
             }
             if (absolutePointerGrowth != null) {
                 newTables = newTables.withAbsolutePointerTransitions(absolutePointerGrowth.transitions());
@@ -9226,9 +8484,7 @@ final class Dfa
 
         boolean hasPairedTransitions(CacheTables tables, int stateOffset)
         {
-            return FLAT_PAIRED_ROWS
-                    ? pairedRowOffset(tables.pairedRowOffsets, stateIndex(stateOffset)) >= 0
-                    : pairedStateReferences(tables.pairedStateRefArrays, stateIndex(stateOffset)) != null;
+            return pairedStateReferences(tables.pairedStateRefArrays, stateIndex(stateOffset)) != null;
         }
 
         private void recordPairedSearch(int searchedBytes)
@@ -9409,19 +8665,6 @@ final class Dfa
         int pairedTransitionCount()
         {
             int pairedClassCount = nextSize * nextSize;
-            MemorySegment flatPairedRows = tables.flatPairedRows;
-            if (flatPairedRows != null) {
-                int pairedRowBytes = pairedRowBytes();
-                int transitionCount = 0;
-                for (int rowOffset = 0; rowOffset < flatPairedRows.byteSize(); rowOffset += pairedRowBytes) {
-                    for (int pairedClass = 0; pairedClass < pairedClassCount; pairedClass++) {
-                        if (getPairedSlot(flatPairedRows, rowOffset + (pairedClass * Integer.BYTES)) >= 0) {
-                            transitionCount++;
-                        }
-                    }
-                }
-                return transitionCount;
-            }
             Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return 0;
@@ -9478,18 +8721,9 @@ final class Dfa
             return continuationCount;
         }
 
-        // The offsets of the states with a paired row, in either form.
+        // The offsets of the states with a paired row.
         private int[] pairedRowStateOffsets(CacheTables tables)
         {
-            MemorySegment flatPairedRows = tables.flatPairedRows;
-            if (flatPairedRows != null) {
-                int pairedRowBytes = pairedRowBytes();
-                int[] stateOffsets = new int[toIntExact(flatPairedRows.byteSize() / pairedRowBytes)];
-                for (int row = 0; row < stateOffsets.length; row++) {
-                    stateOffsets[row] = getPairedSlot(flatPairedRows, ((row + 1) * pairedRowBytes) - Integer.BYTES);
-                }
-                return stateOffsets;
-            }
             Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return new int[0];
@@ -9611,17 +8845,14 @@ final class Dfa
         long estimatedPairedTransitionMemory()
         {
             int stateLimit = Math.min(nextFreeOffset / nextSize, tables.stateData.length);
-            // Capped at the rows one array can hold, far beyond every paired cap, which keeps
-            // `rowCount * pairedRowLength()` within an int.
-            return pairedTransitionMemory(stateLimit, Math.min(stateCount, Integer.MAX_VALUE / pairedRowLength()));
+            return pairedTransitionMemory(stateLimit, stateCount);
         }
 
         // The heap bytes this DFA retains now, plus the native memory of its live pointer table:
         // what the budget charges the state budget, which holds the state tables, states, paired
-        // rows, fixed-distance candidates, and the live pointer table, heap or native, and the
-        // fixed parts outside it. Tables a search still
-        // reads after a reset are not reachable from the DFA, and superseded native tables the
-        // cleaner has not freed only through phantom references, so neither is counted.
+        // rows, and the live pointer table, heap or native, and the fixed parts outside it. Tables a
+        // search still reads after a reset are not reachable from the DFA, and superseded native
+        // tables the cleaner has not freed only through phantom references, so neither is counted.
         //
         // It takes no lock. It reads the published tables, then the charge, then, behind a
         // load-load fence, the tables again. The cache charges growth before it publishes the
@@ -9847,8 +9078,8 @@ final class Dfa
             return size;
         }
 
-        // The objects around the pointer table and the flat paired rows that the charge, which
-        // holds their memory, leaves out: the table's record and each segment with its scope.
+        // The objects around the pointer table that the charge, which holds its memory, leaves
+        // out: the table's record and its segment with its scope.
         private static long segmentWrapperSize(CacheTables tables)
         {
             long size = 0;
@@ -9858,9 +9089,6 @@ final class Dfa
                 if (absolutePointers.arena() != null) {
                     size += RetainedSizeSupport.instanceSize(absolutePointers.arena().getClass()) + RetainedSizeSupport.NATIVE_CLEANUP_BYTES;
                 }
-            }
-            if (tables.flatPairedRows != null) {
-                size += segmentObjectSize(tables.flatPairedRows);
             }
             return size;
         }
@@ -9932,9 +9160,7 @@ final class Dfa
 
             // Allocate the new tables before charging, so a failed allocation leaves the charge
             // unchanged; the rows are complete before the tables publish them.
-            CacheTables pairedTables = FLAT_PAIRED_ROWS
-                    ? buildPairedRowOffsets(tables, stateLimit, selectedRows, selectedRowCount)
-                    : buildPairedStateRefArrays(tables, stateLimit, selectedRows);
+            CacheTables pairedTables = buildPairedStateRefArrays(tables, stateLimit, selectedRows);
             if (pairedTables == null) {
                 return;
             }
@@ -9982,55 +9208,7 @@ final class Dfa
                     }
                 }
             }
-            return transitionCount == 0 ? null : tables.withPairedRows(pairedRows, null, null);
-        }
-
-        // Tables publishing the flat paired table for the selected states, or null when no pair
-        // reaches a selected row.
-        private CacheTables buildPairedRowOffsets(CacheTables tables, int stateLimit, boolean[] selectedRows, int selectedRowCount)
-        {
-            StateData[] stateData = tables.stateData;
-            Object[][] stateRefArrays = tables.stateRefArrays;
-            int pairedClassCount = nextSize * nextSize;
-            int pairedRowLength = pairedRowLength();
-            int[] pairedRowOffsets = new int[stateLimit];
-            Arrays.fill(pairedRowOffsets, NO_PAIRED_ROW);
-            int[] flatPairedRows = new int[selectedRowCount * pairedRowLength];
-            Arrays.fill(flatPairedRows, NO_PAIRED_ROW);
-            int nextRowStart = 0;
-            for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                if (selectedRows[stateIndex]) {
-                    pairedRowOffsets[stateIndex] = nextRowStart * Integer.BYTES;
-                    flatPairedRows[nextRowStart + pairedClassCount] = stateData[stateIndex].offset();
-                    nextRowStart += pairedRowLength;
-                }
-            }
-
-            int transitionCount = 0;
-
-            for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                Object[] source = stateRefArrays[stateIndex];
-                int sourceRowOffset = pairedRowOffsets[stateIndex];
-                if (sourceRowOffset < 0) {
-                    continue;
-                }
-                for (int firstClass = 0; firstClass < nextSize; firstClass++) {
-                    if (!(source[firstClass] instanceof Object[] intermediate)) {
-                        continue;
-                    }
-                    for (int secondClass = 0; secondClass < nextSize; secondClass++) {
-                        if (intermediate[secondClass] instanceof Object[] target) {
-                            StateData targetData = (StateData) target[nextSize];
-                            int targetRowOffset = pairedRowOffsets[stateIndex(targetData.offset())];
-                            flatPairedRows[(sourceRowOffset / Integer.BYTES) + (firstClass * nextSize) + secondClass] = targetRowOffset;
-                            if (targetRowOffset >= 0) {
-                                transitionCount++;
-                            }
-                        }
-                    }
-                }
-            }
-            return transitionCount == 0 ? null : tables.withPairedRows(null, pairedRowOffsets, MemorySegment.ofArray(flatPairedRows));
+            return transitionCount == 0 ? null : tables.withPairedRows(pairedRows);
         }
 
         // Allocates the requested pointer table, or allocates a withheld one again. Sizing that does
@@ -10447,37 +9625,14 @@ final class Dfa
         // most every state's.
         private int maximumPairedRows(int stateLimit, long maximumMemory)
         {
-            long rowMemory = FLAT_PAIRED_ROWS ? pairedRowBytes() : pairedRowMemory();
-            int maximumRows = (int) Math.min(stateCount, (maximumMemory - pairedTransitionMemory(stateLimit, 0)) / rowMemory);
-            // Aligning the flat table's size can add up to four bytes, less than one row; the object
-            // rows' charge is exact.
-            if (pairedTransitionMemory(stateLimit, maximumRows) > maximumMemory) {
-                maximumRows--;
-            }
-            return maximumRows;
+            return (int) Math.min(stateCount, (maximumMemory - pairedTransitionMemory(stateLimit, 0)) / pairedRowMemory());
         }
 
-        // The charge for a paired table with `rowCount` rows for `stateLimit` states: the flat
-        // table's two int arrays, without the segment view over the second, as for the heap pointer
-        // table, or the object rows counted with eight-byte references.
+        // The charge for a paired table with `rowCount` rows for `stateLimit` states: the object
+        // rows counted with eight-byte references.
         private long pairedTransitionMemory(int stateLimit, int rowCount)
         {
-            if (FLAT_PAIRED_ROWS) {
-                return sizeOfIntArray(stateLimit) + sizeOfIntArray(rowCount * pairedRowLength());
-            }
             return pairedOuterMemory(stateLimit) + (rowCount * pairedRowMemory());
-        }
-
-        // A paired row: one slot for each pair of byte classes, then the state, which the flat form
-        // holds as its offset in `transitions`.
-        private int pairedRowLength()
-        {
-            return (nextSize * nextSize) + 1;
-        }
-
-        private int pairedRowBytes()
-        {
-            return pairedRowLength() * Integer.BYTES;
         }
 
         private long pairedOuterMemory(int stateLimit)
@@ -10495,7 +9650,7 @@ final class Dfa
         {
             CacheTables tables = this.tables;
             if (tables.hasPairedRows()) {
-                this.tables = tables.withPairedRows(null, null, null);
+                this.tables = tables.withPairedRows(null);
                 // The rows' refund follows the tables without them, as in `allocateCachedState`.
                 // Only tables with paired rows carry their charge.
                 VarHandle.storeStoreFence();
@@ -11570,7 +10725,7 @@ final class Dfa
                     cacheContentVersion,
                     availableStateMemory,
                     retainedStateMemory,
-                    FLAT_PAIRED_ROWS ? tables.flatPairedRows : tables.pairedStateRefArrays,
+                    tables.pairedStateRefArrays,
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
                     pairedContentVersion,
@@ -11830,14 +10985,9 @@ final class Dfa
             retainedStateMemory = stateBackingMemory();
             availableStateMemory = stateBudget -
                     retainedStateMemory -
-                    fixedDistanceByteCandidateMemory -
                     absolutePointerTransitionMemory() -
                     matchStartSetDfaLoan -
                     matchStartSetReservation;
-            if (fixedDistanceByteCandidates == RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET) {
-                fixedDistanceByteCandidates = null;
-                fixedDistanceSmallByteSet = 0;
-            }
 
             resetCount++;
         }

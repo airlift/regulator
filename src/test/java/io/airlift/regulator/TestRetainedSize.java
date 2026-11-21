@@ -287,7 +287,7 @@ public class TestRetainedSize
         if (!(object instanceof CompiledPattern pattern)) {
             return dfas;
         }
-        for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.booleanProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
+        for (Prog program : new Prog[] {pattern.forwardProgramForDiagnostics(), pattern.reverseProgramIfComputedForDiagnostics()}) {
             if (program == null) {
                 continue;
             }

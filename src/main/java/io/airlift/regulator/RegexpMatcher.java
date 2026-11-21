@@ -60,9 +60,8 @@ public final class RegexpMatcher
     private final SingleByteMatcher singleByteMatcher;
     // The pattern's exact-literal, literal-alternation, literal-set, dot-star literal, or
     // fixed-width span search, which find() runs in place of the program, a literal
-    // alternation's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes and a
-    // short-search fixed-width matcher's only on searches too short for the inner literal
-    // search. See CompiledPattern.groupZeroSpanSearch.
+    // alternation's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
+    // CompiledPattern.groupZeroSpanSearch.
     private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
     // Created by the constructor for a matcher with no single-byte table, span search, or class
@@ -72,8 +71,6 @@ public final class RegexpMatcher
     private Dfa.CandidateStartCursor candidateStartCursor;
     private boolean longSearchCandidateStartCursorCreated;
     private final boolean enableGroupZeroForwardCursor;
-    private final boolean hasLoweredCandidateSearch;
-    private final boolean hasDirectLoweredGroupZeroSearch;
     // The pattern's start-anchored scan plan that find() can run directly. See
     // CompiledPattern.startAnchoredScanPlan.
     private final ScanPlan startAnchoredScanPlan;
@@ -173,8 +170,6 @@ public final class RegexpMatcher
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
-        this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
-        this.hasDirectLoweredGroupZeroSearch = capturingGroupCount == 0 && pattern.hasDirectLoweredGroupZeroSearch();
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
@@ -335,12 +330,6 @@ public final class RegexpMatcher
             span = dotStarLiteral.findSpan(input, start, regionEnd);
         }
         else {
-            // The short-search matcher answers only regions too short for the inner literal search;
-            // a longer one goes to the engine, which runs that search. See
-            // CompiledPattern.shortFixedWidthByteMatcher.
-            if (spanSearch == pattern.shortFixedWidthByteMatcher() && pattern.searchesInnerLiteralWindow(regionEnd - start)) {
-                return rustSearch ? findRust() : findGeneral();
-            }
             // A search that bails on dense candidates runs again from its start on the program's
             // search, as a find of the pattern without the matcher would.
             span = ((FixedWidthByteSpanMatcher) spanSearch).findSpanOrBail(input, start, regionEnd);
@@ -592,59 +581,15 @@ public final class RegexpMatcher
             }
         }
 
-        int searchStart = regionStart + nextFindStart;
-        if (hasDirectLoweredGroupZeroSearch) {
-            long matchBoundary = pattern.findLoweredGroupZeroBoundary(
-                    input,
-                    regionStart,
-                    regionEnd,
-                    searchStart);
-            if (matchBoundary >= 0) {
-                groups[0] = (int) (matchBoundary >>> 32);
-                groups[1] = (int) matchBoundary;
-                setMatchAndAdvance(groups[0], groups[1]);
-                return true;
-            }
-            if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                return failFind();
-            }
-        }
-
-        long loweredCandidateStart = Dfa.SEARCH_FAILED;
-        if (hasLoweredCandidateSearch) {
-            loweredCandidateStart = pattern.findLoweredCandidateStart(input, regionStart, regionEnd, searchStart);
-        }
-        if (loweredCandidateStart == Dfa.SEARCH_NO_MATCH) {
-            return failFind();
-        }
-        if (loweredCandidateStart >= 0) {
-            searchStart += (int) loweredCandidateStart;
-        }
-
         if (!pattern.matchRegionInto(
                 input,
                 regionStart,
                 regionEnd,
-                searchStart,
+                regionStart + nextFindStart,
                 regionEnd,
                 UNANCHORED,
                 groups,
                 this)) {
-            // The lowered program preserves existence, but the semantic program remains authoritative
-            // for boundaries and captures. Fall back if a future lowering does not preserve its start.
-            if (loweredCandidateStart >= 0 && searchStart != regionStart + nextFindStart &&
-                    pattern.matchRegionInto(
-                            input,
-                            regionStart,
-                            regionEnd,
-                            regionStart + nextFindStart,
-                            regionEnd,
-                            UNANCHORED,
-                            groups,
-                            this)) {
-                setMatchAndAdvance(groups[0], groups[1]);
-                return true;
-            }
             return failFind();
         }
 

@@ -223,24 +223,20 @@ Within the budget, compilation and matching keep these limits:
   not fit is dropped, and the pattern searches without one. A DFA that fails
   to initialize is remembered, so later searches do not try to build it again.
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
-  bytes outside Trino, the dot-star literal, byte-gap ordered-literal, and
-  literal-neighbor matchers, the root skip, dense rows, and skip table of a
-  large literal set, OnePass tables needed only for Java's or Trino's final-line
-  end anchors, the bit-parallel position automaton, which searches in place of
-  the Pike NFA once the forward DFA cannot initialize or abandons a search, and
-  in place of the DFA for a boolean search that skips one that thrashed across
-  calls, for a pattern whose matches are bounded, assertion-free and never
-  empty, and required-byte checks are not kept when their memory would stop the
+  bytes outside Trino, the dot-star literal and byte-gap ordered-literal
+  matchers, the root skip, dense rows, and skip table of a large literal set,
+  OnePass tables needed only for Java's or Trino's final-line end anchors, the
+  bit-parallel position automaton, which searches in place of the Pike NFA once
+  the forward DFA cannot initialize or abandons a search, and in place of the
+  DFA for a boolean search that skips one that thrashed across calls, for a
+  pattern whose matches are bounded, assertion-free and never empty, and
+  required-byte checks are not kept when their memory would stop the
   first-match or longest-match DFA from initializing. The literal searched
-  behind a leading assertion is kept only when the first-match and longest-match
-  DFAs both keep their minimum memory beside it, and the folded run a find can
-  search for in that literal's place only when they keep it beside both, a
-  minimum that leaves out a forward DFA's start-byte tables. A prefix's literal
-  set, which long vector prefix scans compare at each candidate, is decided
-  under a `maxMemory` after OnePass and every plan and route, so it never takes
-  memory they would use, and is kept only where the first-match and
-  longest-match DFAs then keep their minimum memory beside it. Other plans keep
-  their memory whenever it fits.
+  behind a leading assertion is kept only when the first-match and
+  longest-match DFAs both keep their minimum memory beside it, and the folded
+  run a find can search for in that literal's place only when they keep it
+  beside both, a minimum that leaves out a forward DFA's start-byte tables.
+  Other plans keep their memory whenever it fits.
 - In every language, boolean `contains` of a contained literal such as
   `.*lit.*` and its dot-star literal spans search a window of fewer than 64
   bytes with `Slice.indexOf` rather than the contains search.
@@ -339,10 +335,7 @@ together in a window of at least 64 bytes when that search fits beside the
 forward DFAs and otherwise, as for a one-byte literal, uses `Slice.indexOf`,
 nor any language's dot-star literal spans, which share that search, nor ordered
 literals such as `a(?s:.*)b` in any language whose gaps there read any bytes,
-which use the same scan, nor the
-literal-neighbor matcher's scan for the literal of a pattern such as
-`([^ @]+)@([^ @]+)`, which scans for a one-byte literal's byte and for the first
-and last bytes of a longer one, nor the start literal filter of a pattern that
+which use the same scan, nor the start literal filter of a pattern that
 begins with a few literals, the start class filter of one that begins with a few
 narrow classes, an inner literal search's set filter, its choice of a rare class
 pair, the window literal search's choice of its literal, such as `river` in
@@ -355,9 +348,7 @@ by a multibyte UTF-8 character that ends before the literal's last byte, that
 character's last byte and the literal's last byte, and in vector scans of a
 periodic literal, whose smallest period is more than one byte and at most half
 its length, the first two adjacent bytes that differ from that pair's first byte
-on; the distribution decides only whether a folded run replaces that literal. A
-fixed-width pattern with no position rare enough to scan for also estimates with
-English text frequencies whether to test every start of a 64-byte block at once.
+on; the distribution decides only whether a folded run replaces that literal.
 A distribution that does not match the data can make literal scans several times
 slower per byte than first-byte scanning, because it moves the scan onto bytes
 that are common in the searched text; it never changes what matches, and the
@@ -392,11 +383,11 @@ Re2 pattern = Re2.compile(
 `Re2.Options.setGenerateBytecode(true)`,
 `JavaRegexp.Options.setGenerateBytecode(true)`, and
 `RustRegexp.Options.setGenerateBytecode(true)` are options, off by default,
-that compile an eligible pattern's case-sensitive scan plan into its
-own hidden class. Results are unchanged; `usesGeneratedBytecode()` reports
-whether the pattern has such a class. A pattern's class is generated inside
-`compile`, never on first use. A pattern that is not eligible, or whose class
-cannot be generated, compiles as it does without the option.
+that compile an eligible pattern's scan plan into its own hidden class. Results
+are unchanged; `usesGeneratedBytecode()` reports whether the pattern has such a
+class. A pattern's class is generated inside `compile`, never on first use. A
+pattern that is not eligible, or whose class cannot be generated, compiles as
+it does without the option.
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, `RustRegexp`, and `TrinoLikePattern` are
 sealed classes that callers cannot extend, and `compile` may return a subclass

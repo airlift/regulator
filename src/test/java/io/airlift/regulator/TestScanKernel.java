@@ -168,9 +168,9 @@ public class TestScanKernel
             new Route("^(😀)$", BOOLEAN_ATTEMPT, false));
 
     /// An eligible pattern runs on the generated class, with the attempt of its plan's shape and an
-    /// entry for each operation that reaches the plan, while the same pattern compiled without
-    /// the option keeps no generated code. Patterns that have no case-sensitive scan plan or
-    /// compile to another subclass keep the class they have without the option.
+    /// entry for each operation that reaches the plan, while the same pattern compiled without the
+    /// option keeps no generated code. Patterns that have no scan plan or compile to another
+    /// subclass keep the class they have without the option.
     @Test
     public void testRouteSelection()
     {
@@ -197,8 +197,8 @@ public class TestScanKernel
             assertNoGeneratedCode(expression, interpreted);
         }
 
-        // ASCII-folded plans, patterns without a scan plan, with or without a semantic program,
-        // and ordered literals keep the class they have without generated code.
+        // Patterns without a scan plan, an ASCII-folded one among them, with or without a
+        // semantic program, and ordered literals keep the class they have without generated code.
         for (String expression : List.of("(?i)^ABC([^:]+):DEF$", "x(?:ab|cd)*y", "foo|bar", "first(?s:.*)second(?s:.*)third")) {
             TrinoRegexp generated = generated(expression);
             assertThat(generated.getClass()).as(expression).isEqualTo(TrinoRegexp.compile(utf8Slice(expression)).getClass());
@@ -339,7 +339,7 @@ public class TestScanKernel
             TrinoRegexp generated = generated(expression);
             assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
             invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(generated.re2()))));
-            kinds.addAll(List.of(generated.re2().caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
+            kinds.addAll(List.of(generated.re2().scanPlan().operationsForDiagnostics().split(",")));
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
             List<Slice> sources = new ArrayList<>(randomSources(200 + index++, symbols, MALFORMED_SEQUENCES));
@@ -356,7 +356,7 @@ public class TestScanKernel
             Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
             assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
             invoked.addAll(invokedMethods(patternClassfile(PatternRoutes.of(re2))));
-            re2Kinds.addAll(List.of(re2.caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
+            re2Kinds.addAll(List.of(re2.scanPlan().operationsForDiagnostics().split(",")));
         }
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
         // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
@@ -382,7 +382,7 @@ public class TestScanKernel
 
     private static ScanPlanRun leadingRun(String expression)
     {
-        ScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).re2().caseSensitiveScanPlan();
+        ScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).re2().scanPlan();
         return plan.step(plan.leadingOperation()).run();
     }
 
@@ -402,7 +402,7 @@ public class TestScanKernel
             String expression = probeCase.expression();
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()));
             TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()).setGenerateBytecode(true));
-            assertThat(interpreted.re2().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
+            assertThat(interpreted.re2().scanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
             byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(compiled.re2()));
             assertThat(probeOffsets(classfile)).as(expression).isNotEmpty().containsOnly(probeCase.probe());
@@ -415,7 +415,7 @@ public class TestScanKernel
         String expression = "été=([^/]+)/";
         Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setByteFrequencies(TestingByteFrequencies.learnedJsonRecords()).setGenerateBytecode(true));
         assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
-        ScanPlan plan = re2.caseSensitiveScanPlan();
+        ScanPlan plan = re2.scanPlan();
         assertThat(plan).as(expression).isNotNull();
         assertThat(plan.leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(5);
         assertThat(probeOffsets(patternClassfile(PatternRoutes.of(re2)))).as(expression).isNotEmpty().containsOnly(5);
@@ -490,10 +490,6 @@ public class TestScanKernel
             String expression = search.expression();
             TrinoRegexp compiled = generated(expression);
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
-            if (interpreted.re2().usesAsciiFoldedScanExecutorForDiagnostics()) {
-                assertThat(compiled.usesGeneratedBytecode()).as(expression).isFalse();
-                continue;
-            }
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
             List<Slice> sources = new ArrayList<>();
             for (int units : new int[] {8, 70, 300, 1500}) {
@@ -542,11 +538,11 @@ public class TestScanKernel
                 for (Language language : languages) {
                     IntFunction<CompiledPattern> compile = repeats -> language.compile().apply(utf8Slice(lead + family.body().apply(repeats) + end));
                     CompiledPattern pattern = compile.apply(family.repeats());
-                    ScanPlan plan = pattern.caseSensitiveScanPlan();
+                    ScanPlan plan = pattern.scanPlan();
                     String description = family.name() + " " + language.name() + " " + attempt;
                     assertThat(plan).as(description).isNotNull();
                     assertThat(Attempt.of(plan)).as(description).isEqualTo(attempt);
-                    assertThat(compile.apply(family.repeats() + 1).caseSensitiveScanPlan()).as(description).isNull();
+                    assertThat(compile.apply(family.repeats() + 1).scanPlan()).as(description).isNull();
                     if (pattern instanceof TrinoCompiledPattern trinoPattern) {
                         TrinoRoutes routes = TrinoRoutes.of(trinoPattern);
                         assertThat(routes).as(description).isNotNull();
@@ -752,7 +748,7 @@ public class TestScanKernel
                 assertThat(matcherTrace(actual, retained, source)).as(sourceDescription).containsExactlyElementsOf(matcherTrace(expected, retained, source));
             }
             if (attempts) {
-                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.re2().caseSensitiveScanPlan(), source, groupCount);
+                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.re2().scanPlan(), source, groupCount);
             }
         }
     }

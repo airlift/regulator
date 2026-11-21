@@ -40,8 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDfaFailureAtomicity
 {
-    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-    // answer it without the DFA.
+    // `(?i)` keeps the pattern off the fixed-width matcher, which would answer it without the DFA.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
     // The budget of the state-growth cases, unless a case needs a smaller one.
     private static final long STATE_GROWTH_MAX_MEMORY = 4L << 20;

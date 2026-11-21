@@ -20,7 +20,7 @@ public final class DfaCacheQualificationProbe
     public static void main(String[] args)
     {
         BenchmarkDfaCache benchmark = new BenchmarkDfaCache();
-        System.out.println("scenario\tstate_count\tcache_entries\tpaired_rows\tpaired_bytes\tavailable_state_bytes\tfixed_candidate_bytes\ttotal_bytes\ttransition_bytes\tstate_metadata_bytes\tcache_bytes\tcache_capacity\treset_count");
+        System.out.println("scenario\tstate_count\tcache_entries\tpaired_rows\tpaired_bytes\tavailable_state_bytes\ttotal_bytes\ttransition_bytes\tstate_metadata_bytes\tcache_bytes\tcache_capacity\treset_count");
 
         for (int textSize : new int[] {1_538, 16_384}) {
             BenchmarkDfaCache.PopulatedResetState state = new BenchmarkDfaCache.PopulatedResetState();
@@ -43,14 +43,13 @@ public final class DfaCacheQualificationProbe
     private static void print(String scenario, Dfa.CacheSnapshot cacheSnapshot, Dfa.StateMemorySnapshot memorySnapshot)
     {
         System.out.printf(
-                "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
+                "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d%n",
                 scenario,
                 cacheSnapshot.stateCount(),
                 cacheSnapshot.cacheEntries(),
                 cacheSnapshot.pairedRows(),
                 cacheSnapshot.pairedTransitionMemory(),
                 cacheSnapshot.availableStateMemory(),
-                cacheSnapshot.fixedDistanceByteCandidateMemory(),
                 memorySnapshot.totalBytes(),
                 memorySnapshot.transitionBytes(),
                 memorySnapshot.stateMetadataBytes(),

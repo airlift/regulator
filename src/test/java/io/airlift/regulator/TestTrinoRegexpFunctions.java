@@ -14,7 +14,6 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
-import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 import io.airlift.slice.Slices;
@@ -526,37 +525,6 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testTransparentStartLiteralMemoryIsReservedFromLoweredDfa()
-    {
-        // Trino's final-line $ keeps the semantic program off the DFA, so the lowered boolean
-        // program holds the forward DFA budget and the literal reserves its memory from it. The
-        // baseline's lowered program has the same size and no common literal, so the two DFA
-        // allowances differ only by the literal's charge and each pattern's required bytes, reserved
-        // after it. The literal is kept only where that charge leaves both lowered DFAs their
-        // minimum, and there the lowered DFA still runs.
-        Prog program = TrinoRegexp.compile(utf8("^ab|ab$")).re2().forwardProgramForDiagnostics();
-        Slice text = utf8("x".repeat(100) + "ab");
-        long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
-        List<Boolean> outcomes = new ArrayList<>();
-        // Both patterns build a lowered program from 9,680 bytes.
-        for (long maxMemory = 9680; maxMemory <= 32 * 1024; maxMemory += 64) {
-            TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
-            TrinoCompiledPattern baselinePattern = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2();
-            long allowance = baselinePattern.booleanProgramForDiagnostics().dfaMemory() + baselinePattern.requiredBytesRetainedSizeForDiagnostics();
-            TrinoCompiledPattern regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();
-            Prog lowered = regexp.booleanProgramForDiagnostics();
-            boolean keeps = (allowance - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(lowered, Dfa.DfaInstance.Kind.LONGEST_MATCH);
-            assertThat(regexp.forwardProgramForDiagnostics().transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
-            assertThat(allowance - lowered.dfaMemory() - regexp.requiredBytesRetainedSizeForDiagnostics())
-                    .as("reservation at %s", maxMemory)
-                    .isEqualTo(keeps ? reservation : 0);
-            assertThat(keeps ? Dfa.search(lowered, text, false, Prog.MatchKind.FIRST_MATCH, false) : text.length()).as("lowered DFA at %s", maxMemory).isEqualTo(text.length());
-            outcomes.add(keeps);
-        }
-        assertThat(outcomes).contains(false, true);
-    }
-
-    @Test
     public void testOrderedLiteralMatcherConcurrentReuse()
             throws Exception
     {
@@ -920,20 +888,6 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testSingleByteRepeatAnalysisEligibility()
-    {
-        TrinoRegexp nonNullable = TrinoRegexp.compile(utf8("[a-z]+"));
-        assertThat(nonNullable.isSingleByteRepeatMatcherComputed()).isFalse();
-        assertThat(nonNullable.count(utf8("abc"))).isEqualTo(1);
-        assertThat(nonNullable.isSingleByteRepeatMatcherComputed()).isFalse();
-
-        TrinoRegexp nullableRepeat = TrinoRegexp.compile(utf8("x*"));
-        assertThat(nullableRepeat.isSingleByteRepeatMatcherComputed()).isFalse();
-        assertThat(nullableRepeat.count(utf8("ax"))).isEqualTo(3);
-        assertThat(nullableRepeat.isSingleByteRepeatMatcherComputed()).isTrue();
-    }
-
-    @Test
     public void testCompileBuildsOnlyEligibleSingleByteMatcher()
     {
         TrinoRegexp delimiter = TrinoRegexp.compile(utf8("[,;]"));
@@ -957,38 +911,30 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testCapturedSingleByteRepeatUsesBoundaryMatcherWhenCapturesAreNotNeeded()
+    public void testCapturedSingleByteRepeatOperations()
     {
         Slice source = utf8("axx");
 
         TrinoRegexp position = TrinoRegexp.compile(utf8("(x*)"));
-        assertThat(position.isSingleByteRepeatMatcherComputed()).isFalse();
         assertThat(position.position(source, 1, 2)).isEqualTo(2);
-        assertThat(position.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp groupZero = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(groupZero.extractAll(source, 0))).containsExactly("", "xx", "");
-        assertThat(groupZero.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp capturedGroup = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(capturedGroup.extractAll(source, 1))).containsExactly("", "xx", "");
-        assertThat(capturedGroup.isSingleByteRepeatMatcherComputed()).isFalse();
 
         TrinoRegexp split = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(strings(split.split(source))).containsExactly("", "a", "", "");
-        assertThat(split.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp groupZeroReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(groupZeroReplacement.replace(source, utf8("$0"))).isEqualTo(source);
-        assertThat(groupZeroReplacement.isSingleByteRepeatMatcherComputed()).isTrue();
 
         TrinoRegexp capturedReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(capturedReplacement.replace(source, utf8("$1"))).isEqualTo(source);
-        assertThat(capturedReplacement.isSingleByteRepeatMatcherComputed()).isFalse();
 
         TrinoRegexp lambdaReplacement = TrinoRegexp.compile(utf8("(x*)"));
         assertThat(lambdaReplacement.replace(source, _ -> utf8("_"))).isEqualTo(utf8("_a__"));
-        assertThat(lambdaReplacement.isSingleByteRepeatMatcherComputed()).isFalse();
     }
 
     @Test
@@ -1298,7 +1244,7 @@ public class TestTrinoRegexpFunctions
         List<MalformedInputRoute> routes = List.of(
                 new MalformedInputRoute("fixed-width byte", TrinoRegexp.compile(utf8("\\d{3}-\\d{2}")), "123-45é", regexp -> regexp instanceof TrinoRegexp.FixedWidthByteTrinoRegexp),
                 new MalformedInputRoute("character class", TrinoRegexp.compile(utf8("\\p{L}+")), "aé 中", regexp -> regexp.re2().hasCharacterClassSpan()),
-                new MalformedInputRoute("literal neighbors", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().literalNeighborMatcherForDiagnostics() != null),
+                new MalformedInputRoute("inner literal first", TrinoRegexp.compile(utf8("([^ @]+)@([^ @]+)")), "é@b c@中", regexp -> regexp.re2().findsInnerLiteralFirstForDiagnostics()),
                 new MalformedInputRoute("ordered literals", TrinoRegexp.compile(utf8("first(?s:.*)second")), "firsté\nsecond", TrinoRegexp::usesOrderedLiteralMatcherForDiagnostics),
                 new MalformedInputRoute("dot-star literal", TrinoRegexp.compile(utf8(".*ab.*")), "éab\nab", TrinoRegexp::usesDotStarLiteralSpanMatcherForDiagnostics),
                 new MalformedInputRoute("literal alternation", TrinoRegexp.compile(utf8("WARN|é中")), "WARN é中", regexp -> regexp.literalAlternationSpanMatcher() != null),
@@ -1550,7 +1496,6 @@ public class TestTrinoRegexpFunctions
         assertThat(regexp.split(source)).containsExactlyElementsOf(expectedParts);
         assertThat(regexp.replace(source, utf8("_"))).isEqualTo(expectedReplacement.slice());
         assertThat(regexp.replace(source, _ -> utf8("_"))).isEqualTo(expectedReplacement.slice());
-        assertThat(regexp.isSingleByteRepeatMatcherComputed()).isTrue();
     }
 
     @Test

@@ -54,9 +54,9 @@ public class TestRe2BooleanPlans
     {
         // The shape class fixes the full-Slice routes, while the base pattern keeps a few
         // per-pattern ordinary-engine flags and its required bytes, and the RE2 pattern the
-        // inputs of its compile and their hash, which decide equality. The class-run shape adds
-        // its retained count DFA flag, and the scan-plan shape its count, short-match, and literal
-        // find facts, which fit in the padding the base pattern's flags leave.
+        // inputs of its compile and their hash, which decide equality. The scan-plan shape adds
+        // its count, short-match, and literal find facts, which fit in the padding the base
+        // pattern's flags leave.
         assertThat(instanceSize(Re2.class)).isEqualTo(128);
         assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(128);
     }
@@ -121,7 +121,6 @@ public class TestRe2BooleanPlans
                 new ShapeRow("\\p{L}+", CLASS_RUN, CLASS_RUN, CLASS_RUN, CLASS_RUN),
                 new ShapeRow("[,;]", BYTE_TABLE, BYTE_TABLE, BYTE_TABLE, BYTE_TABLE),
                 new ShapeRow("https?://([^/]+)/", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
-                new ShapeRow("(?i)content-type:([^;]+);", SCAN_PLAN, SCAN_PLAN, SCAN_PLAN, SCAN_PLAN),
                 // Patterns more than one shape could serve.
                 // A Rust `\s` is Unicode, so it is no byte run.
                 new ShapeRow("\\s+", BYTE_TABLE, BYTE_TABLE, ENGINE, BYTE_TABLE),

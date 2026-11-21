@@ -51,8 +51,7 @@ public class BenchmarkDfaCache
 {
     private static final String HARD = "[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ$";
     private static final String LATE_TRANSITION = "^a*bc$";
-    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
-    // answer it without the DFA.
+    // `(?i)` keeps the pattern off the fixed-width matcher, which would answer it without the DFA.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
     // Keeps the first-match DFA's 1,414,448-byte state allowance, so the 3,980-state fill has no
     // reset.
@@ -60,8 +59,7 @@ public class BenchmarkDfaCache
     // At 4 MiB the next insert still doubles the state-cache table without a reset.
     private static final long STATE_GROWTH_INSERT_MEMORY = 4L << 20;
     // At a 16 MiB pattern budget, a count of this pattern over the 1 MiB state-growth row resets
-    // the DFA too often and bails. An outer capture keeps it on the general route rather than the
-    // capture-free suffix scanner or the fixed-width matcher.
+    // the DFA too often and bails. An outer capture keeps it off the fixed-width matcher.
     private static final String THRASHING_COUNT = "([a-q][^u-z]{23}x)";
     private static final long THRASHING_COUNT_MEMORY = 16L << 20;
     private static final int THRASHING_COUNT_ROW_SIZE = 1 << 20;

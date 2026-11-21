@@ -19,13 +19,7 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.lang.management.ManagementFactory;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -258,30 +252,6 @@ public class TestRe2Allocations
     }
 
     @Test
-    public void testTrinoFinalLineBooleanProgramDoesNotAllocate()
-    {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
-        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("[a-z]+$"));
-        byte[] absentBytes = new byte[32_768];
-        Arrays.fill(absentBytes, (byte) '1');
-        absentBytes[absentBytes.length - 1] = '\n';
-        Slice absent = Slices.wrappedBuffer(absentBytes);
-        Slice matched = Slices.utf8Slice("123abc\n");
-        Slice anchored = Slices.utf8Slice("abc\n");
-
-        for (int iteration = 0; iteration < 5; iteration++) {
-            assertThat(runFinalLineBooleanOperations(pattern, absent, matched, anchored)).isEqualTo(30_000);
-        }
-
-        long allocatedBytes = minimumAllocatedBytes(30_000, () -> runFinalLineBooleanOperations(pattern, absent, matched, anchored));
-
-        assertThat(allocatedBytes / 10_000).isZero();
-    }
-
-    @Test
     public void testTrinoCaptureMatcherRejectsRowWithoutEngineMatcher()
     {
         // Trino builds a capture matcher for each row, as for rebar's ruff-noqa and aws-keys rows.
@@ -443,25 +413,22 @@ public class TestRe2Allocations
     public void testTrinoScanPlansDoNotAllocate()
     {
         TrinoCompiledPattern anchored = TrinoRegexp.compile(Slices.utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$")).re2();
-        TrinoCompiledPattern folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)^content-type: ([^;]+);.*$")).re2();
         TrinoCompiledPattern unanchored = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/")).re2();
         // Every unanchored search on this plan continues on the ordinary engine.
         TrinoCompiledPattern handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(Slices.utf8Slice("https?://([^/]+)/")).re2();
-        for (TrinoCompiledPattern pattern : List.of(anchored, folded, unanchored, handoff)) {
+        for (TrinoCompiledPattern pattern : List.of(anchored, unanchored, handoff)) {
             assertThat(pattern.usesScanPlanForDiagnostics()).as(pattern.pattern().toStringUtf8()).isTrue();
         }
-        assertThat(folded.usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
 
         Slice url = Slices.utf8Slice("https://www.example.com/index.html");
-        Slice header = Slices.utf8Slice("Content-Type: text/html; charset=utf-8");
         Slice link = Slices.utf8Slice("see http://example.com/ for details");
         int[] groups = new int[4];
 
         for (int iteration = 0; iteration < 5; iteration++) {
-            assertThat(runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups)).isEqualTo(120_000);
+            assertThat(runScanPlanOperations(anchored, unanchored, handoff, url, link, groups)).isEqualTo(90_000);
         }
 
-        assertAllocatesNothingOnceCompiled("testTrinoScanPlansDoNotAllocate", MAXIMUM_WINDOW_RUNS, 120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
+        assertAllocatesNothingOnceCompiled("testTrinoScanPlansDoNotAllocate", MAXIMUM_WINDOW_RUNS, 90_000, () -> runScanPlanOperations(anchored, unanchored, handoff, url, link, groups));
 
         assertThat(groups).containsExactly(4, 23, 11, 22);
     }
@@ -469,17 +436,13 @@ public class TestRe2Allocations
     @Test
     public void testScanPlanCountDoesNotAllocate()
     {
-        // Rows of the everyday keyValue and specialized queryParameterNames workloads, a plan led
-        // by a whole literal, and an ASCII-folded plan, which has no generated class. The key-value
-        // and folded inputs hold a match start inside a value, which a count skips only by
-        // resuming at the match end.
+        // Rows of the everyday keyValue and specialized queryParameterNames workloads, and a plan
+        // led by a whole literal. The key-value input holds a match start inside a value, which a
+        // count skips only by resuming at the match end.
         String keyValueExpression = "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)";
         Slice keyValueSource = Slices.utf8Slice("node=other=7 state=ready attempts=2");
         Slice querySource = Slices.utf8Slice("https://example.org/search?q=regex&lang=en&page=2");
         Slice linkSource = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
-        Slice foldedSource = Slices.utf8Slice("?ID=xid=7&name=x&id=8");
-        TrinoRegexp folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)id=([^&]+)"));
-        assertThat(folded.re2().usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
 
         for (boolean generateBytecode : new boolean[] {false, true}) {
             TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setGenerateBytecode(generateBytecode);
@@ -488,19 +451,18 @@ public class TestRe2Allocations
             TrinoRegexp link = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/"), options);
             // An RE2 pattern's generated class counts with its own copy of the count loop.
             Re2 re2KeyValue = Re2.compile(Slices.utf8Slice(keyValueExpression), Re2.Options.defaults().setGenerateBytecode(generateBytecode));
-            assertThat(List.of(keyValue, queryParameterNames, link, folded)).allMatch(pattern -> pattern.re2().usesScanPlanForDiagnostics());
-            assertThat(link.re2().caseSensitiveScanPlan().hasWholeLiteralCandidates()).isTrue();
+            assertThat(List.of(keyValue, queryParameterNames, link)).allMatch(pattern -> pattern.re2().usesScanPlanForDiagnostics());
+            assertThat(link.re2().scanPlan().hasWholeLiteralCandidates()).isTrue();
             assertThat(List.of(keyValue, queryParameterNames, link)).allMatch(pattern -> pattern.usesGeneratedBytecode() == generateBytecode);
             assertThat(re2KeyValue.usesScanPlanForDiagnostics()).isTrue();
             assertThat(re2KeyValue.usesGeneratedBytecode()).isEqualTo(generateBytecode);
-            LongSupplier counts = () -> keyValue.count(keyValueSource) + queryParameterNames.count(querySource) + link.count(linkSource) +
-                    folded.count(foldedSource) + re2KeyValue.count(keyValueSource);
+            LongSupplier counts = () -> keyValue.count(keyValueSource) + queryParameterNames.count(querySource) + link.count(linkSource) + re2KeyValue.count(keyValueSource);
 
             for (int iteration = 0; iteration < 20_000; iteration++) {
-                assertThat(counts.getAsLong()).isEqualTo(13);
+                assertThat(counts.getAsLong()).isEqualTo(11);
             }
 
-            assertAllocatesNothingOnceCompiled("testScanPlanCountDoesNotAllocate, generateBytecode=" + generateBytecode, MAXIMUM_WINDOW_RUNS, 130_000, () -> {
+            assertAllocatesNothingOnceCompiled("testScanPlanCountDoesNotAllocate, generateBytecode=" + generateBytecode, MAXIMUM_WINDOW_RUNS, 110_000, () -> {
                 long matchCount = 0;
                 for (int iteration = 0; iteration < 10_000; iteration++) {
                     matchCount += counts.getAsLong();
@@ -550,80 +512,13 @@ public class TestRe2Allocations
         }
     }
 
-    @Test
-    public void testSuffixBoundCountAllocatesOnlyFallbackPredicate()
-            throws Exception
-    {
-        // rebar's bounded-strings-ending-z pattern over a 1 MiB row whose only ",z" sits about 600
-        // bytes in, so each count's search end comes from a reverse scan over almost the whole
-        // row, and no line holds 13 commas, so the count is 0. Each count may allocate only the
-        // inner literal count's fallback predicate, a lambda of 24 bytes with compressed class
-        // pointers. With SVE and 16-byte vectors, a helper that took the probe vectors on the
-        // branch into the reverse scan's tail added 96 more: on a row this long, C2 compiled the
-        // scan before the profile of that branch had matured, left the helper out of line, and
-        // boxed both vectors once per count. On 64 KiB rows the profile matured first and nothing
-        // was boxed, and a JVM whose earlier tests had already compiled the scan boxed nothing
-        // either, so the counts run in a child JVM.
-        ProbeResult result = runSuffixBoundCountProbe();
-        System.out.print(result.output());
-        assertThat(result.exitCode()).as(result.output()).isZero();
-        // The child takes this JVM's candidate test, so it tests the form this JVM takes.
-        assertThat(result.output()).contains("SVE_128 " + VectorSupport.SVE_128);
-    }
-
-    private static ProbeResult runSuffixBoundCountProbe()
-            throws IOException, InterruptedException
-    {
-        List<String> command = new ArrayList<>();
-        command.add(System.getProperty("java.home") + "/bin/java");
-        if (Dfa.nativeAccessEnabled()) {
-            command.add("--enable-native-access=ALL-UNNAMED");
-        }
-        // The child runs at this JVM's vector width, and so takes the same candidate test.
-        command.addAll(TestingJvmArguments.vectorWidthOptions());
-        command.add("--add-modules");
-        command.add("jdk.incubator.vector");
-        command.add("-cp");
-        command.add(System.getProperty("java.class.path"));
-        command.add(SuffixBoundCountAllocationProbe.class.getName());
-
-        Path output = Files.createTempFile("regulator-suffix-bound-probe-", ".log");
-        try {
-            ProcessBuilder processBuilder = new ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .redirectOutput(output.toFile());
-            processBuilder.environment().remove("JDK_JAVA_OPTIONS");
-            Process process = processBuilder.start();
-            try {
-                assertThat(process.waitFor(Duration.ofSeconds(60)))
-                        .as("suffix bound probe timed out: %s", Files.readString(output))
-                        .isTrue();
-                return new ProbeResult(process.exitValue(), Files.readString(output, StandardCharsets.UTF_8));
-            }
-            finally {
-                if (process.isAlive()) {
-                    process.destroyForcibly();
-                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("suffix bound probe did not terminate").isTrue();
-                }
-            }
-        }
-        finally {
-            Files.deleteIfExists(output);
-        }
-    }
-
-    private record ProbeResult(int exitCode, String output) {}
-
-    private static int runScanPlanOperations(TrinoCompiledPattern anchored, TrinoCompiledPattern folded, TrinoCompiledPattern unanchored, TrinoCompiledPattern handoff, Slice url, Slice header, Slice link, int[] groups)
+    private static int runScanPlanOperations(TrinoCompiledPattern anchored, TrinoCompiledPattern unanchored, TrinoCompiledPattern handoff, Slice url, Slice link, int[] groups)
     {
         int matchCount = 0;
         for (int iteration = 0; iteration < 10_000; iteration++) {
             matchCount += anchored.find(url) ? 1 : 0;
             matchCount += anchored.matches(url) ? 1 : 0;
             matchCount += anchored.matchInto(url, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
-            matchCount += folded.find(header) ? 1 : 0;
-            matchCount += folded.matches(header) ? 1 : 0;
-            matchCount += folded.matchInto(header, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
             matchCount += unanchored.find(link) ? 1 : 0;
             matchCount += !unanchored.matches(link) ? 1 : 0;
             matchCount += unanchored.matchInto(link, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
@@ -675,17 +570,6 @@ public class TestRe2Allocations
             minimumAllocatedBytes = Math.min(minimumAllocatedBytes, allocatedBytes);
         }
         return minimumAllocatedBytes;
-    }
-
-    private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
-    {
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matchCount += !pattern.contains(absent) ? 1 : 0;
-            matchCount += pattern.contains(matched) ? 1 : 0;
-            matchCount += pattern.re2().lookingAt(anchored) ? 1 : 0;
-        }
-        return matchCount;
     }
 
     @Test

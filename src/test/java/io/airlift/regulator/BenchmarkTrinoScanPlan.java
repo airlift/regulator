@@ -205,11 +205,12 @@ public class BenchmarkTrinoScanPlan
                     expression = index == 0 ? "^foo" : "^foo$";
                 }
                 else if (workload.equals("DEEP_REJECTIONS")) {
-                    // Each pattern begins with a supported prefix and is rejected only by a later
-                    // construct: a folded K, an over-limit literal repeat, and a run whose
-                    // continuation overlaps the following literal.
+                    // Each pattern passes the shallow start check and is rejected only in the
+                    // builder, after a supported prefix: at an ASCII-folded literal, at an
+                    // over-limit literal repeat, and at a run whose continuation overlaps the
+                    // following literal.
                     expression = switch (index) {
-                        case 0 -> "(?i)^colou?r:([a-h]+);K$";
+                        case 0 -> "^colou?r:([a-h]+);(?i:x)$";
                         case 1 -> "^https?://([^/]+)/(?:ab){1,6}$";
                         default -> "^https?://([^/]+)/([a-z]+)abc$";
                     };
@@ -287,10 +288,10 @@ public class BenchmarkTrinoScanPlan
                 else if (workload.equals("DEEP_REJECTIONS")) {
                     source = switch (plan) {
                         case 0 -> switch ((row / count) % 4) {
-                            case 0 -> "colour:bag;k";
-                            case 1 -> "COLOR:ABC;K";
+                            case 0 -> "colour:bag;x";
+                            case 1 -> "color:abc;X";
                             case 2 -> "color:bag;\u212A";
-                            default -> "color:bag;x";
+                            default -> "color:bag;z";
                         };
                         case 1 -> "https://" + host + "/" + switch ((row / count) % 4) {
                             case 0 -> "ab";

@@ -79,13 +79,13 @@ import static java.lang.reflect.AccessFlag.PUBLIC;
 import static java.lang.reflect.AccessFlag.STATIC;
 import static java.util.Objects.requireNonNull;
 
-/// Compiles the case-sensitive [ScanPlan] of one pattern to a hidden class in this
-/// package. The attempt loop becomes straight-line code with a label per operation, with the plan's
-/// literals, slots, and branch targets as constants; retries keep the interpreter's stack encoding
-/// in locals and resume through a switch over the saved operation index. Around it, the class
-/// holds the candidate search of an unanchored plan. The class of a Trino pattern extends
-/// [TrinoRegexp.CompiledScanTrinoRegexp] and declares a public entry for each operation the
-/// pattern routes to the plan, so the pattern a caller holds is an instance of it.
+/// Compiles the [ScanPlan] of one pattern to a hidden class in this package. The attempt loop
+/// becomes straight-line code with a label per operation, with the plan's literals, slots, and
+/// branch targets as constants; retries keep the interpreter's stack encoding in locals and resume
+/// through a switch over the saved operation index. Around it, the class holds the candidate search
+/// of an unanchored plan. The class of a Trino pattern extends
+/// [TrinoRegexp.CompiledScanTrinoRegexp] and declares a public entry for each operation the pattern
+/// routes to the plan, so the pattern a caller holds is an instance of it.
 ///
 /// An RE2, Java, or Rust pattern gets a smaller class from the same attempt loop: a pattern
 /// class, which extends its language's `CompiledScan…` class, such as
@@ -148,12 +148,12 @@ final class ScanKernelGenerator
     }
 
     /// Where each Trino operation of a pattern runs, decided once when the pattern compiles. An
-    /// operation runs on the generated class exactly when [TrinoRegexp] would run it on the
-    /// case-sensitive scan plan, or would hand a short boolean `contains` or `count` to the
-    /// ordinary engine (see [CompiledPattern#usesOrdinaryShortBooleanMatchForDiagnostics()]), a
-    /// route that avoids the interpreter's per-operation dispatch, which the generated class does
-    /// not have. Only `contains` can keep another route, a retained literal kernel; every other
-    /// operation reaches the plan.
+    /// operation runs on the generated class exactly when [TrinoRegexp] would run it on the scan
+    /// plan, or would hand a short boolean `contains` or `count` to the ordinary engine (see
+    /// [CompiledPattern#usesOrdinaryShortBooleanMatchForDiagnostics()]), a route that avoids the
+    /// interpreter's per-operation dispatch, which the generated class does not have. Only
+    /// `contains` can keep another route, a retained literal kernel; every other operation reaches
+    /// the plan.
     ///
     /// @param contains whether full-Slice find reaches the plan rather than a retained literal kernel
     /// @param count how count reaches the plan
@@ -166,12 +166,11 @@ final class ScanKernelGenerator
             requireNonNull(count, "count is null");
         }
 
-        /// Returns the routes of a pattern compiled to the base [TrinoRegexp], or `null`
-        /// when it has no case-sensitive scan plan, can match empty, or an operation other than
-        /// `contains` would skip it.
+        /// Returns the routes of a pattern compiled to the base [TrinoRegexp], or `null` when it
+        /// has no scan plan, can match empty, or an operation other than `contains` would skip it.
         static TrinoRoutes of(TrinoCompiledPattern pattern)
         {
-            ScanPlan plan = pattern.caseSensitiveScanPlan();
+            ScanPlan plan = pattern.scanPlan();
             // No pattern with a plan can match empty, and the generated entries rely on it, as
             // each match loop resumes its search at the previous match end.
             if (plan == null || pattern.canMatchEmpty()) {
@@ -227,7 +226,7 @@ final class ScanKernelGenerator
             requireNonNull(count, "count is null");
         }
 
-        /// Returns the routes of `pattern`, which must have a case-sensitive scan plan.
+        /// Returns the routes of `pattern`, which must have a scan plan.
         ///
         /// @throws IllegalArgumentException if the pattern can match empty, which no pattern with
         ///         a plan can: the generated entries rely on it, as count resumes each search at
@@ -238,7 +237,7 @@ final class ScanKernelGenerator
             if (pattern.canMatchEmpty()) {
                 throw new IllegalArgumentException("a pattern that can match empty has no generated class");
             }
-            ScanPlan plan = requireNonNull(pattern.caseSensitiveScanPlan(), "pattern has no case-sensitive scan plan");
+            ScanPlan plan = requireNonNull(pattern.scanPlan(), "pattern has no scan plan");
             return new PatternRoutes(
                     pattern,
                     plan,
@@ -308,13 +307,13 @@ final class ScanKernelGenerator
         return unit.classfile(unit.primaryType());
     }
 
-    /// Generates and defines the pattern class of an RE2, Java, or Rust `pattern` for its
-    /// case-sensitive scan plan, and returns the copy of `pattern` that is an instance of it. The
-    /// class extends `superclass`, the language's `CompiledScan…` class, whose copy constructor
-    /// takes the language's scan-plan shape class, the superclass of `superclass`; the generated
-    /// constructor has the same type and passes its argument to it. Its entries follow the
-    /// pattern's [PatternRoutes]. Failures propagate, including the refusal of a pattern that can
-    /// match empty.
+    /// Generates and defines the pattern class of an RE2, Java, or Rust `pattern` for its scan
+    /// plan, and returns the copy of `pattern` that is an instance of it. The class extends
+    /// `superclass`, the language's `CompiledScan…` class, whose copy constructor takes the
+    /// language's scan-plan shape class, the superclass of `superclass`; the generated constructor
+    /// has the same type and passes its argument to it. Its entries follow the pattern's
+    /// [PatternRoutes]. Failures propagate, including the refusal of a pattern that can match
+    /// empty.
     static <T extends CompiledPattern> T generateCompiledScanPattern(CompiledPattern pattern, Class<T> superclass)
     {
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
@@ -444,7 +443,6 @@ final class ScanKernelGenerator
                 case LITERAL, OPTIONAL, RUN, RE2_RUN, RE2_SET_RUN, SAVE, FORK -> true;
                 case END -> attempt != Attempt.PARTIAL;
                 case RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
             };
             if (!supported) {
                 throw new IllegalArgumentException("%s scan kernel cannot run %s".formatted(attempt, step.kind()));
@@ -596,7 +594,6 @@ final class ScanKernelGenerator
                         .then(groups.setElement(constantInt(step.slot()), cursor.subtract(base)))
                         .build());
                 case FORK -> emitPush(index);
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> throw new IllegalStateException("unexpected " + step.kind());
             }
         }
 
@@ -931,9 +928,6 @@ final class ScanKernelGenerator
 
         private void defineClass(String className)
         {
-            if (plan.usesAsciiFoldedExecutor()) {
-                throw new IllegalArgumentException("ASCII-folded scan plans have no generated class");
-            }
             definition = ClassDefinition.define(ClassDesc.of(className)).access(PUBLIC, FINAL);
         }
 

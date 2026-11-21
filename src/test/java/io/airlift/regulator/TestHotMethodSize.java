@@ -141,7 +141,7 @@ public class TestHotMethodSize
     @Test
     public void testInnerLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("searchGatedFrom", "searchUngatedFrom")) {
+        for (String method : List.of("searchGatedFrom", "searchUngated")) {
             assertThat(codeLength(InnerLiteralSearch.class, method))
                     .as("InnerLiteralSearch.%s bytecode bytes", method)
                     .isPositive()
@@ -231,14 +231,13 @@ public class TestHotMethodSize
 
     /// Keeps each literal search small enough for C2 to inline:
     /// `LiteralSearchKernel.findSingleByte` into matchers such as InnerLiteralSearch,
-    /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into
-    /// `findContains`, `skipToLastContainsCandidate` into `findLastContains`, the generated
-    /// searches of a LIKE pattern into its `matchesMiddle`, and the finish of each one-byte scan
-    /// into the scan. Candidate verification is outside this size check.
+    /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into `findContains`,
+    /// the generated searches of a LIKE pattern into its `matchesMiddle`, and the finish of each
+    /// one-byte scan into the scan. Candidate verification is outside this size check.
     @Test
     public void testLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate", "skipToLastContainsCandidate")) {
+        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate")) {
             assertThat(codeLength(LiteralSearchKernel.class, method))
                     .as("LiteralSearchKernel.%s bytecode bytes", method)
                     .isPositive()
@@ -430,39 +429,14 @@ public class TestHotMethodSize
     }
 
     /// Keeps every folded pair scan on the selectors, so each takes the candidate-mask form the
-    /// platform selects: the folded prefix scan, the folded run behind a start literal, and the
-    /// folded inner literal search, whose long searches take the vector path. The SVE forms' own
-    /// tests call the kernels directly, so off SVE hosts a direct kernel call would go unnoticed.
+    /// platform selects: the folded prefix scan and the folded run behind a start literal. The SVE
+    /// forms' own tests call the kernels directly, so off SVE hosts a direct kernel call would go
+    /// unnoticed.
     @Test
     public void testFoldedPairScansCallSelectors()
     {
         assertCallsSelectors(Prog.class, "prefixAccelFoldCase");
         assertCallsSelectors(Prog.FoldedStartRun.class, "find");
-        assertCallsSelectors(InnerLiteralSearch.class, "findFoldedLiteralVector");
-        assertThat(calledMethods(InnerLiteralSearch.class, "findFoldedLiteral", InnerLiteralSearch.class))
-                .as("InnerLiteralSearch methods InnerLiteralSearch.findFoldedLiteral calls")
-                .contains("findFoldedLiteralVector");
-    }
-
-    /// Keeps the steps of the fixed-width matcher's block search small enough for C2 to inline
-    /// into its block loop: each class word, in either form, and the shift and AND of each
-    /// class's positions. The loop builds every block's words at one place for each class, so a
-    /// word C2 leaves out of line costs a call for each class of each 64-byte block.
-    @Test
-    public void testBlockSearchStepsFitInlineSize()
-    {
-        for (String method : List.of("members", "membersSve")) {
-            assertThat(codeLength(VectorBlockMaskScanner.class, method))
-                    .as("VectorBlockMaskScanner.%s bytecode bytes", method)
-                    .isPositive()
-                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
-        }
-        for (String method : List.of("blockMembers", "blockStarts", "startsFrom")) {
-            assertThat(codeLength(FixedWidthByteSpanMatcher.class, method))
-                    .as("FixedWidthByteSpanMatcher.%s bytecode bytes", method)
-                    .isPositive()
-                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
-        }
     }
 
     /// Keeps the SWAR folded prefix scans small enough for C2 to inline into the folded prefix
@@ -492,7 +466,7 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps the literal kernel's helpers that the unmasked and reverse pair scans call within
+    /// Keeps the literal kernel's helpers that the unmasked pair scan calls within
     /// MaxTrivialSize, so C2 inlines them however rarely a failed candidate reaches them. Where
     /// failed candidates are rare, as on Russian text, C2 left the 11-byte budget test out of line
     /// in findPair, and that one call in the scan made it rebuild the probe broadcasts at every
@@ -501,13 +475,11 @@ public class TestHotMethodSize
     @Test
     public void testPairScanKernelHelperSizes()
     {
-        for (String method : List.of("findPair", "findLast")) {
-            for (String callee : calledMethods(VectorPrefixScanner.class, method, LiteralSearchKernel.class)) {
-                assertThat(codeLength(LiteralSearchKernel.class, callee))
-                        .as("LiteralSearchKernel.%s bytecode bytes, called by VectorPrefixScanner.%s", callee, method)
-                        .isPositive()
-                        .isLessThanOrEqualTo(MAX_TRIVIAL_SIZE);
-            }
+        for (String callee : calledMethods(VectorPrefixScanner.class, "findPair", LiteralSearchKernel.class)) {
+            assertThat(codeLength(LiteralSearchKernel.class, callee))
+                    .as("LiteralSearchKernel.%s bytecode bytes, called by VectorPrefixScanner.findPair", callee)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_TRIVIAL_SIZE);
         }
         assertThat(calledMethods(VectorPrefixScanner.class, "findPairMasked", LiteralSearchKernel.class).stream()
                 .filter(callee -> codeLength(LiteralSearchKernel.class, callee) > MAX_TRIVIAL_SIZE))
@@ -548,16 +520,6 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(419);
-        assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
-                .as("VectorPrefixScanner.findLast bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(1001);
-        // The literal set scan runs the same loop under the same rules, capped at the size it was
-        // added at.
-        assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
-                .as("VectorPrefixScanner.findLiteralSet bytecode bytes")
-                .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(517);
     }
 
     /// Keeps the many-match search's byte scan larger than FreqInlineSize, so C2 compiles it on its
@@ -622,7 +584,7 @@ public class TestHotMethodSize
                 Map.entry("searchForward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean pairedSearch, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardAbsolutePointers", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int startOffset, int initialMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardContinuation", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, int initialMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
-                Map.entry("searchForwardScanAcceleration", "DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, byte[] byteCandidates, int byteScanSet, int byteCandidateOffset"),
+                Map.entry("searchForwardScanAcceleration", "DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, byte[] byteCandidates, int byteScanSet, int scanKind"),
                 Map.entry("searchForwardPrefixAccelSingleByte", "DfaInstance dfa, CacheTables tables, Prog prog, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardAnchoredLongPrefixInt", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardSampledSelfLoops", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch"),
@@ -630,10 +592,6 @@ public class TestHotMethodSize
                 Map.entry("searchForwardPairsAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
                 Map.entry("searchForwardPairsAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardPairsFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
-                Map.entry("searchForwardPairsFlat", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int textBegin, int textEnd, int ctxEnd, int startOffset, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsFlatAfterMiss", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, long pairedTransition, boolean endMatch, boolean wantEarliestMatch, boolean countRecordsPairedMatch"),
-                Map.entry("searchForwardPairsFlatAfterMatch", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, long pairedTransition, boolean endMatch, boolean wantEarliestMatch"),
-                Map.entry("searchForwardPairsFlatFromState", "DfaInstance dfa, CacheTables tables, byte[] bytes, int resultBegin, int position, int textEnd, int ctxEnd, int stateOffset, int lastMatchBoundary, boolean endMatch, boolean wantEarliestMatch"),
                 Map.entry("searchForwardCountSelfLoopScan", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int contextEnd, int startOffset"),
                 Map.entry("searchBackward", "DfaInstance dfa, CacheTables tables, byte[] bytes, int textBegin, int textEnd, int ctxBegin, int startOffset, boolean startIsMatch, boolean endMatch, boolean wantEarliestMatch, int maximumBytes"),
                 Map.entry("searchAnchoredCandidate", "CandidateStartCursor cursor, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int candidate"),
@@ -649,36 +607,32 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps the pair loops decoding their own misses, where C2 inlines the decode on the loop's
-    /// profile. A miss method runs once per search and, once its loop compiles, only inlined
-    /// there, so its own profile stays immature; a decode left out of line there can keep the
-    /// loop's position in a stack slot on x86.
+    /// Keeps the pair loop decoding its own misses, where C2 inlines the decode on the loop's
+    /// profile. A miss method runs once per search and, once its loop compiles, only inlined there,
+    /// so its own profile stays immature; a decode left out of line there can keep the loop's
+    /// position in a stack slot on x86.
     @Test
     public void testPairLoopsDecodeTheirOwnMisses()
     {
-        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
-            assertThat(calledMethods(Dfa.class, loop, Dfa.class))
-                    .as("Dfa methods Dfa.%s calls", loop)
-                    .contains("decodePairedTransition");
-            assertThat(calledMethods(Dfa.class, loop + "AfterMiss", Dfa.class))
-                    .as("Dfa methods Dfa.%sAfterMiss calls", loop)
-                    .doesNotContain("decodePairedTransition");
-        }
+        assertThat(calledMethods(Dfa.class, "searchForwardPairs", Dfa.class))
+                .as("Dfa methods Dfa.searchForwardPairs calls")
+                .contains("decodePairedTransition");
+        assertThat(calledMethods(Dfa.class, "searchForwardPairsAfterMiss", Dfa.class))
+                .as("Dfa methods Dfa.searchForwardPairsAfterMiss calls")
+                .doesNotContain("decodePairedTransition");
     }
 
-    /// Keeps the pair loops and their miss methods ending in the one-byte continuation, which
-    /// measures its result from `resultBegin` itself. A position read after an out-of-line
-    /// one-byte search, to offset its result, can keep the loop's position in a stack slot on x86.
+    /// Keeps the pair loop and its miss method ending in the one-byte continuation, which measures
+    /// its result from `resultBegin` itself. A position read after an out-of-line one-byte search,
+    /// to offset its result, can keep the loop's position in a stack slot on x86.
     @Test
     public void testPairLoopExitsUseContinuation()
     {
-        for (String loop : List.of("searchForwardPairs", "searchForwardPairsFlat")) {
-            for (String method : List.of(loop, loop + "AfterMiss")) {
-                assertThat(calledMethods(Dfa.class, method, Dfa.class))
-                        .as("Dfa methods Dfa.%s calls", method)
-                        .contains("searchForwardContinuation")
-                        .doesNotContain("searchForward");
-            }
+        for (String method : List.of("searchForwardPairs", "searchForwardPairsAfterMiss")) {
+            assertThat(calledMethods(Dfa.class, method, Dfa.class))
+                    .as("Dfa methods Dfa.%s calls", method)
+                    .contains("searchForwardContinuation")
+                    .doesNotContain("searchForward");
         }
     }
 
@@ -739,15 +693,6 @@ public class TestHotMethodSize
                         .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
             }
         }
-    }
-
-    /// Keeps the literal-neighbor matcher's find, which a full-Slice find of its pattern runs on
-    /// every input, small enough for C2 to inline into its route, and caps it at its size with the
-    /// one-byte literal's density sample. Raise the limit only after measuring the find again.
-    @Test
-    public void testLiteralNeighborFindStaysAtMeasuredSize()
-    {
-        assertThat(codeLength(LiteralNeighborMatcher.class, "find")).as("LiteralNeighborMatcher.find bytecode bytes").isPositive().isLessThanOrEqualTo(205);
     }
 
     /// Keeps the RE2 run reader's ASCII entry, which a short run such as a quoted field's takes on

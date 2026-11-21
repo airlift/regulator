@@ -23,10 +23,8 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.IntFunction;
-import java.util.function.LongFunction;
 
 import static io.airlift.slice.SizeOf.sizeOf;
-import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -130,10 +128,6 @@ public class TestUpstreamCompileMemoryBudget
         assertRemainingMemoryAssignedToDfa("abcabd", sizeOf(new int[7]));
         // A short prefix whose first byte does not recur shares one table and is charged nothing.
         assertRemainingMemoryAssignedToDfa("abcdef", 0);
-        // With the Vector API, alternatives past such a prefix keep their literal set where the
-        // budget leaves the forward DFAs their minimum beside it, charged as the array of its two
-        // literals.
-        assertRemainingMemoryAssignedToDfa("fn is_|fn as_", 1 << 20, VectorSupport.isAvailable() ? sizeOfObjectArray(2) + 2 * sizeOf(new byte[6]) : 0);
 
         // Compiling an exact literal configures its prefix again, which returns the first shift
         // table's charge before charging the second. A third of the budget goes to the reverse
@@ -183,30 +177,6 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(321);
         assertThat(compiled.find(Slices.utf8Slice("x" + literal.substring(1) + "b"))).isFalse();
-    }
-
-    @Test
-    public void testPrefixLiteralSetYieldsToForwardShare()
-    {
-        // The prefix scan's literal set, `abx_` and `aby_` paired on `a` and `_`, is built only
-        // with the Vector API and only saves work. At the least budget at which the lazy loops
-        // compile, the forward share has no room left for it, so the prefix keeps its pair scan
-        // and the least budget is the same with the Vector API as without it, as is the budget a
-        // rejection reports. A comfortable budget keeps the set.
-        String loops = "(?:(?:(?:(?:b?)*?){8})*?)+";
-        Slice pattern = Slices.utf8Slice("abx_" + loops + "|aby_" + loops);
-        assertPrefixLiteralSetYields(maxMemory -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory)), 27_257);
-        assertPrefixLiteralSetYields(maxMemory -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)), 12_779);
-
-        // The set is decided after OnePass and every route, so at the least budget at which the
-        // forward DFAs keep their minimum it takes none of their memory and is dropped. Charged
-        // first, it left the DFAs short at budgets that hold their minimum without it: beside
-        // OnePass in the first pattern, and beside the literal alternation route in the second.
-        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_(\\w+)|fn as_(\\w+)", false);
-        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_x|fn as_y", false);
-        // The bounded repeats' position automaton is such a route: at the least budget at which
-        // it is kept beside the forward DFAs' minimum, the set is dropped.
-        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_\\w{1,8}|fn as_\\w{1,8}", true);
     }
 
     @Test
@@ -346,6 +316,8 @@ public class TestUpstreamCompileMemoryBudget
     {
         String anchoredPrefix = "^" + "a".repeat(5000) + "(?:b?c?)*d";
         String nestedOptional = "(?:(?:(?:(?:b?)*?){64})*?)+";
+        String lazyLoops = "(?:(?:(?:(?:b?)*?){8})*?)+";
+        String prefixPair = "abx_" + lazyLoops + "|aby_" + lazyLoops;
         String fixedWidth = "(?:[é中][a-z]){127}[0-9]{2}";
         String fruits = "apple|banana|cherry|durian|elderberry";
         String words = randomWords(65, 7);
@@ -381,10 +353,15 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.RE2, nestedOptional, 620_549, 620_549, 100_000),
                 // The flattened program fits but leaves too little for a long prefix's shift table.
                 new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 187_385, 187_385, 185_429, 187_384),
+                // Alternatives that share a prefix byte and the underscore past it, beside nested
+                // lazy loops, need the same budget with the Vector API and without it.
+                new RejectedPattern("prefix pair", Language.RE2, prefixPair, 12_779, 27_257, 1),
+                new RejectedPattern("prefix pair", Language.RE2, prefixPair, 27_257, 27_257, 27_256),
+                new RejectedPattern("prefix pair", Language.RUST, prefixPair, 12_779, 12_779, 1, 12_778),
                 // A compact counter in place of a program measures exactly what it needs. A
                 // budget too small for the counter compiles the program, so a sparse class whose
                 // counter's bitset reaches U+100000 reports what its smaller program needs.
-                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 53_987, 53_987, 1, 8_000),
+                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 53_963, 53_963, 1, 8_000),
                 new RejectedPattern("sparse high class", Language.RE2, sparseHighClass, 13_211, 13_211, 1, 2_000),
                 new RejectedPattern("sparse high class", Language.JAVA, sparseHighClass, 13_211, 13_211, 1, 2_000),
                 new RejectedPattern("sparse high class", Language.RUST, sparseHighClass, 13_211, 13_211, 1, 2_000),
@@ -400,21 +377,24 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
                 new RejectedPattern("65 words", Language.TRINO, words, 9_227, 9_227, 1, 2_000),
                 new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_843, 269_843, 1_000, 200_000),
-                new RejectedPattern(Language.TRINO, fixedWidth, 12_805, 12_805, 1, 2_000),
+                new RejectedPattern(Language.TRINO, fixedWidth, 12_793, 12_793, 1, 2_000),
                 new RejectedPattern(Language.RE2, fixedWidth, 100_691, 100_691, 1, 2_000),
+                // A fixed-width pattern with no position rare enough to scan for, such as Trino's
+                // ASCII words and spaces, keeps no matcher and needs its program's budget.
+                new RejectedPattern("words and spaces", Language.TRINO, "\\w{5}\\s\\w{6}\\s\\w{7}", 14_831, 14_831, 1, 14_830),
                 // 255 copies of a class of supplementary code points need more instructions than
                 // any program holds, but Trino's fixed-width matcher compiles them.
-                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 796_717, 796_717, 2_000),
+                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 796_705, 796_705, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
-                new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_646, 1),
-                new RejectedPattern(Language.SET, List.of("foo"), 6_646, 6_646, 4_000),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 3_768, 7_828, 1),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 7_828, 7_828, 5_000),
+                new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_638, 1),
+                new RejectedPattern(Language.SET, List.of("foo"), 6_638, 6_638, 4_000),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 3_768, 7_820, 1),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 7_820, 7_820, 5_000),
                 // The many-match initialization gate omits match IDs; allocated states still charge
                 // them.
-                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 123_299, 123_299, 110_000),
-                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 74_616, 122_630, 2_000, 50_000),
-                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 30_422, 51_046, 20_000));
+                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 123_291, 123_291, 110_000),
+                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 74_616, 122_622, 2_000, 50_000),
+                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 30_422, 51_038, 20_000));
         for (RejectedPattern rejection : rejections) {
             for (long maxMemory : rejection.maxMemories()) {
                 assertThatThrownBy(() -> rejection.compile(maxMemory))
@@ -570,55 +550,6 @@ public class TestUpstreamCompileMemoryBudget
             }
         }
         return compiled;
-    }
-
-    private static void assertPrefixLiteralSetYields(LongFunction<CompiledPattern> compile, long leastMaxMemory)
-    {
-        assertThatThrownBy(() -> compile.apply(leastMaxMemory - 1))
-                .isInstanceOfSatisfying(RegexpCompileMemoryLimitException.class, exception -> assertThat(exception.requiredMaxMemoryBytes()).hasValue(leastMaxMemory));
-        assertThat(compile.apply(leastMaxMemory).forwardProgramForDiagnostics().prefixAccelStrategy(1_024))
-                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE);
-        assertThat(compile.apply(1 << 20).forwardProgramForDiagnostics().prefixAccelStrategy(1_024))
-                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
-    }
-
-    private static void assertPrefixLiteralSetYieldsToDfaMinimum(String pattern, boolean keepsPositionNfa)
-    {
-        LongFunction<Prog> forwardProgram = maxMemory -> Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
-        long low = 1;
-        long high = 1 << 20;
-        while (low < high) {
-            long middle = (low + high) >>> 1;
-            if (leavesDfaMinimum(forwardProgram, middle)) {
-                high = middle;
-            }
-            else {
-                low = middle + 1;
-            }
-        }
-        Prog program = forwardProgram.apply(low);
-        for (long limit = low + (1 << 12); keepsPositionNfa && program.positionNfa() == null && low < limit; ) {
-            program = forwardProgram.apply(++low);
-        }
-        assertThat(program.leavesDfaMinimum(0)).isTrue();
-        if (keepsPositionNfa) {
-            assertThat(program.positionNfa()).isNotNull();
-        }
-        assertThat(program.isOnePass()).isTrue();
-        assertThat(program.prefixAccelStrategy(1_024))
-                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE);
-        assertThat(forwardProgram.apply(1 << 20).prefixAccelStrategy(1_024))
-                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
-    }
-
-    private static boolean leavesDfaMinimum(LongFunction<Prog> forwardProgram, long maxMemory)
-    {
-        try {
-            return forwardProgram.apply(maxMemory).leavesDfaMinimum(0);
-        }
-        catch (RegexpCompileMemoryLimitException e) {
-            return false;
-        }
     }
 
     private static void assertLargestGroupsPlanBoundedPasses(long maxMemory, int groups, IntFunction<String> pattern)

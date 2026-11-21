@@ -197,22 +197,49 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
-    public void testLiteralSetPrefixScanMatchesJdk()
+    public void testClassRepeatBeforeByteMatchesJdk()
     {
-        // Alternatives that share only a short prefix take the prefix literal set scan on long text,
-        // which skips occurrences of the prefix that begin neither alternative. The filler holds
-        // such occurrences, some with the byte the scan pairs with the prefix's `f`, `_` for the
-        // first pattern and `s` for the second, and real matches of the second pattern's `fn as`.
+        Random random = new Random(98271);
+        String[] alphabet = {"a", "b", "q", "u", "x", "z", "δ", "💰", "\uFFFD", "\n"};
+        for (int repeat : List.of(3, 13, 23, 80)) {
+            String expression = "[a-q][^u-z]{" + repeat + "}x";
+            JavaRegexp pattern = JavaRegexp.compile(utf8Slice(expression));
+            Pattern comparator = Pattern.compile(expression);
+            for (int trial = 0; trial < 100; trial++) {
+                StringBuilder value = new StringBuilder();
+                for (int index = 0; index < 60; index++) {
+                    value.append(alphabet[random.nextInt(alphabet.length)]);
+                }
+                value.append("a").append("δ".repeat(repeat)).append("x");
+                value.append("a").append("b".repeat(repeat)).append("x");
+                String text = value.toString();
+                Slice padded = utf8Slice("!" + text + "?");
+                RegexpMatcher actual = pattern.matcher(padded).reset(padded, 1, padded.length() - 1);
+                Matcher expected = comparator.matcher(text);
+                int count = 0;
+                while (expected.find()) {
+                    count++;
+                    assertThat(actual.find()).isTrue();
+                    assertThat(actual.start()).isEqualTo(1 + utf8Slice(text.substring(0, expected.start())).length());
+                    assertThat(actual.end()).isEqualTo(1 + utf8Slice(text.substring(0, expected.end())).length());
+                }
+                assertThat(actual.find()).isFalse();
+                assertThat(pattern.count(utf8Slice(text))).isEqualTo(count);
+                assertThat(pattern.find(utf8Slice(text))).isEqualTo(count > 0);
+                assertThat(pattern.matches(utf8Slice(text))).isEqualTo(expected.reset().matches());
+                assertThat(pattern.lookingAt(utf8Slice(text))).isEqualTo(expected.reset().lookingAt());
+            }
+        }
+    }
+
+    @Test
+    public void testSharedShortPrefixAlternativesMatchJdk()
+    {
+        // Alternatives that share only a short prefix, in filler that holds occurrences of the
+        // prefix that begin neither alternative, and real matches of the second pattern's `fn as`.
         String decoys = "fn new() fx is_ fn ais_ fn is fn as ".repeat(64);
         for (String pattern : List.of("fn is_(\\w+)|fn as_(\\w+)", "fn (is)e|fn (as)")) {
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
-            Prog.PrefixAccelStrategy strategy = regexp.forwardProgramForDiagnostics().prefixAccelStrategy(decoys.length());
-            if (VectorSupport.isAvailable()) {
-                assertThat(strategy).as(pattern).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
-            }
-            else {
-                assertThat(strategy).as(pattern).isNotEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
-            }
             Pattern jdk = Pattern.compile(pattern);
             for (String end : List.of("", "fn is", "fn as", "fn ise", "fn as_", "fn is_x")) {
                 String input = "fn as_1 " + decoys + "fn is_ab fn ise fn as" + decoys + end;
