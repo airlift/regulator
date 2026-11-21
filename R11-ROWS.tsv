@@ -1,0 +1,3 @@
+cell	row_id	language	operation	mode	platform	legs	cut_tier	note
+E	language-bulk/curated/02-literal-alternate/sherlock-en/execute	trino	execute	native	r8i	main,q3,q4,l4f,s8,f4,s3,f3,f5,f7,p2	never	item 3, early chain
+L	language-bulk/curated/02-literal-alternate/sherlock-zh/execute	java	execute	native	r8i	p2,l8,e3f,l9,k2,k1v,pmr,c64,flag	never	item 3, late chain

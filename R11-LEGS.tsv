@@ -1,0 +1,20 @@
+leg	sha	subject	jvm_extra	note
+main	5fc520136a94bc3d5b5751c6888482c848236f08	Say when count takes the group-zero span search	-	base: origin/main
+q3	4ac6b6de162b06d95266d6d0514c8321acb73ad8	Drop the required suffix search-end bound	-	src/main identical to round 10 stack commit 4f12bf8131e1d7920c7e79fc10435ca6d070db32
+q4	82f8c7b6fe46f6ac5825ee6921fd6f45e77d8f83	Drop the required literal beside another route	-	src/main identical to round 10 stack commit 06909267abd9e62e042ffbe07ef4eb74b5390a2e
+l4f	5e471867f6951f35eff7babc5c62a1807214c941	Drop the folded inner literal search	-	src/main identical to round 10 stack commit b557e610e1c728e70c965064547b5c1d747cb7ac
+s8	8192bfbfad2ed8fd7906a9e548cba827b63e2bb3	Drop the fixed-distance byte scan	-	src/main identical to round 10 stack commit 28bae426c76f836ba4dad3fef64fc94e9cee7d8c
+f4	2049ad51f0a10414ca568e017543f56b00a73d63	Drop the short-search fixed-width matcher	-	src/main identical to round 10 stack commit b9dc6a13e67caca1bc2fedf436cf06fe698fe71c
+s3	433af789d2b7460cacce9f9598baceb5f89dd7f5	Drop the prefix literal set	-	src/main identical to round 10 stack commit 3bcac08cf7fc37b2bc8b90025eff6c83aec36a8b
+f3	cb30ed1584e4803252c3659a21fec8f7b69b1f7f	Drop the fixed-width block search	-	src/main identical to round 10 stack commit d9de709f54bfe97a6a7d7b82e36f74248822a257
+f5	e7497b841ba86d192992d2a060333e9e7835af5a	Drop the disjoint suffix-repeat matcher	-	src/main identical to round 10 stack commit 885452cf1360d49ad971b84d17004dcade9ddd42
+f7	0174c585fa96bbfdda1e25e0b8e3453bc813bdde	Drop the Trino single-byte repeat matcher	-	src/main identical to round 10 stack commit 2a5b8bb2b212a9721505ef9dde334805ab309465
+p2	e1e77405f50276a9e88f45aca64fe71e2f94611a	Drop the ASCII-folded scan plans	-	src/main identical to round 10 stack commit 22e0db206bd6612834e0a523be3d317328145236
+l8	9df3c6b73cf7b1e7c4c8431613b994bef11e6f5e	Drop the literal-neighbor find plan	-	src/main identical to round 10 stack commit c0d3732ef7bf3107118063734ebc41e413c12973
+e3f	ab0961420ea7551a7568bcb94955ec75b2130910	Drop the flat paired DFA table	-	src/main identical to round 10 stack commit eda089bdba250c259c08a4765ac49ae16b32a5bb
+l9	b55a3f080d856ad8831f5e8b3edb560762baa53c	Drop the lowered final-line program	-	src/main identical to round 10 stack commit 96a0730ea5014468009cd05a45e4f0f7fed7f04c
+k2	5982b60b40fe922b5249de957a8d3753615b2c8b	Drop the compact counter's count DFA	-	src/main identical to round 10 stack commit 9c0488d57621d857a76dbf92960f3cfd4a2e30c1
+k1v	73f2349ec7007301eed9093533e0da58402b007b	Drop the class counter's long-run vector scan	-	src/main identical to round 10 stack commit 46229c10c16576261bbb58b62eaf25b4192062ff
+pmr	4ccc53926d23d8e74658c48118653109f4961d7e	Drop the unused possible match range	-	src/main identical to round 10 stack commit 56f8ee9d42c29ffa04549fee8c77e0661ceb8495
+c64	b6cba02feac8cab119ca14725a8865e375ae348f	Share the 64-byte short-input thresholds	-	src/main identical to round 10 stack commit 2169457d6873208b7ac5f409664ce16519e89d9b
+flag	57009ca226d75b17c706a8fd2399e101544cd503	Drop the always-on byte scan productivity switch	-	src/main identical to round 10 stack commit 94a6bd9a14672ac9484f18823246aa41fccba443; head of user/dain/sweep-removals
