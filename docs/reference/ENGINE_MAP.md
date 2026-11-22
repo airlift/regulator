@@ -1038,10 +1038,16 @@ the program and text position.
   limit; the [direct capture route](#the-ordinary-engine) on 4 KiB and more;
   the anchored submatch route, where OnePass cannot serve the requested slots;
   and position-automaton windows whose bitmap fits 8 KiB.
+- **Class loops:** a list that begins with byte ranges leading back to it,
+  as a greedy `[a-z]*` or `\w+` compiles to, is read in one scan
+  (`BitState.BitStateImpl.runClassLoop`) wherever a search enters it, in every
+  search above.
 - **Falls back:** the position automaton or the Pike NFA.
-- **Catalog:** [OnePass, BitState, and NFA](OPTIMIZATION_CATALOG.md#onepass-bitstate-and-nfa),
+- **Catalog:** [BitState class loops](OPTIMIZATION_CATALOG.md#bitstate-class-loops),
+  [OnePass, BitState, and NFA](OPTIMIZATION_CATALOG.md#onepass-bitstate-and-nfa),
   [RE2 optimizations used as ported](OPTIMIZATION_CATALOG.md#re2-optimizations-used-as-ported).
-- **Decision:** [Bounded Direct BitState Capture](../../REGULATOR_DECISIONS.md#bounded-direct-bitstate-capture).
+- **Decision:** [Bounded Direct BitState Capture](../../REGULATOR_DECISIONS.md#bounded-direct-bitstate-capture),
+  [BitState Class Loops](../../REGULATOR_DECISIONS.md#bitstate-class-loops).
 
 #### Pike NFA
 

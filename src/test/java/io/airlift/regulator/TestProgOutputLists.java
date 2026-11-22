@@ -65,8 +65,10 @@ public class TestProgOutputLists
 
         // Each step BitState takes enters the list of its instruction's output, and an attempt
         // begins in the start instruction's list. Alt, alt-match, match and fail instructions get
-        // -1, since BitState never enters their outputs through a visited check.
+        // -1, since BitState never enters their outputs through a visited check. A step into a
+        // class loop holds the loop's mark, and the loop holds the list.
         short[] outputLists = prog.outputLists();
+        int[] classLoops = prog.bitStateClassLoops();
         assertThat(outputLists).hasSize(prog.size());
         assertThat(prog.startList()).isEqualTo(lists[prog.start()]).isNotNegative();
         for (int id = 0; id < prog.size(); id++) {
@@ -79,7 +81,12 @@ public class TestProgOutputLists
                 }
                 case ALT, ALT_MATCH, MATCH, FAIL -> -1;
             };
-            assertThat((int) outputLists[id]).as("instruction %s", id).isEqualTo(expected);
+            int actual = outputLists[id];
+            if (actual < Prog.NO_OUTPUT_LIST) {
+                int loop = Prog.BIT_STATE_CLASS_LOOP_MARK_BASE - actual;
+                actual = classLoops[loop * Prog.BIT_STATE_CLASS_LOOP_FIELDS + Prog.BIT_STATE_CLASS_LOOP_LIST];
+            }
+            assertThat(actual).as("instruction %s", id).isEqualTo(expected);
         }
     }
 }

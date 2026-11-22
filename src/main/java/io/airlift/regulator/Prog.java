@@ -20,6 +20,7 @@ import io.airlift.slice.Slices;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -27,6 +28,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -467,9 +469,14 @@ final class Prog
     private int listCount;
     // Each instruction's output list id, so BitState can index its visited set without decoding
     // the instruction first. Byte-range, capture, empty-width and no-op instructions hold the list
-    // they step to; -1 marks the others (alt-match, match, fail), whose outputs BitState never
-    // enters through a visited check. Null when the program has too many lists for BitState.
+    // they step to, or a class loop's mark; -1 marks the others (alt-match, match, fail), whose
+    // outputs BitState never enters through a visited check. Null when the program has too many
+    // lists for BitState.
     private short[] outputLists;
+    // The lists BitState reads in one scan, BIT_STATE_CLASS_LOOP_FIELDS ints each, and their byte
+    // tables; see markBitStateClassLoops. Null when the program has none.
+    private int[] bitStateClassLoops;
+    private byte[] bitStateClassLoopTables;
     // The list id of the start instruction, or -1 when the program cannot run BitState.
     private int startList;
     private int anchoredBitStateTextMaxSize;
@@ -948,6 +955,8 @@ final class Prog
                 SizeOf.sizeOf(instCount) +
                 SizeOf.sizeOf(bytemap) +
                 SizeOf.sizeOf(outputLists) +
+                SizeOf.sizeOf(bitStateClassLoops) +
+                SizeOf.sizeOf(bitStateClassLoopTables) +
                 SizeOf.sizeOf(onePassMatchCond) +
                 SizeOf.sizeOf(onePassStep) +
                 SizeOf.sizeOf(onePassMatchCapture) +
@@ -1104,11 +1113,46 @@ final class Prog
 
     /// Returns, for each instruction, the list id of its output, which BitState uses to index its
     /// visited set. Byte-range, capture, empty-width and no-op instructions hold the list they step
-    /// to; -1 marks the others (alt-match, match, fail), whose outputs BitState never enters
+    /// to, or, when that list is a class loop, [#BIT_STATE_CLASS_LOOP_MARK_BASE] less the loop's
+    /// index; -1 marks the others (alt-match, match, fail), whose outputs BitState never enters
     /// through a visited check. Null when the program cannot run BitState.
     short[] outputLists()
     {
         return outputLists;
+    }
+
+    /// Returns the program's class loops, [#BIT_STATE_CLASS_LOOP_FIELDS] ints each, or null when
+    /// it has none; see [#markBitStateClassLoops].
+    int[] bitStateClassLoops()
+    {
+        return bitStateClassLoops;
+    }
+
+    /// Returns the class loops' byte tables, 256 bytes each: 0 for a byte that leaves the loop,
+    /// [#BIT_STATE_CLASS_LOOP_MEMBER] for one that stays, and [#BIT_STATE_CLASS_LOOP_PUSHING_MEMBER]
+    /// for one that stays and pushes the loop's push instruction. Null when the program has no
+    /// class loop.
+    byte[] bitStateClassLoopTables()
+    {
+        return bitStateClassLoopTables;
+    }
+
+    int bitStateClassLoopCount()
+    {
+        return bitStateClassLoops == null ? 0 : bitStateClassLoops.length / BIT_STATE_CLASS_LOOP_FIELDS;
+    }
+
+    /// Returns [#outputLists()] with each class loop's mark replaced by the loop's list id, so a
+    /// search steps through the loop's instructions one at a time.
+    short[] outputListsWithoutClassLoopsForTesting()
+    {
+        short[] lists = outputLists.clone();
+        for (int id = 0; id < lists.length; id++) {
+            if (lists[id] < NO_OUTPUT_LIST) {
+                lists[id] = (short) bitStateClassLoops[(BIT_STATE_CLASS_LOOP_MARK_BASE - lists[id]) * BIT_STATE_CLASS_LOOP_FIELDS + BIT_STATE_CLASS_LOOP_LIST];
+            }
+        }
+        return lists;
     }
 
     /// Returns the list id of the start instruction, or -1 when the program cannot run BitState.
@@ -4558,6 +4602,12 @@ final class Prog
             }
         }
 
+        bitStateClassLoops = null;
+        bitStateClassLoopTables = null;
+        if (outputLists != null) {
+            markBitStateClassLoops(flattenedInstructions, flattenedIndexesByRoot, outputLists);
+        }
+
         // Remap start_unanchored and start.
         int startRootId;
         if (startUnanchored() == 0) {
@@ -4600,6 +4650,145 @@ final class Prog
 
     /// The lists the first three passes of flattening emit, the map from each list's root id to
     /// its first flattened instruction, the list count, and, when requested, the counts tests read.
+    // A class loop's fields in bitStateClassLoops: its list id; the instruction a search goes on
+    // with once a byte leaves the loop, 0 when the list ends with the loop; the instruction the
+    // loop pushes at each pushing member, 0 when it has none; its table's offset; the list a
+    // member steps through on its way back to the loop, -1 when it steps straight back; and the
+    // instruction pushed in that list, 0 when it has none.
+    static final int BIT_STATE_CLASS_LOOP_FIELDS = 6;
+    static final int BIT_STATE_CLASS_LOOP_LIST = 0;
+    static final int BIT_STATE_CLASS_LOOP_EXIT = 1;
+    static final int BIT_STATE_CLASS_LOOP_PUSH = 2;
+    static final int BIT_STATE_CLASS_LOOP_TABLE = 3;
+    static final int BIT_STATE_CLASS_LOOP_THROUGH_LIST = 4;
+    static final int BIT_STATE_CLASS_LOOP_THROUGH_PUSH = 5;
+    static final byte BIT_STATE_CLASS_LOOP_MEMBER = 1;
+    static final byte BIT_STATE_CLASS_LOOP_PUSHING_MEMBER = 2;
+    // outputLists marks the other opcodes with -1, and a step into class loop `i` with this
+    // base less `i`.
+    static final int NO_OUTPUT_LIST = -1;
+    static final int BIT_STATE_CLASS_LOOP_MARK_BASE = -2;
+
+    /// Marks the lists BitState reads in one scan. A list is a class loop when it begins with
+    /// byte ranges that lead back to the list itself. The ranges of a greedy `[a-z]*` step
+    /// straight back. Those of a greedy `[a-z]+` step to a second list, which begins with the
+    /// no-op that steps back for another round, ahead of whatever follows the repeat. Entered at
+    /// a position, the list takes a member byte through one of the ranges and is entered again
+    /// at the next position, until a byte that is no member reaches the instruction after the
+    /// ranges. BitState reads that run from the loop's table instead of decoding a range, and
+    /// the no-op, per member; see `BitState.BitStateImpl.runClassLoop`.
+    ///
+    /// The loop is the longest run of leading ranges that share no byte, so each member takes
+    /// one range, and whose hints name one instruction. A range's hint is the next instruction
+    /// of the list its bytes may also take, which a search pushes before it follows the range,
+    /// so the table records which members push it. A range that would break either rule ends the
+    /// loop and becomes the instruction the search goes on with. Each instruction that steps to
+    /// a class loop then holds the loop's mark in `outputLists` in place of the list's id.
+    private void markBitStateClassLoops(InstList instructions, int[] flattenedIndexesByRoot, short[] outputLists)
+    {
+        int[] loopsByRoot = null;
+        int[] loops = null;
+        byte[] tables = null;
+        int loopCount = 0;
+        int tableCount = 0;
+        Map<ByteBuffer, Integer> tableOffsets = null;
+        byte[] table = new byte[256];
+        for (int rootId = 1; rootId < listCount; rootId++) {
+            int head = flattenedIndexesByRoot[rootId];
+            long first = instructions.get(head);
+            if (instOpcode(first) != InstOp.BYTE_RANGE) {
+                continue;
+            }
+            int target = instOut(first);
+            int throughList = -1;
+            int throughPushed = 0;
+            if (target != head) {
+                long through = instructions.get(target);
+                if (instOpcode(through) != InstOp.NOP || instOut(through) != head) {
+                    continue;
+                }
+                throughList = outputLists[head];
+                throughPushed = instLast(through) ? 0 : target + 1;
+            }
+
+            int rangeCount = 0;
+            int pushed = 0;
+            for (int id = head; id < instructions.size(); id++) {
+                long word = instructions.get(id);
+                if (instOpcode(word) != InstOp.BYTE_RANGE || instOut(word) != target) {
+                    break;
+                }
+                int hint = instHint(word);
+                if (hint != 0 && pushed != 0 && pushed != id + hint) {
+                    break;
+                }
+                boolean sharesByte = false;
+                for (int c = 0; c <= 0xFF && !sharesByte; c++) {
+                    sharesByte = table[c] != 0 && instMatches(word, c);
+                }
+                if (sharesByte) {
+                    break;
+                }
+                for (int c = 0; c <= 0xFF; c++) {
+                    if (instMatches(word, c)) {
+                        table[c] = hint != 0 ? BIT_STATE_CLASS_LOOP_PUSHING_MEMBER : BIT_STATE_CLASS_LOOP_MEMBER;
+                    }
+                }
+                if (hint != 0) {
+                    pushed = id + hint;
+                }
+                rangeCount++;
+                if (instLast(word)) {
+                    break;
+                }
+            }
+
+            if (loops == null) {
+                loopsByRoot = new int[listCount];
+                loops = new int[4 * BIT_STATE_CLASS_LOOP_FIELDS];
+                tables = new byte[256];
+                tableOffsets = new HashMap<>();
+            }
+            else if (loops.length == loopCount * BIT_STATE_CLASS_LOOP_FIELDS) {
+                loops = Arrays.copyOf(loops, 2 * loops.length);
+            }
+            Integer tableOffset = tableOffsets.get(ByteBuffer.wrap(table));
+            if (tableOffset == null) {
+                tableOffset = 256 * tableCount;
+                if (tables.length == tableOffset) {
+                    tables = Arrays.copyOf(tables, 2 * tables.length);
+                }
+                System.arraycopy(table, 0, tables, tableOffset, 256);
+                tableOffsets.put(ByteBuffer.wrap(table.clone()), tableOffset);
+                tableCount++;
+            }
+            int last = head + rangeCount - 1;
+            int loop = loopCount * BIT_STATE_CLASS_LOOP_FIELDS;
+            loops[loop + BIT_STATE_CLASS_LOOP_LIST] = rootId;
+            loops[loop + BIT_STATE_CLASS_LOOP_EXIT] = instLast(instructions.get(last)) ? 0 : last + 1;
+            loops[loop + BIT_STATE_CLASS_LOOP_PUSH] = pushed;
+            loops[loop + BIT_STATE_CLASS_LOOP_TABLE] = tableOffset;
+            loops[loop + BIT_STATE_CLASS_LOOP_THROUGH_LIST] = throughList;
+            loops[loop + BIT_STATE_CLASS_LOOP_THROUGH_PUSH] = throughPushed;
+            // Zero is a root with no loop.
+            loopsByRoot[rootId] = loopCount + 1;
+            loopCount++;
+            Arrays.fill(table, (byte) 0);
+        }
+        if (loops == null) {
+            return;
+        }
+
+        for (int id = 0; id < outputLists.length; id++) {
+            int list = outputLists[id];
+            if (list > 0 && loopsByRoot[list] != 0) {
+                outputLists[id] = (short) (BIT_STATE_CLASS_LOOP_MARK_BASE - (loopsByRoot[list] - 1));
+            }
+        }
+        bitStateClassLoops = Arrays.copyOf(loops, loopCount * BIT_STATE_CLASS_LOOP_FIELDS);
+        bitStateClassLoopTables = Arrays.copyOf(tables, 256 * tableCount);
+    }
+
     private record EmittedLists(InstList instructions, int[] flattenedIndexesByRoot, int listCount, FlattenStructure structure) {}
 
     // The first three passes of flattening. Throws RegexpCompileMemoryLimitException as flatten

@@ -5449,6 +5449,47 @@ and a declined pick falls back to BitState and the other capture engines. On
 rebar's `unicode/overlapping-words/ascii`, a 119-instruction program, captures
 took 0.42x to 0.43x BitState's time on r9g and 0.32x to 0.33x on r8i.
 
+## BitState Class Loops
+
+Upstream's BitState takes a greedy run of a byte class one byte at a time.
+For each byte it decodes the list's ranges in order until one matches, pushes
+that range's hint, and enters the list again at the next position, which tests
+and sets one bit of the visited bitmap. A `+` adds a second list between: the
+ranges step to a list whose first instruction is a no-op back to them, so each
+byte also enters that list and pushes the instruction after the no-op. On
+`\w+` a lower-case letter costs three range decodes, a no-op decode, a push,
+and two visited checks.
+
+Flattening marks such lists as class loops, and a search that steps to one
+reads the run in `runClassLoop` instead. A list is a class loop when it begins
+with byte ranges that all step back to it, or all step to a list that begins
+with a no-op back to it. The loop is the longest run of leading ranges that
+share no byte and whose hints name one instruction, so a 256-entry table says
+of each byte whether it stays in the loop and whether it pushes. Every
+instruction that steps to the list holds the loop's mark in place of the list's
+id, which the search has already loaded, so other steps pay one compare.
+
+The loop keeps upstream's work exactly. It enters the same lists at the same
+positions and pushes the same jobs in the same order, so the visited bitmap,
+the job stack, and its capacity bound are unchanged, and
+`TestBitStateClassLoops` compares the bitmaps of both forms. A list's visited
+bits are consecutive, so the loop counts the unvisited positions left in the
+bitmap word, reads members no farther than that, and sets their bits with one
+store. Reading the whole run first and marking it afterward would not be
+linear: after a greedy `.*` backs off, a search enters the list at each
+position of a run from the right, and each entry would read to the run's end
+before finding the next position visited. With a `+`, the pushes after the
+no-op have nothing between them when the ranges push nothing, so they are one
+run of one job.
+
+Lazy repeats, whose list tries what follows first, and ranges that reach the
+list through a capture are not class loops. A UTF-8 class loops on its one-byte
+members and leaves for the ordinary steps at any other byte. The tables are
+shared between loops of one class and counted in the program's retained size:
+24 bytes a loop and 256 bytes a distinct class.
+
+Its measurements are pending.
+
 ## Matcher-Owned Capture Workspaces
 
 `RegexpMatcher` owns reusable OnePass, BitState, NFA, and position-automaton
