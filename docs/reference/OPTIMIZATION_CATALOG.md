@@ -1686,12 +1686,16 @@ capture work skipped for boolean and group-zero calls is in
   loop as a list of the flattened program with a byte table, the two-list
   form of `+`, and marking a run's visited bits a bitmap word at a time
   ([design][d-bitstate-loops]); base RE2 [O-BIT-001], [O-BIT-004].
-- **Where:** `Prog.markBitStateClassLoops`, `BitState.BitStateImpl.runClassLoop`
+- **Where:** `Prog.markBitStateClassLoops`, `Prog.decideBitStateClassLoops`,
+  `BitState.BitStateImpl.runClassLoop`
 - **Applies when:** A BitState search enters a list that begins with byte
   ranges leading back to it: the list of a greedy `*` or `+` of a byte class,
   or of the one-byte members of a UTF-8 class. The ranges must share no byte,
   and those with a hint must name one instruction; a range that breaks either
-  rule, and every multi-byte member, leaves the loop for the ordinary steps
+  rule, and every multi-byte member, leaves the loop for the ordinary steps.
+  A budgeted program keeps its loops only where their tables fit the DFA
+  allowance after every other charge and leave each forward DFA able to
+  initialize
 - **What it does:** RE2's BitState decodes an instruction for each range a
   byte is tried against, and for a `+` the no-op that steps back, and tests
   and sets one visited bit for each list it enters. A class loop reads the

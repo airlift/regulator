@@ -474,9 +474,14 @@ final class Prog
     // lists for BitState.
     private short[] outputLists;
     // The lists BitState reads in one scan, BIT_STATE_CLASS_LOOP_FIELDS ints each, and their byte
-    // tables; see markBitStateClassLoops. Null when the program has none.
+    // tables; see markBitStateClassLoops. Null when the program has none, or gave them up.
     private int[] bitStateClassLoops;
     private byte[] bitStateClassLoopTables;
+    // Whether decideBitStateClassLoops has looked for the class loops.
+    private boolean bitStateClassLoopsSought;
+    // The program whose DFA allowance the class loops' memory is charged to, or null while it is
+    // charged to none.
+    private Prog bitStateClassLoopAllowance;
     // The list id of the start instruction, or -1 when the program cannot run BitState.
     private int startList;
     private int anchoredBitStateTextMaxSize;
@@ -1142,17 +1147,86 @@ final class Prog
         return bitStateClassLoops == null ? 0 : bitStateClassLoops.length / BIT_STATE_CLASS_LOOP_FIELDS;
     }
 
+    /// Returns the heap bytes the class loops and their tables take.
+    long bitStateClassLoopMemory()
+    {
+        return bitStateClassLoops == null ? 0 : SizeOf.sizeOf(bitStateClassLoops) + SizeOf.sizeOf(bitStateClassLoopTables);
+    }
+
+    /// Returns the class loops' bytes charged to a DFA allowance, this program's or that of the
+    /// program holding its forward DFA budget, which [Compiler#estimatedProgramMemory] counts
+    /// with this program, so the programs' charges and the allowance still add up to the budget.
+    long bitStateClassLoopCharge()
+    {
+        return bitStateClassLoopAllowance != null ? bitStateClassLoopMemory() : 0;
+    }
+
+    /// Looks for the program's class loops, once, and charges their memory to the DFA allowance
+    /// of `allowance`, this program or the one that holds its forward DFA budget. The loops only
+    /// save work, so they are decided after every other charge to that allowance, the
+    /// [prefix literal set][#decidePrefixLiteralSet(Prog)] included, and a budgeted allowance
+    /// keeps them only where the rest still leaves each forward DFA the memory it needs to
+    /// initialize. A budget then gives the same OnePass decision, routes, literal set, and DFAs
+    /// with the loops as without them, and a program whose loops do not fit steps through their
+    /// instructions as before. An unbudgeted program keeps its loops uncharged. Compilation
+    /// calls this before any search reads the program.
+    void decideBitStateClassLoops(Prog allowance)
+    {
+        if (outputLists == null || bitStateClassLoopAllowance != null) {
+            return;
+        }
+        if (!bitStateClassLoopsSought) {
+            bitStateClassLoopsSought = true;
+            markBitStateClassLoops(allowance.dfaMemoryBudgeted ? allowance.dfaMemory : Long.MAX_VALUE);
+        }
+        long memory = bitStateClassLoopMemory();
+        if (memory == 0 || !allowance.dfaMemoryBudgeted) {
+            return;
+        }
+        if (memory > allowance.dfaMemory ||
+                allowance.costsDfaInitialization(memory, Dfa.DfaInstance.Kind.FIRST_MATCH) ||
+                allowance.costsDfaInitialization(memory, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+            restoreClassLoopLists(outputLists);
+            bitStateClassLoops = null;
+            bitStateClassLoopTables = null;
+            return;
+        }
+        allowance.dfaMemory -= memory;
+        bitStateClassLoopAllowance = allowance;
+    }
+
+    /// Returns the class loops' charge to the allowance that holds it and leaves the loops
+    /// undecided until the next [#decideBitStateClassLoops(Prog)], so that a plan or route
+    /// reserved meanwhile does not judge the allowance with their bytes taken.
+    void deferBitStateClassLoops()
+    {
+        if (bitStateClassLoopAllowance != null) {
+            bitStateClassLoopAllowance.dfaMemory += bitStateClassLoopMemory();
+            bitStateClassLoopAllowance = null;
+        }
+    }
+
+    private boolean costsDfaInitialization(long reservation, Dfa.DfaInstance.Kind kind)
+    {
+        return !leavesDfaInitialization(reservation, kind) && leavesDfaInitialization(0, kind);
+    }
+
     /// Returns [#outputLists()] with each class loop's mark replaced by the loop's list id, so a
     /// search steps through the loop's instructions one at a time.
     short[] outputListsWithoutClassLoopsForTesting()
     {
         short[] lists = outputLists.clone();
+        restoreClassLoopLists(lists);
+        return lists;
+    }
+
+    private void restoreClassLoopLists(short[] lists)
+    {
         for (int id = 0; id < lists.length; id++) {
             if (lists[id] < NO_OUTPUT_LIST) {
                 lists[id] = (short) bitStateClassLoops[(BIT_STATE_CLASS_LOOP_MARK_BASE - lists[id]) * BIT_STATE_CLASS_LOOP_FIELDS + BIT_STATE_CLASS_LOOP_LIST];
             }
         }
-        return lists;
     }
 
     /// Returns the list id of the start instruction, or -1 when the program cannot run BitState.
@@ -4602,12 +4676,6 @@ final class Prog
             }
         }
 
-        bitStateClassLoops = null;
-        bitStateClassLoopTables = null;
-        if (outputLists != null) {
-            markBitStateClassLoops(flattenedInstructions, flattenedIndexesByRoot, outputLists);
-        }
-
         // Remap start_unanchored and start.
         int startRootId;
         if (startUnanchored() == 0) {
@@ -4684,8 +4752,13 @@ final class Prog
     /// so the table records which members push it. A range that would break either rule ends the
     /// loop and becomes the instruction the search goes on with. Each instruction that steps to
     /// a class loop then holds the loop's mark in `outputLists` in place of the list's id.
-    private void markBitStateClassLoops(InstList instructions, int[] flattenedIndexesByRoot, short[] outputLists)
+    /// [#decideBitStateClassLoops(Prog)] calls this once the flattened program is otherwise
+    /// complete, so a program that never decides, such as a reversed one, builds nothing. It
+    /// marks nothing once the loops and tables outgrow `memoryLimit`, since the caller would give
+    /// them up, so a program of many loops does not build tables it cannot keep.
+    private void markBitStateClassLoops(long memoryLimit)
     {
+        long[] instructions = words;
         int[] loopsByRoot = null;
         int[] loops = null;
         byte[] tables = null;
@@ -4693,9 +4766,15 @@ final class Prog
         int tableCount = 0;
         Map<ByteBuffer, Integer> tableOffsets = null;
         byte[] table = new byte[256];
-        for (int rootId = 1; rootId < listCount; rootId++) {
-            int head = flattenedIndexesByRoot[rootId];
-            long first = instructions.get(head);
+        // A flattened program lays its lists out in order of their ids, each beginning after an
+        // instruction marked last. List 0 is the fail instruction.
+        int rootId = 0;
+        for (int head = 1; head < instructionCount; head++) {
+            if (!instLast(instructions[head - 1])) {
+                continue;
+            }
+            rootId++;
+            long first = instructions[head];
             if (instOpcode(first) != InstOp.BYTE_RANGE) {
                 continue;
             }
@@ -4703,7 +4782,7 @@ final class Prog
             int throughList = -1;
             int throughPushed = 0;
             if (target != head) {
-                long through = instructions.get(target);
+                long through = instructions[target];
                 if (instOpcode(through) != InstOp.NOP || instOut(through) != head) {
                     continue;
                 }
@@ -4713,8 +4792,8 @@ final class Prog
 
             int rangeCount = 0;
             int pushed = 0;
-            for (int id = head; id < instructions.size(); id++) {
-                long word = instructions.get(id);
+            for (int id = head; id < instructionCount; id++) {
+                long word = instructions[id];
                 if (instOpcode(word) != InstOp.BYTE_RANGE || instOut(word) != target) {
                     break;
                 }
@@ -4765,7 +4844,7 @@ final class Prog
             int last = head + rangeCount - 1;
             int loop = loopCount * BIT_STATE_CLASS_LOOP_FIELDS;
             loops[loop + BIT_STATE_CLASS_LOOP_LIST] = rootId;
-            loops[loop + BIT_STATE_CLASS_LOOP_EXIT] = instLast(instructions.get(last)) ? 0 : last + 1;
+            loops[loop + BIT_STATE_CLASS_LOOP_EXIT] = instLast(instructions[last]) ? 0 : last + 1;
             loops[loop + BIT_STATE_CLASS_LOOP_PUSH] = pushed;
             loops[loop + BIT_STATE_CLASS_LOOP_TABLE] = tableOffset;
             loops[loop + BIT_STATE_CLASS_LOOP_THROUGH_LIST] = throughList;
@@ -4773,6 +4852,9 @@ final class Prog
             // Zero is a root with no loop.
             loopsByRoot[rootId] = loopCount + 1;
             loopCount++;
+            if ((long) loopCount * BIT_STATE_CLASS_LOOP_FIELDS * Integer.BYTES + 256L * tableCount > memoryLimit) {
+                return;
+            }
             Arrays.fill(table, (byte) 0);
         }
         if (loops == null) {

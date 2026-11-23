@@ -115,6 +115,96 @@ public class TestBitStateClassLoops
         }
     }
 
+    @Test
+    public void testUtf8ClassLeavesAndEntersTheLoopAgain()
+            throws ReflectiveOperationException
+    {
+        Random random = new Random(20261123);
+        for (String pattern : List.of("[a-z\u00E9]*x", "([a-z\u00E9]+)x", "(\\pL+) (\\pL+)")) {
+            Prog prog = compile(pattern, 0);
+            assertThat(prog.bitStateClassLoopCount()).as(pattern).isPositive();
+            // A two-byte member inside the run, a lead byte with nothing after it, and a run that
+            // crosses a bitmap word before its two-byte member.
+            assertSameSearch(prog, pattern, Slices.utf8Slice("a\u00E9ax"));
+            assertSameSearch(prog, pattern, Slices.wrappedBuffer(new byte[] {'a', (byte) 0xC3, 'x'}));
+            assertSameSearch(prog, pattern, Slices.utf8Slice("a".repeat(70) + "\u00E9x"));
+            assertSameSearch(prog, pattern, Slices.utf8Slice("\u00E9".repeat(40) + " " + "a\u00E9".repeat(40) + "x"));
+            for (int i = 0; i < 300; i++) {
+                StringBuilder text = new StringBuilder();
+                int length = random.nextInt(120);
+                for (int j = 0; j < length; j++) {
+                    String alphabet = "aab\u00E9\u00E9 x\u0416";
+                    text.append(alphabet.charAt(random.nextInt(alphabet.length())));
+                }
+                byte[] bytes = text.toString().getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > 0 && random.nextInt(3) == 0) {
+                    // Cut a character short or leave a stray continuation byte.
+                    bytes[random.nextInt(bytes.length)] = (byte) (random.nextBoolean() ? 0xC3 : 0xA9);
+                }
+                assertSameSearch(prog, pattern, Slices.wrappedBuffer(bytes));
+            }
+        }
+    }
+
+    @Test
+    public void testClassLoopsAreChargedToTheProgram()
+    {
+        Regexp regexp = RegexpParser.parse(Slices.utf8Slice("(\\w+) (\\d+)"), Regexp.LIKE_PERL | Regexp.LATIN1).regexp();
+        long maxMemory = 1 << 20;
+        Prog prog = Compiler.compile(regexp, false, maxMemory);
+
+        assertThat(prog.bitStateClassLoopCount()).isEqualTo(2);
+        assertThat(prog.bitStateClassLoopMemory()).isPositive();
+        assertThat(Compiler.estimatedProgramMemory(prog))
+                .isEqualTo(Compiler.flattenedProgramMemory(prog.size()) + prog.onePassMemory() + prog.prefixScanMemory() + prog.bitStateClassLoopMemory());
+        assertThat(Compiler.estimatedProgramMemory(prog) + prog.dfaMemory()).isEqualTo(maxMemory);
+
+        // An unbudgeted program keeps its loops and charges nothing, and a reversed program,
+        // which BitState never searches, looks for none.
+        assertThat(Compiler.compile(regexp, false, 0).bitStateClassLoopCount()).isEqualTo(2);
+        assertThat(Compiler.compile(regexp, true, maxMemory).bitStateClassLoopCount()).isZero();
+    }
+
+    @Test
+    public void testClassLoopsYieldToTheBudget()
+    {
+        Regexp regexp = RegexpParser.parse(Slices.utf8Slice("(\\w+) (\\d+)"), Regexp.LIKE_PERL | Regexp.LATIN1).regexp();
+        Prog unbudgeted = Compiler.compile(regexp, false, 0);
+        long flattenCharge = Compiler.flattenedProgramMemory(unbudgeted.size());
+
+        int kept = 0;
+        int dropped = 0;
+        for (long maxMemory = flattenCharge; maxMemory < flattenCharge + (64 << 10); maxMemory += 64) {
+            Prog prog;
+            try {
+                prog = Compiler.compile(regexp, false, maxMemory);
+            }
+            catch (RegexpCompileMemoryLimitException e) {
+                // Too small for the program itself. The loops never cause this: they are
+                // decided last, against what the rest left.
+                continue;
+            }
+            assertThat(Compiler.estimatedProgramMemory(prog)).as("budget %s", maxMemory).isLessThanOrEqualTo(maxMemory);
+            long classLoopMemory = prog.bitStateClassLoopMemory();
+            if (classLoopMemory == 0) {
+                assertThat(prog.bitStateClassLoopCount()).isZero();
+                assertThat(BitState.search(prog, Slices.utf8Slice("abc 123"), false, Prog.MatchKind.FIRST_MATCH, new int[6])).isTrue();
+                dropped++;
+                continue;
+            }
+            kept++;
+            for (Dfa.DfaInstance.Kind kind : new Dfa.DfaInstance.Kind[] {Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH}) {
+                // A negative reservation gives the loops' bytes back: a DFA that would
+                // initialize without the loops initializes with them.
+                assertThat(prog.leavesDfaInitialization(0, kind))
+                        .as("budget %s kind %s", maxMemory, kind)
+                        .isEqualTo(prog.leavesDfaInitialization(-classLoopMemory, kind));
+            }
+        }
+        assertThat(kept).isPositive();
+        assertThat(dropped).isPositive();
+    }
+
     private static void assertSameSearch(Prog prog, String pattern, Slice text)
             throws ReflectiveOperationException
     {

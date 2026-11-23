@@ -5484,9 +5484,19 @@ run of one job.
 
 Lazy repeats, whose list tries what follows first, and ranges that reach the
 list through a capture are not class loops. A UTF-8 class loops on its one-byte
-members and leaves for the ordinary steps at any other byte. The tables are
-shared between loops of one class and counted in the program's retained size:
-24 bytes a loop and 256 bytes a distinct class.
+members and leaves for the ordinary steps at any other byte.
+
+The loops take 24 bytes each and 256 bytes for each distinct class, whose table
+loops of one class share. They only save work, so a budgeted program decides
+them last, after its OnePass tables, plans, routes, and prefix literal set, and
+charges them to the DFA allowance of the program that holds its forward DFA
+budget. It keeps them only where the rest still leaves each forward DFA the
+memory it needs to initialize, so a budget gives the same engines and routes
+with the loops as without them, and a program that gives them up steps through
+their instructions as upstream does. A route reserved after that decision
+hands the charge back first and decides the loops again. The search for loops
+runs at that decision, not while flattening, so a reversed program, which
+BitState never searches, builds none.
 
 Its measurements are pending.
 

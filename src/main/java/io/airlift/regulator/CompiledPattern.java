@@ -1508,6 +1508,10 @@ abstract sealed class CompiledPattern
         // so no plan or route above judges its memory with their bytes taken.
         forwardBudgetProgram.decidePrefixLiteralSet(forwardBudgetProgram);
         partialProg.decidePrefixLiteralSet(forwardBudgetProgram);
+        // BitState's class loops come after them, so the sets are decided as they would be
+        // without the loops.
+        forwardBudgetProgram.decideBitStateClassLoops(forwardBudgetProgram);
+        partialProg.decideBitStateClassLoops(forwardBudgetProgram);
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
         boolean literalKernelFind = false;
@@ -2355,11 +2359,13 @@ abstract sealed class CompiledPattern
         // reserved from partialProg. Its prefix literal set hands its charge back too, and is
         // decided again last, as in selectRoutes; deciding it on the same allowance after a
         // refused route changes nothing.
+        partialProg.deferBitStateClassLoops();
         partialProg.deferPrefixLiteralSet();
         long released = requiredBytes == null ? 0 : requiredBytes.estimatedRetainedSize();
         long dfaMemory = partialProg.dfaMemory() + released;
         if (retainedSize > dfaMemory) {
             partialProg.decidePrefixLiteralSet(partialProg);
+            partialProg.decideBitStateClassLoops(partialProg);
             return false;
         }
         partialProg.setDfaMemory(dfaMemory - retainedSize);
@@ -2367,6 +2373,7 @@ abstract sealed class CompiledPattern
             requiredBytes = reserveRequiredBytes(partialProg, requiredBytes);
         }
         partialProg.decidePrefixLiteralSet(partialProg);
+        partialProg.decideBitStateClassLoops(partialProg);
         return true;
     }
 
