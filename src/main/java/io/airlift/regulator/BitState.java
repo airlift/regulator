@@ -197,6 +197,36 @@ final class BitState
             Workspace workspace)
     {
         requireNonNull(prog, "prog is null");
+        return search(prog, prog.outputLists(), context, start, end, anchored, matchKind, submatch, workspace);
+    }
+
+    /// Searches without the program's class loops, stepping through each loop's instructions as
+    /// upstream does, so a test can compare the two.
+    static boolean searchWithoutClassLoopsForTesting(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] submatch,
+            Workspace workspace)
+    {
+        requireNonNull(prog, "prog is null");
+        return search(prog, prog.canBitState() ? prog.outputListsWithoutClassLoopsForTesting() : null, context, start, end, anchored, matchKind, submatch, workspace);
+    }
+
+    private static boolean search(
+            Prog prog,
+            short[] outputLists,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] submatch,
+            Workspace workspace)
+    {
         requireNonNull(context, "context is null");
         requireNonNull(matchKind, "matchKind is null");
 
@@ -239,6 +269,7 @@ final class BitState
 
         BitStateImpl b = new BitStateImpl(
                 prog,
+                outputLists,
                 context,
                 textBegin,
                 textEnd,
@@ -340,6 +371,9 @@ final class BitState
         private final int textEnd;
 
         private final short[] outputLists;
+        // The program's class loops and their byte tables; see Prog.markBitStateClassLoops.
+        private final int[] classLoops;
+        private final byte[] classLoopTables;
         // The list of prog.start(), where every attempt begins.
         private final int startList;
         private final long[] visited;
@@ -351,6 +385,7 @@ final class BitState
 
         private BitStateImpl(
                 Prog prog,
+                short[] outputLists,
                 Slice context,
                 int textBegin,
                 int textEnd,
@@ -374,7 +409,9 @@ final class BitState
             this.textBegin = textBegin;
             this.textEnd = textEnd;
 
-            this.outputLists = requireNonNull(prog.outputLists(), "prog.outputLists() is null");
+            this.outputLists = requireNonNull(outputLists, "outputLists is null");
+            this.classLoops = prog.bitStateClassLoops();
+            this.classLoopTables = prog.bitStateClassLoopTables();
             this.startList = prog.startList();
 
             int visitedBitCount = prog.listCount() * ((textEnd - textBegin) + 1);
@@ -560,10 +597,17 @@ final class BitState
                                 push(id + hint, position);
                             }
                             int outputList = outputLists[id];
-                            id = output;
                             position++;
-                            if (!checkAndLoop(textLen, id, outputList, position)) {
-                                id = 0;
+                            if (outputList < Prog.NO_OUTPUT_LIST) {
+                                long left = runClassLoop(Prog.BIT_STATE_CLASS_LOOP_MARK_BASE - outputList, position, textLen);
+                                id = (int) (left >>> 32);
+                                position = (int) left;
+                            }
+                            else {
+                                id = output;
+                                if (!checkAndLoop(textLen, id, outputList, position)) {
+                                    id = 0;
+                                }
                             }
                         }
                         case OP_CAPTURE -> {
@@ -575,9 +619,16 @@ final class BitState
                                 cap[payload] = position;
                             }
                             int outputList = outputLists[id];
-                            id = output;
-                            if (!checkAndLoop(textLen, id, outputList, position)) {
-                                id = 0;
+                            if (outputList < Prog.NO_OUTPUT_LIST) {
+                                long left = runClassLoop(Prog.BIT_STATE_CLASS_LOOP_MARK_BASE - outputList, position, textLen);
+                                id = (int) (left >>> 32);
+                                position = (int) left;
+                            }
+                            else {
+                                id = output;
+                                if (!checkAndLoop(textLen, id, outputList, position)) {
+                                    id = 0;
+                                }
                             }
                         }
                         case OP_EMPTY_WIDTH -> {
@@ -590,9 +641,16 @@ final class BitState
                                 push(id + 1, position);
                             }
                             int outputList = outputLists[id];
-                            id = output;
-                            if (!checkAndLoop(textLen, id, outputList, position)) {
-                                id = 0;
+                            if (outputList < Prog.NO_OUTPUT_LIST) {
+                                long left = runClassLoop(Prog.BIT_STATE_CLASS_LOOP_MARK_BASE - outputList, position, textLen);
+                                id = (int) (left >>> 32);
+                                position = (int) left;
+                            }
+                            else {
+                                id = output;
+                                if (!checkAndLoop(textLen, id, outputList, position)) {
+                                    id = 0;
+                                }
                             }
                         }
                         case OP_NOP -> {
@@ -600,9 +658,16 @@ final class BitState
                                 push(id + 1, position);
                             }
                             int outputList = outputLists[id];
-                            id = output;
-                            if (!checkAndLoop(textLen, id, outputList, position)) {
-                                id = 0;
+                            if (outputList < Prog.NO_OUTPUT_LIST) {
+                                long left = runClassLoop(Prog.BIT_STATE_CLASS_LOOP_MARK_BASE - outputList, position, textLen);
+                                id = (int) (left >>> 32);
+                                position = (int) left;
+                            }
+                            else {
+                                id = output;
+                                if (!checkAndLoop(textLen, id, outputList, position)) {
+                                    id = 0;
+                                }
                             }
                         }
                         case OP_MATCH -> {
@@ -658,6 +723,106 @@ final class BitState
             }
 
             return matched;
+        }
+
+        /// Enters class loop `loop` at `position` and reads the run of its members there. Returns
+        /// the instruction the search goes on with in the high half and its position in the low
+        /// half, or 0, the instruction that ends a job, when the search already entered one of
+        /// the loop's lists at a position the run reaches.
+        ///
+        /// This does what the loop's instructions do one byte at a time: enter the list at a
+        /// position, which marks it visited, and take a member byte through its range, pushing
+        /// the range's hint first. A `*` then enters the list at the next position. A `+` first
+        /// enters the list between, at the next position, and pushes the instruction after that
+        /// list's no-op. A list's visited bits are consecutive, so each pass handles the
+        /// positions left in one bitmap word of each list: it reads members only as far as the
+        /// unvisited positions go, so a run another entry already read is not read again, and
+        /// marks them with one store.
+        private long runClassLoop(int loop, int position, int textLen)
+        {
+            int[] classLoops = this.classLoops;
+            byte[] tables = classLoopTables;
+            byte[] bytes = this.bytes;
+            long[] visited = this.visited;
+            int fields = loop * Prog.BIT_STATE_CLASS_LOOP_FIELDS;
+            int table = classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_TABLE];
+            int pushed = classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_PUSH];
+            int through = classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_THROUGH_LIST];
+            int throughPushed = classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_THROUGH_PUSH];
+            // A list's visited index at a position is its base plus the position.
+            int listBase = classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_LIST] * (textLen + 1) - textBegin;
+            int throughBase = through * (textLen + 1) - textBegin;
+            while (true) {
+                int unvisited = unvisitedRun(visited, listBase + position);
+                if (unvisited == 0) {
+                    return 0;
+                }
+                byte kind = position < textEnd ? tables[table + (bytes[position] & 0xFF)] : 0;
+                if (kind == 0) {
+                    markVisited(visited, listBase + position, 1);
+                    return ((long) classLoops[fields + Prog.BIT_STATE_CLASS_LOOP_EXIT] << 32) | position;
+                }
+
+                int limit = Math.min(unvisited, textEnd - position);
+                if (through >= 0) {
+                    int throughUnvisited = unvisitedRun(visited, throughBase + position + 1);
+                    if (throughUnvisited == 0) {
+                        markVisited(visited, listBase + position, 1);
+                        if (kind == Prog.BIT_STATE_CLASS_LOOP_PUSHING_MEMBER) {
+                            push(pushed, position);
+                        }
+                        return 0;
+                    }
+                    limit = Math.min(limit, throughUnvisited);
+                }
+
+                int members = 1;
+                if (pushed == 0) {
+                    while (members < limit && tables[table + (bytes[position + members] & 0xFF)] != 0) {
+                        members++;
+                    }
+                    if (throughPushed != 0) {
+                        // One push for each member, at the position after it. Nothing comes
+                        // between them, so they are one run of the job the first belongs to.
+                        push(throughPushed, position + 1);
+                        jobs[jobCount - 1].runLength += members - 1;
+                    }
+                }
+                else {
+                    members = 0;
+                    do {
+                        if (kind == Prog.BIT_STATE_CLASS_LOOP_PUSHING_MEMBER) {
+                            push(pushed, position + members);
+                        }
+                        if (throughPushed != 0) {
+                            push(throughPushed, position + members + 1);
+                        }
+                        members++;
+                    }
+                    while (members < limit && (kind = tables[table + (bytes[position + members] & 0xFF)]) != 0);
+                }
+
+                markVisited(visited, listBase + position, members);
+                if (through >= 0) {
+                    markVisited(visited, throughBase + position + 1, members);
+                }
+                position += members;
+            }
+        }
+
+        /// Returns how many positions from visited index `index`, up to the end of its bitmap
+        /// word, are unvisited.
+        private static int unvisitedRun(long[] visited, int index)
+        {
+            // The shift brings in zeros, which read as visited, so the count stops at the word's
+            // end.
+            return Long.numberOfTrailingZeros(~(~visited[index / VISITED_BITS] >>> (index & (VISITED_BITS - 1))));
+        }
+
+        /// Marks `count` positions from visited index `index`, all in one bitmap word.
+        private static void markVisited(long[] visited, int index, int count)
+        {
+            visited[index / VISITED_BITS] |= (-1L >>> (VISITED_BITS - count)) << (index & (VISITED_BITS - 1));
         }
 
         private int nextInList(boolean last, int id)

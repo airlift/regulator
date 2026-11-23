@@ -191,7 +191,7 @@ final class Compiler
 
     static long estimatedProgramMemory(Prog program)
     {
-        return flattenedProgramMemory(program.size()) + program.onePassMemory() + program.prefixScanMemory();
+        return flattenedProgramMemory(program.size()) + program.onePassMemory() + program.prefixScanMemory() + program.bitStateClassLoopCharge();
     }
 
     /// Returns the least budget whose instruction limit holds `instructionCount` instructions
@@ -371,6 +371,8 @@ final class Compiler
             program.prepareOnePass();
             if (!defersPrefixLiteralSet) {
                 program.decidePrefixLiteralSet(program);
+                // BitState's class loops come after it, last of all.
+                program.decideBitStateClassLoops(program);
             }
         }
         return program;

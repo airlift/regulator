@@ -278,6 +278,11 @@ Within the budget, compilation and matching keep these limits:
   256 Kibit, so a longer span is captured in one pass; unanchored searches
   keep RE2's bitmap. Compilation lowers BitState's text limit until its
   bitmap, slots, job stack, and objects fit the forward program's share.
+  The tables of its
+  [class loops](../../REGULATOR_DECISIONS.md#bitstate-class-loops), 24 bytes a
+  loop and 256 bytes a distinct class, are charged to the forward DFA budget
+  after every other charge, and are not kept when they do not fit or would
+  stop the first-match or longest-match DFA from initializing.
 - The bit-parallel position automaton admits a program of at most 512 byte
   positions whose fan-in groups, each testing every word of state, make at
   most 32 word tests a byte. The window around the earliest match end that it

@@ -1613,7 +1613,8 @@ A group-zero or boolean search whose forward DFA fails runs the
 [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats)
 where the NFA would step the whole text, when the pattern meets the
 automaton's gates (bounded matches and at most 512 positions, among others). These entries cover what Regulator
-changed or added in OnePass and in that fallback. BitState's
+changed or added in OnePass, in BitState's class runs, and in that fallback.
+BitState's
 bitmap, text limit, and eligibility, and the NFA's bounded capture passes, are
 in [Limits and defaults](REGULATOR_API.md#limits-and-defaults), and the
 capture work skipped for boolean and group-zero calls is in
@@ -1674,6 +1675,35 @@ capture work skipped for boolean and group-zero calls is in
   OnePass too. Java and Trino Unicode character data line searches run in
   0.61 to 0.76 of their earlier time on Graviton and 0.31 to 0.36 on Intel
   ([#128]).
+
+### BitState class loops
+
+- **Origin:** Adapted from SafeRE, whose BitState runs a greedy loop of one
+  character class without dispatching its instructions again for each
+  character ([BitState.java][safere-bitstate] `runGreedyLoop`); First
+  described by the JDK, whose greedy class repeat scans a run of members
+  directly ([Pattern.java][jdk-pattern] `CharPropertyGreedy`). Regulator: the
+  loop as a list of the flattened program with a byte table, the two-list
+  form of `+`, and marking a run's visited bits a bitmap word at a time
+  ([design][d-bitstate-loops]); base RE2 [O-BIT-001], [O-BIT-004].
+- **Where:** `Prog.markBitStateClassLoops`, `Prog.decideBitStateClassLoops`,
+  `BitState.BitStateImpl.runClassLoop`
+- **Applies when:** A BitState search enters a list that begins with byte
+  ranges leading back to it: the list of a greedy `*` or `+` of a byte class,
+  or of the one-byte members of a UTF-8 class. The ranges must share no byte,
+  and those with a hint must name one instruction; a range that breaks either
+  rule, and every multi-byte member, leaves the loop for the ordinary steps.
+  A budgeted program keeps its loops only where their tables fit the DFA
+  allowance after every other charge and leave each forward DFA able to
+  initialize
+- **What it does:** RE2's BitState decodes an instruction for each range a
+  byte is tried against, and for a `+` the no-op that steps back, and tests
+  and sets one visited bit for each list it enters. A class loop reads the
+  run's bytes from a 256-entry table instead, and, since a list's visited bits
+  are consecutive, tests and sets them a bitmap word at a time. It reads
+  members only as far as the unvisited positions go, so it enters the same
+  lists at the same positions and pushes the same jobs as the instructions
+  would. Its time is pending measurement.
 
 ### Bit-parallel position automaton for bounded repeats
 
@@ -2855,6 +2885,7 @@ change is described.
 [d-own-matches]: ../../REGULATOR_DECISIONS.md#many-match-states-hold-their-own-matches
 [d-paired]: ../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions
 [d-position-nfa]: ../../REGULATOR_DECISIONS.md#bit-parallel-position-automaton-after-dfa-failure
+[d-bitstate-loops]: ../../REGULATOR_DECISIONS.md#bitstate-class-loops
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
 [d-required-absence]: ../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
@@ -3016,6 +3047,7 @@ change is described.
 [jdk-arraylist]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/ArrayList.java
 [jdk-cowal]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/java.base/share/classes/java/util/concurrent/CopyOnWriteArrayList.java
 [jdk-pattern]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/regex/Pattern.java
+[safere-bitstate]: https://github.com/safere/safere/blob/5d2149bd263139e8cec1dde2892b4216bf86c0f7/safere/src/main/java/org/safere/BitState.java
 [jdk8-pattern]: https://github.com/openjdk/jdk8u/blob/jdk8u442-b06/jdk/src/share/classes/java/util/regex/Pattern.java
 [jitrex-machine]: https://github.com/humio/jitrex/blob/0.1.15/src/main/java/com/humio/jitrex/jvm/RJavaClassMachine.java
 [joni-dist-search]: https://github.com/jruby/joni/blob/joni-2.2.1/src/org/joni/Matcher.java#L445-L458

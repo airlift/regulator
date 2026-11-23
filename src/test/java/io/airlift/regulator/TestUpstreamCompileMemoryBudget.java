@@ -149,13 +149,15 @@ public class TestUpstreamCompileMemoryBudget
 
         // A program over upstream's 512 instructions keeps output list ids for BitState, where
         // upstream gives it no list heads, and the flatten charge counts them as it does for every
-        // program.
+        // program. Its class loops, the one-byte members of its letter runs and its digits, are
+        // charged beside the flatten charge.
         int largeMaxMemory = 1 << 20;
         Prog large = Compiler.compile(parse("(\\pL+)(\\pL*) ([0-9]+)"), false, largeMaxMemory);
         assertThat(large.size()).isGreaterThan(512);
         assertThat(large.canBitState()).isTrue();
         assertThat(large.isOnePass()).isFalse();
-        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - Compiler.PROGRAM_OVERHEAD_BYTES - ((long) large.size() * Compiler.FLATTENED_INSTRUCTION_BYTES));
+        assertThat(large.bitStateClassLoopCharge()).isPositive();
+        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - Compiler.PROGRAM_OVERHEAD_BYTES - ((long) large.size() * Compiler.FLATTENED_INSTRUCTION_BYTES) - large.bitStateClassLoopCharge());
     }
 
     @Test
